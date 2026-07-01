@@ -30,6 +30,88 @@ Collector（搜集）  →  Worker（1:1 真实挖洞）  →  Reviewer（AI 初
 
 ---
 
+## 各平台环境准备
+
+AutoHunter 全程基于 **Docker + Docker Compose v2** 运行，任意装得上 Docker 的系统都能跑。下面按平台给出准备步骤，装好 Docker 后统一走 [一键部署](#一键部署推荐) 或 [手动部署](#手动部署)。
+
+<details open>
+<summary><b>🐧 Linux 服务器（推荐，Ubuntu / Debian / CentOS）</b></summary>
+
+生产环境首选。2C4G 起步，磁盘 ≥ 20G。
+
+```bash
+# 1. 安装 Docker（官方一键脚本，适配主流发行版）
+curl -fsSL https://get.docker.com | sh
+sudo systemctl enable --now docker
+
+# 2. 把当前用户加入 docker 组（免 sudo，重登生效）
+sudo usermod -aG docker $USER && newgrp docker
+
+# 3. 验证
+docker version && docker compose version
+
+# 4. 拉代码 + 部署
+git clone https://github.com/StanleyNull/AutoHunter.git autohunter && cd autohunter
+bash scripts/install.sh
+```
+
+**开放端口**（默认 18800）：
+
+```bash
+# Ubuntu/Debian(ufw)
+sudo ufw allow 18800/tcp
+# CentOS/RHEL(firewalld)
+sudo firewall-cmd --permanent --add-port=18800/tcp && sudo firewall-cmd --reload
+```
+
+> 云服务器还需在厂商**安全组**里放行 18800（或你自定义的 `AUTOHUNTER_HOST_PORT`）。
+
+**SSH 断开后仍要运行**：容器由 Docker 守护，`docker compose up -d` 已是后台运行，关掉 SSH 不影响。可选设开机自启见下方 [服务器长期运行](#服务器长期运行--开机自启)。
+
+</details>
+
+<details>
+<summary><b>🪟 Windows（Docker Desktop + WSL2）</b></summary>
+
+适合本地跑 / 自用。Windows 10/11 均可。
+
+1. **装 WSL2**（管理员 PowerShell）：
+   ```powershell
+   wsl --install
+   ```
+   装完重启。
+
+2. **装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)**：安装时勾选 “Use WSL 2 based engine”，启动后在 Settings → Resources → WSL Integration 打开集成。
+
+3. **拉代码 + 部署**（在 PowerShell 或 WSL 终端里）：
+   ```powershell
+   git clone https://github.com/StanleyNull/AutoHunter.git autohunter
+   cd autohunter
+   bash scripts/install.sh
+   ```
+   > `install.sh` 是 bash 脚本，在 **WSL / Git Bash** 里跑最顺。若只用 PowerShell，也可走 [手动部署](#手动部署)：`copy .env.example .env`，编辑后 `docker compose up -d --build`。
+
+4. 浏览器访问 `http://localhost:18800/`。
+
+> 💡 Windows 下代码放在 **WSL 文件系统内**（如 `~/autohunter`）比放在 `C:\` 挂载盘性能好很多。
+
+</details>
+
+<details>
+<summary><b>🍎 macOS（Docker Desktop）</b></summary>
+
+1. 装 [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/)（Apple Silicon / Intel 均支持），启动它。
+2. 部署：
+   ```bash
+   git clone https://github.com/StanleyNull/AutoHunter.git autohunter && cd autohunter
+   bash scripts/install.sh
+   ```
+3. 访问 `http://localhost:18800/`。
+
+</details>
+
+---
+
 ## 一键部署（推荐）
 
 > 前置：一台 Linux 服务器（2C4G 起步，磁盘 ≥ 20G），已装 [Docker](https://docs.docker.com/engine/install/) + Docker Compose v2。
@@ -89,6 +171,45 @@ docker compose up -d --build           # 更新代码后重建
 ```
 
 数据持久化在 Docker volume：`ah_data`（SQLite 数据库 + 漏洞证据）、`ah_work`（Worker 临时工作区）。**升级/重启不丢数据。**
+
+---
+
+## 服务器长期运行 / 开机自启
+
+`docker compose up -d` 启动的容器默认已配置 `restart: unless-stopped`——**容器崩溃或服务器重启后会自动拉起**，一般无需额外操作。
+
+若想让整套服务随系统开机、并托管给 systemd 管理，可加一个 unit：
+
+```bash
+sudo tee /etc/systemd/system/autohunter.service >/dev/null <<EOF
+[Unit]
+Description=AutoHunter
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$(pwd)          # 指向 autohunter 目录
+ExecStart=/usr/bin/docker compose up -d --build
+ExecStop=/usr/bin/docker compose down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now autohunter
+sudo systemctl status autohunter
+```
+
+**（可选）反向代理 + HTTPS**：生产环境建议前面挂一层 Nginx/Caddy，做域名 + TLS，再把 `AUTOHUNTER_HOST_PORT` 只绑到 `127.0.0.1` 不对公网直接暴露。Caddy 示例（自动签发证书）：
+
+```caddyfile
+hunt.example.com {
+    reverse_proxy 127.0.0.1:18800
+}
+```
 
 ---
 
