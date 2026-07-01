@@ -167,14 +167,6 @@ docker compose logs -f autohunter   # 看启动日志
 body="管理" && org="China Education and Research Network Center"
 ```
 
-再比如按域名/证书/标题收窄归属：
-
-```text
-title="统一身份认证" && domain=".edu.cn"
-cert.subject.org="某某大学" && country="CN"
-domain="example.com" || cert="示例集团" || org="示例集团"
-```
-
 **② 不会写语法，只想说要找什么** → 搜集方式选 `自然语言意图`，用大白话描述，搜集 Agent 会自动翻译成 FOFA 语法并逐轮演化。例如：
 
 ```text
