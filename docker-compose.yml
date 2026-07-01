@@ -1,0 +1,27 @@
+# ============================================================================
+#  AutoHunter  ——  AI 自主漏洞挖掘平台
+#  Powered By StanleyNull  QQ:754276250
+#  一键启动：  cp .env.example .env  &&  编辑 .env 填 LLM_API_KEY  &&  docker compose up -d --build
+#  或直接运行引导脚本：  bash scripts/install.sh
+# ============================================================================
+services:
+  autohunter:
+    build: .
+    image: autohunter:latest
+    container_name: autohunter
+    ports:
+      # 宿主机端口:容器端口。改宿主机端口：在 .env 里设 AUTOHUNTER_HOST_PORT
+      - "${AUTOHUNTER_HOST_PORT:-18800}:18800"
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/autohunter.db
+      - WORKER_WORK_ROOT=/work
+    volumes:
+      - ah_data:/app/data        # SQLite + 证据持久化（重启恢复依赖，勿删）
+      - ah_work:/work            # worker 临时工作区
+    restart: unless-stopped      # 崩溃自动重启，从 DB 恢复任务状态
+
+volumes:
+  ah_data:
+  ah_work:
