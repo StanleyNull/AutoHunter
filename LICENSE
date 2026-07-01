@@ -1,0 +1,42 @@
+AutoHunter — AI 自主漏洞挖掘平台
+Copyright (c) 2026 StanleyNull ()
+
+本项目采用「知识共享 署名-非商业性使用 4.0 国际 (CC BY-NC 4.0)」许可协议授权。
+This work is licensed under the Creative Commons
+Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0).
+
+------------------------------------------------------------------------------
+你可以自由地（You are free to）：
+  - 共享 (Share)  —— 在任何媒介以任何形式复制、发行本作品。
+  - 演绎 (Adapt)  —— 修改、转换或以本作品为基础进行二次创作。
+  只要你遵守许可协议条款，许可人就无法收回你的这些权利。
+
+惟须遵守下列条件（Under the following terms）：
+  - 署名 (Attribution) —— 你必须给出适当的署名，保留原作者
+    「StanleyNull ()」标识，提供指向本许可协议的链接，
+    并标明是否（对原作品）作了修改。你可以用任何合理的方式来署名，
+    但不得以任何方式暗示许可人为你或你的使用背书。
+
+  - 非商业性使用 (NonCommercial) —— 你不得将本作品用于商业目的。
+    禁止任何形式的商业销售、商业服务、付费分发或以营利为目的的使用。
+
+  - 没有附加限制 (No additional restrictions) —— 你不得使用法律术语或
+    技术措施从法律上限制他人做许可协议允许的事情。
+------------------------------------------------------------------------------
+
+许可协议全文：
+Full legal text of CC BY-NC 4.0:
+  https://creativecommons.org/licenses/by-nc/4.0/legalcode
+中文版本 / Chinese version:
+  https://creativecommons.org/licenses/by-nc/4.0/deed.zh
+
+------------------------------------------------------------------------------
+免责声明 (Disclaimer)
+------------------------------------------------------------------------------
+本软件仅供【已获得明确书面授权】的安全测试、漏洞研究与教学用途。
+使用者须自行确保所有测试目标均在授权范围内，并遵守所在地区的法律法规。
+因未授权使用、滥用或任何违法行为所导致的一切后果，均由使用者自行承担，
+原作者不承担任何责任。
+
+本软件按「现状」提供，不附带任何明示或暗示的担保。
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
