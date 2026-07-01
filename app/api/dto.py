@@ -15,6 +15,7 @@ class ModelConfigDTO(BaseModel):
 
 class FofaConfigDTO(BaseModel):
     key: str = ""               # 留空则用服务端 .env 默认
+    base_url: str = ""          # 自定义 FOFA API 端点；留空则用服务端 .env 默认(官方 https://fofa.info)
     max_pages: int = 20
     page_size: int = 100
     intent_mode: str = ""       # syntax=用户给的是FOFA语法 / intent=自然语言意图(LLM翻译) / 空=自动判断
@@ -42,6 +43,7 @@ class PartialModelConfigDTO(BaseModel):
 
 class PartialFofaConfigDTO(BaseModel):
     key: Optional[str] = None
+    base_url: Optional[str] = None
     max_pages: Optional[int] = None
     page_size: Optional[int] = None
     intent_mode: Optional[str] = None
@@ -108,6 +110,7 @@ class LLMSettingsDTO(BaseModel):
 
 class FofaSettingsDTO(BaseModel):
     key: Optional[str] = None
+    base_url: Optional[str] = None
     max_pages: Optional[int] = None
     page_size: Optional[int] = None
     default_intent_mode: Optional[str] = None

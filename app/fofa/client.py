@@ -18,17 +18,22 @@ def _qbase64(query: str) -> str:
 
 
 async def search(key: str, query: str, page: int = 1, size: int = 100,
-                 fields: str = "host,ip,port,title,domain,org") -> dict[str, Any]:
-    """调用 FOFA search/all，返回 {results: [...], size, page}。"""
+                 fields: str = "host,ip,port,title,domain,org",
+                 base_url: str | None = None) -> dict[str, Any]:
+    """调用 FOFA search/all，返回 {results: [...], size, page}。
+
+    base_url 留空则用官方 https://fofa.info；可传入私有部署/镜像/代理网关地址。
+    """
     if not key:
         raise FofaError("缺少 FOFA key")
+    base = (base_url or BASE).rstrip("/")
     params = {
         "key": key, "qbase64": _qbase64(query),
         "fields": fields, "page": str(page), "size": str(size), "full": "false",
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(f"{BASE}/api/v1/search/all", params=params)
+            resp = await client.get(f"{base}/api/v1/search/all", params=params)
             try:
                 data = resp.json()
             except Exception:

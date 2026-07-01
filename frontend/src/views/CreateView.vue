@@ -15,12 +15,13 @@ const form = reactive({
   manual_targets: "",
   src_rules: "",
   base_url: "", api_key: "", model: "", prompt_version: "legacy",
-  fofa_key: "", max_pages: 20, concurrency: 3,
+  fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3,
 });
 const inherited = reactive({
   base_url: "",
   model: "",
   prompt_version: "legacy",
+  fofa_base_url: "",
   max_pages: 20,
   intent_mode: "",
   concurrency: 3,
@@ -37,6 +38,7 @@ async function submit() {
   const maxPages = parseInt(form.max_pages) || 20;
   const fofaConfig = {};
   if (form.fofa_key.trim()) fofaConfig.key = form.fofa_key.trim();
+  if (form.fofa_base_url && form.fofa_base_url !== inherited.fofa_base_url) fofaConfig.base_url = form.fofa_base_url;
   if (maxPages !== inherited.max_pages) fofaConfig.max_pages = maxPages;
   if (form.intent_mode !== inherited.intent_mode) fofaConfig.intent_mode = form.intent_mode;
 
@@ -64,10 +66,12 @@ onMounted(async () => {
     form.prompt_version = s.defaults?.worker_prompt_version || form.prompt_version;
     form.max_pages = s.fofa?.max_pages ?? form.max_pages;
     if (!form.intent_mode) form.intent_mode = s.fofa?.default_intent_mode || "";
+    if (!form.fofa_base_url) form.fofa_base_url = s.fofa?.base_url || "";
     form.concurrency = s.defaults?.concurrency ?? form.concurrency;
     inherited.base_url = form.base_url;
     inherited.model = form.model;
     inherited.prompt_version = form.prompt_version;
+    inherited.fofa_base_url = form.fofa_base_url;
     inherited.max_pages = Number(form.max_pages);
     inherited.intent_mode = form.intent_mode;
     inherited.concurrency = Number(form.concurrency);
@@ -131,6 +135,7 @@ onMounted(async () => {
           </select>
         </label>
         <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" /></label>
+        <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
         <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" /></label>
         <label>worker 并发 <input v-model="form.concurrency" type="number" /></label>
       </details>

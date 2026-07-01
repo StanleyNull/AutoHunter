@@ -38,6 +38,7 @@ def _env_llm() -> dict[str, Any]:
 def _env_fofa() -> dict[str, Any]:
     return {
         "key": os.environ.get("FOFA_KEY", ""),
+        "base_url": os.environ.get("FOFA_BASE_URL", "https://fofa.info"),
         "max_pages": 20,
         "page_size": 100,
         "default_intent_mode": "",
@@ -86,11 +87,18 @@ def resolve_fofa_key(task: Task | None = None) -> str:
     return str(cfg.get("key") or eff.get("key") or "")
 
 
+def resolve_fofa_base_url(task: Task | None = None) -> str:
+    eff = effective_settings()["fofa"]
+    cfg = (task.fofa_config or {}) if task else {}
+    return str(cfg.get("base_url") or eff.get("base_url") or "https://fofa.info").rstrip("/")
+
+
 def resolve_fofa_defaults(task: Task | None = None) -> dict[str, Any]:
     eff = effective_settings()["fofa"]
     cfg = (task.fofa_config or {}) if task else {}
     return {
         "key": resolve_fofa_key(task),
+        "base_url": resolve_fofa_base_url(task),
         "max_pages": int(cfg.get("max_pages") or eff.get("max_pages") or 20),
         "page_size": int(cfg.get("page_size") or eff.get("page_size") or 100),
         "intent_mode": str(cfg.get("intent_mode") or eff.get("default_intent_mode") or ""),
@@ -122,6 +130,7 @@ def public_settings_view() -> dict[str, Any]:
             "api_key_set": bool(llm["api_key"]),
         },
         "fofa": {
+            "base_url": fofa.get("base_url") or "https://fofa.info",
             "max_pages": int(fofa.get("max_pages") or 20),
             "page_size": int(fofa.get("page_size") or 100),
             "default_intent_mode": fofa.get("default_intent_mode") or "",

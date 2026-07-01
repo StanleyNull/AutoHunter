@@ -50,6 +50,7 @@ const form = reactive({
   model: "",
   prompt_version: "legacy",
   fofa_key: "",
+  fofa_base_url: "",
   max_pages: 20,
   page_size: 100,
   concurrency: 3,
@@ -59,6 +60,7 @@ const original = reactive({
   model: "",
   prompt_version: "legacy",
   intent_mode: "",
+  fofa_base_url: "",
   max_pages: 20,
   page_size: 100,
 });
@@ -81,6 +83,7 @@ function fill(task) {
   form.model = modelCfg.model || "";
   form.prompt_version = modelCfg.prompt_version || "legacy";
   form.fofa_key = "";
+  form.fofa_base_url = fofaCfg.base_url || "";
   form.max_pages = fofaCfg.max_pages ?? 20;
   form.page_size = fofaCfg.page_size ?? 100;
   form.concurrency = task.concurrency || 3;
@@ -88,6 +91,7 @@ function fill(task) {
   original.model = form.model;
   original.prompt_version = form.prompt_version;
   original.intent_mode = form.intent_mode;
+  original.fofa_base_url = form.fofa_base_url;
   original.max_pages = Number(form.max_pages);
   original.page_size = Number(form.page_size);
   // 重置模型列表状态（打开弹窗时 watch 会随即自动 loadModels 拉好列表）
@@ -118,6 +122,7 @@ async function save() {
   if (pageSize !== original.page_size) fofaConfig.page_size = pageSize;
   if (form.intent_mode !== original.intent_mode) fofaConfig.intent_mode = form.intent_mode;
   if (form.fofa_key.trim()) fofaConfig.key = form.fofa_key.trim();
+  if (form.fofa_base_url !== original.fofa_base_url) fofaConfig.base_url = form.fofa_base_url;
 
   const updated = await api.updateTask(props.task.id, {
     name: form.name,
@@ -216,6 +221,7 @@ async function save() {
           </label>
           <label>模型 api_key <input v-model="form.api_key" type="password" placeholder="留空保留原值" /></label>
           <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
+          <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
           <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" min="1" max="200" /></label>
           <label v-if="!isSiteMode">FOFA page_size <input v-model="form.page_size" type="number" min="1" max="1000" /></label>
         </div>

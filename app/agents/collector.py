@@ -420,7 +420,8 @@ async def _fofa_collect(
 
     next_cursor = cursor + 1
     try:
-        res = await fofa.search(key, cur_query, page=next_cursor, size=size)
+        res = await fofa.search(key, cur_query, page=next_cursor, size=size,
+                                base_url=defaults.get("base_url"))
     except fofa.FofaError as e:
         # FOFA 失败不阻断主循环，但必须：
         # 1) 游标不前进——否则一次瞬时错误就把当前页永久跳过（漏搜）。

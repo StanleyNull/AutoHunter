@@ -36,7 +36,12 @@ from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
 from app.db.session import SessionLocal
 from app.events import bus
 from app.llm.client import LLMClient
-from app.settings_service import llm_client_for_task, resolve_fofa_key, resolve_worker_prompt_version
+from app.settings_service import (
+    llm_client_for_task,
+    resolve_fofa_base_url,
+    resolve_fofa_key,
+    resolve_worker_prompt_version,
+)
 from app.schemas import Finding as FindingSchema
 from app.schemas import Verdict
 
@@ -1308,12 +1313,14 @@ class TaskRunner:
         duplicate_history: list[dict] = []
         src_type = "edusrc"
         fofa_key = ""
+        fofa_base_url = ""
         async with SessionLocal() as session:
             tgt = await session.get(Target, target_id)
             task_obj = await session.get(Task, task_id)
             if task_obj:
                 src_type = task_obj.src_type or "edusrc"
                 fofa_key = resolve_fofa_key(task_obj)
+                fofa_base_url = resolve_fofa_base_url(task_obj)
             if tgt:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
@@ -1387,7 +1394,8 @@ class TaskRunner:
                             deepen_context=deepen_context, target_meta=target_meta,
                             duplicate_history=duplicate_history,
                             cancel_event=cancel_event, src_type=src_type,
-                            fofa_key=fofa_key, prompt_version=prompt_version)
+                            fofa_key=fofa_key, fofa_base_url=fofa_base_url,
+                            prompt_version=prompt_version)
             worker_holder["worker"] = worker
             try:
                 return worker.run().model_dump(mode="json")
@@ -2194,6 +2202,7 @@ class TaskRunner:
                 return
             task = await session.get(Task, task_id)
             fofa_key = resolve_fofa_key(task)
+            fofa_base_url = resolve_fofa_base_url(task)
             src_type = (task.src_type if task else "edusrc") or "edusrc"
             finding_dict = {
                 "title": f.title, "vuln_type": f.vuln_type, "target_url": f.target_url,
@@ -2222,6 +2231,7 @@ class TaskRunner:
             hunter = KillsweepHunter(
                 finding_dict, fofa_key, llm=llm, on_event=emit,
                 src_type=src_type, cancel_event=cancel_event,
+                fofa_base_url=fofa_base_url,
             )
             try:
                 return hunter.run().model_dump(mode="json")

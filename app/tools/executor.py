@@ -61,12 +61,14 @@ class ToolExecutor:
         cancel_event: Optional[threading.Event] = None,
         enterprise: bool = False,
         fofa_key: str = "",
+        fofa_base_url: str = "",
     ):
         self.target = target
         self.cancel_event = cancel_event or threading.Event()
         # 企业模式：对目标生产环境的破坏性命令做额外硬拦截。
         self.enterprise = enterprise
         self.fofa_key = fofa_key or ""
+        self.fofa_base_url = (fofa_base_url or _FOFA_BASE).rstrip("/")
         # 每个目标独立工作目录
         safe_name = "".join(c if c.isalnum() else "_" for c in target)[:60]
         self.work_dir = Path(work_dir or worker_config.work_root) / safe_name
@@ -380,7 +382,7 @@ class ToolExecutor:
         }
         try:
             with httpx.Client(timeout=25) as client:
-                resp = client.get(f"{_FOFA_BASE}/api/v1/search/all", params=params)
+                resp = client.get(f"{self.fofa_base_url}/api/v1/search/all", params=params)
                 data = resp.json()
         except Exception as e:
             return {"ok": False, "error": f"FOFA 调用失败: {type(e).__name__}: {e}",

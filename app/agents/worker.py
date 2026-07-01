@@ -52,6 +52,7 @@ class Worker:
         cancel_event: Optional[threading.Event] = None,
         src_type: str = "edusrc",
         fofa_key: str = "",
+        fofa_base_url: str = "",
         prompt_version: str | None = None,
     ):
         self.target = target
@@ -62,7 +63,7 @@ class Worker:
         self.prompt_version = normalize_worker_prompt_version(prompt_version or worker_config.prompt_version)
         self.executor = ToolExecutor(
             target, cancel_event=self.cancel_event,
-            enterprise=self._enterprise, fofa_key=fofa_key,
+            enterprise=self._enterprise, fofa_key=fofa_key, fofa_base_url=fofa_base_url,
         )
         self.findings: list[Finding] = []
         self.on_event = on_event or (lambda kind, data: None)

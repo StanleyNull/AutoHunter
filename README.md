@@ -206,6 +206,7 @@ body="管理" && org="China Education and Research Network Center"
 | `LLM_BASE_URL` | 默认 DeepSeek | OpenAI 兼容接口地址（需含 `/v1`） | 默认 `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 默认 deepseek-chat | 模型名 | 按模型商填 |
 | `FOFA_KEY` | ⭐ 推荐 | 资产测绘，用于自动搜集目标 | [FOFA 个人中心](https://fofa.info/) |
+| `FOFA_BASE_URL` | 可选，默认官方地址 | 自定义 FOFA API 端点（私有部署/镜像/代理网关） | 默认 `https://fofa.info` |
 | `AUTOHUNTER_API_TOKEN` | ⭐ 强烈建议 | 控制台全权限访问令牌，**不设则任何人可访问** | `install.sh` 自动生成，或自填随机串 |
 | `AUTOHUNTER_HOST_PORT` | 默认 18800 | 对外访问端口 | 按需 |
 

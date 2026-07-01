@@ -89,18 +89,19 @@ def _normalize_affected_table(rows: Any, vuln_type: str) -> list[dict[str, Any]]
 
 
 def _fofa_search_sync(key: str, query: str, edu_only: bool = False,
-                      size: int = 20) -> dict[str, Any]:
+                      size: int = 20, base_url: str | None = None) -> dict[str, Any]:
     """同步 FOFA 查询，返回 {size, sample:[{host,title,org}], query}。"""
     if not key:
         return {"size": 0, "sample": [], "query": query, "error": "缺少 FOFA key"}
     q = f"{query} && {_EDU_FILTER}" if edu_only else query
+    base = (base_url or _FOFA_BASE).rstrip("/")
     params = {
         "key": key, "qbase64": _qbase64(q),
         "fields": "host,title,org", "page": "1", "size": str(size), "full": "false",
     }
     try:
         with httpx.Client(timeout=30) as client:
-            resp = client.get(f"{_FOFA_BASE}/api/v1/search/all", params=params)
+            resp = client.get(f"{base}/api/v1/search/all", params=params)
             data = resp.json()
     except Exception as e:
         return {"size": 0, "sample": [], "query": q, "error": f"FOFA 调用失败: {e}"}
@@ -132,9 +133,11 @@ class KillsweepHunter:
         on_event: Optional[Callable[[str, dict], None]] = None,
         src_type: str = "edusrc",
         cancel_event: Optional[threading.Event] = None,
+        fofa_base_url: str = "",
     ):
         self.finding = finding
         self.fofa_key = fofa_key
+        self.fofa_base_url = fofa_base_url
         self.llm = llm or LLMClient()
         self.cancel_event = cancel_event or threading.Event()
         self.executor = ToolExecutor(f"killsweep_{finding.get('target_url','x')}", cancel_event=self.cancel_event)
@@ -220,7 +223,7 @@ class KillsweepHunter:
             q = args.get("query", "")
             edu = bool(args.get("edu_only", False))
             self._emit("killsweep_fofa", query=q, edu_only=edu)
-            return _fofa_search_sync(self.fofa_key, q, edu_only=edu)
+            return _fofa_search_sync(self.fofa_key, q, edu_only=edu, base_url=self.fofa_base_url)
         if name == "http_request":
             url = args.get("url")
             if not url:

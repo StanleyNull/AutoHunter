@@ -15,6 +15,7 @@ const form = reactive({
   api_key_set: false,
   fofa_key: "",
   fofa_key_set: false,
+  fofa_base_url: "",
   max_pages: 20,
   page_size: 100,
   default_intent_mode: "",
@@ -40,6 +41,7 @@ async function load() {
     form.api_key_set = s.llm?.api_key_set;
     form.fofa_key = "";
     form.fofa_key_set = s.fofa?.key_set;
+    form.fofa_base_url = s.fofa?.base_url || "";
     form.max_pages = s.fofa?.max_pages ?? 20;
     form.page_size = s.fofa?.page_size ?? 100;
     form.default_intent_mode = s.fofa?.default_intent_mode || "";
@@ -61,6 +63,7 @@ async function save() {
         temperature: Number(form.temperature),
       },
       fofa: {
+        base_url: form.fofa_base_url,
         max_pages: Number(form.max_pages),
         page_size: Number(form.page_size),
         default_intent_mode: form.default_intent_mode,
@@ -172,6 +175,10 @@ onMounted(load);
               <input v-model="form.fofa_key" type="password"
                 :placeholder="form.fofa_key_set ? '已配置，留空不修改' : 'FOFA API Key'" />
             </label>
+            <label class="full">API 端点
+              <input v-model="form.fofa_base_url" placeholder="https://fofa.info" />
+            </label>
+            <p class="field-hint full">自定义 FOFA 兼容端点（私有部署/镜像/代理网关），留空用官方地址。</p>
             <label>默认最大页数 <input v-model="form.max_pages" type="number" min="1" /></label>
             <label>每页条数 <input v-model="form.page_size" type="number" min="1" /></label>
             <label class="full">默认搜集方式
