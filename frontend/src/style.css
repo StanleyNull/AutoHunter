@@ -573,6 +573,30 @@ main {
   border-color: color-mix(in oklch, var(--danger, #e5484d) 55%, var(--border));
 }
 .mini-action:disabled { opacity: 0.55; cursor: not-allowed; }
+/* 任务卡片操作按钮：编辑参数 / 删除 横向并排 */
+.task-actions { display: flex; align-items: center; gap: 8px; }
+/* 删除确认弹窗 */
+.modal-mask {
+  position: fixed; inset: 0; z-index: var(--z-drawer);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: oklch(0% 0 0 / 0.58);
+}
+.del-modal {
+  width: min(420px, 100%);
+  display: grid; gap: 12px; padding: 22px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+}
+.del-title { margin: 0; font-size: 16px; color: var(--danger, #e5484d); }
+.del-desc { margin: 0; color: var(--ink); font-size: 13.5px; }
+.del-warn { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+.del-field { display: grid; gap: 6px; color: var(--ink-2); font-size: 12.5px; font-weight: 600; }
+.del-field input {
+  padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--nav); color: var(--ink); font-size: 13px;
+}
+.del-field input:focus { outline: none; border-color: color-mix(in oklch, var(--danger, #e5484d) 55%, var(--border)); }
+.del-error { margin: 0; color: var(--danger, #e5484d); font-size: 12.5px; }
+.del-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 .task-chevron {
   color: var(--faint); font-size: 22px; line-height: 1;
   font-weight: 300; padding: 0 2px;

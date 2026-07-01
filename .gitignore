@@ -10,3 +10,4 @@ work/
 *.sqlite
 *.db
 .DS_Store
+web/dist/

@@ -7,6 +7,7 @@ const TOKEN_KEY = "ah-api-token";
 /** 响应式鉴权态：模板必须依赖它，否则刷新后 v-if 不会更新。 */
 export const authRoleRef = ref("none"); // full | readonly | observer | none
 export const authReadyRef = ref(false);
+export const authRequiredRef = ref(true); // 服务端是否开启了访问令牌鉴权
 
 function bootstrapTokenFromCookie() {
   if (localStorage.getItem(TOKEN_KEY)) return;
@@ -82,6 +83,7 @@ export function getAuthRole() {
 export async function loadAuthRole() {
   try {
     const res = await req("GET", "/api/auth/status");
+    authRequiredRef.value = !!res?.auth_required;
     if (!res?.auth_required) {
       setAuthRole("full");
       return authRoleRef.value;
@@ -91,6 +93,21 @@ export async function loadAuthRole() {
   } catch {
     authReadyRef.value = true;
     return authRoleRef.value;
+  }
+}
+
+/**
+ * 校验某个令牌的角色，但【不改变】当前登录态。返回 "full"|"readonly"|"observer"|"none"。
+ * 若服务端未开启鉴权(auth_required=false)，视为 "full"（无需密码即可操作）。
+ */
+export async function verifyToken(token) {
+  const cleaned = sanitizeToken(token);
+  try {
+    const res = await req("GET", "/api/auth/status", undefined, true, cleaned);
+    if (!res?.auth_required) return "full";
+    return normalizeRole(res?.role);
+  } catch {
+    return "none";
   }
 }
 
@@ -116,9 +133,9 @@ export async function applyAccessToken(token) {
   }
 }
 
-async function req(method, url, body, retriedAuth = false) {
+async function req(method, url, body, retriedAuth = false, overrideToken = "") {
   const opt = { method, headers: {} };
-  const token = apiToken();
+  const token = overrideToken || apiToken();
   if (token) opt.headers["X-Autohunter-Token"] = token;
   if (body !== undefined) {
     opt.headers["Content-Type"] = "application/json";
@@ -201,7 +218,8 @@ export const api = {
   createTask: (data) => req("POST", "/api/tasks", data),
   getTask: (id) => req("GET", `/api/tasks/${id}`),
   updateTask: (id, data) => req("PATCH", `/api/tasks/${id}`, data),
-  deleteTask: (id) => req("DELETE", `/api/tasks/${id}`),
+  // 删除任务：必须带 full 令牌（作为二次身份校验，独立于当前登录令牌）。
+  deleteTask: (id, token) => req("DELETE", `/api/tasks/${id}`, undefined, false, sanitizeToken(token)),
   board: (id) => req("GET", `/api/tasks/${id}/board`),
   hardTargets: (status, q, opts = {}) => req("GET", `/api/tasks/hard-targets${qs({ status, q, ...opts })}`),
   start: (id) => req("POST", `/api/tasks/${id}/start`),
