@@ -145,6 +145,67 @@ docker compose logs -f autohunter   # 看启动日志
 
 ---
 
+## 创建任务：配置怎么填
+
+登录控制台 → 「新建挖掘任务」，各字段含义如下：
+
+| 字段 | 填什么 | 说明 |
+|------|--------|------|
+| **任务名称** | 随便起，方便自己区分 | 如 `edu批量挖掘-2026` |
+| **任务模式** | `EduSRC` / `企业SRC` | 决定评分口径和审核标准，教育资产选 EduSRC |
+| **漏洞类型** | 逗号分隔 | 默认 `sql_injection,rce,unauthorized_access,idor,file_upload,captcha_bypass`，一般不用改 |
+| **目标来源** | `FOFA 自动搜` / `手动清单` / `两者` / `单站协作` | 想让它自己找目标就选 FOFA |
+| **搜集方式** | `自动判断` / `FOFA 语法` / `自然语言意图` | 见下方说明 |
+| **FOFA 语法 / 搜集意图** | 你的查询语句或大白话 | 见下方示例 |
+| **手动目标清单** | 每行一个 URL | 选了「手动/两者/单站」时填 |
+
+### 两种搜集方式
+
+**① 我自己会写 FOFA 语法** → 搜集方式选 `FOFA 语法`，直接把语句粘进去。例如挖教育网（CERNET）下带「管理」后台的资产：
+
+```text
+body="管理" && org="China Education and Research Network Center"
+```
+
+再比如按域名/证书/标题收窄归属：
+
+```text
+title="统一身份认证" && domain=".edu.cn"
+cert.subject.org="某某大学" && country="CN"
+domain="example.com" || cert="示例集团" || org="示例集团"
+```
+
+**② 不会写语法，只想说要找什么** → 搜集方式选 `自然语言意图`，用大白话描述，搜集 Agent 会自动翻译成 FOFA 语法并逐轮演化。例如：
+
+```text
+找全国高校的统一身份认证登录系统
+找某集团的 OA / CRM / ERP / API 网关 / 运维后台资产
+```
+
+> 留空「搜集方式」= **自动判断**：写得像语法就当语法，否则当意图，新手直接用这个即可。
+
+### FOFA 语法速查（常用字段）
+
+| 字段 | 含义 | 示例 |
+|------|------|------|
+| `title=` | 网页标题 | `title="后台管理"` |
+| `body=` | 网页正文包含 | `body="管理"` |
+| `domain=` | 域名 | `domain=".edu.cn"` |
+| `host=` | 主机名 | `host="admin.example.com"` |
+| `org=` | 所属机构（归属收窄利器） | `org="China Education and Research Network Center"` |
+| `cert=` / `cert.subject.org=` | 证书信息 | `cert.subject.org="某某大学"` |
+| `port=` / `country=` | 端口 / 国家 | `port="8080" && country="CN"` |
+
+组合逻辑：`&&`（且）、`||`（或）、`!=`（非）。**语句越精确、归属越收窄，Worker 越不会打到范围外资产。**
+
+### 高级选项（可留空，用服务端默认）
+
+展开「高级」可**按任务单独覆盖**：模型 `base_url`/`api_key`/模型名、Worker 提示词版本、FOFA key、FOFA 最大页数、Worker 并发数。不填就继承「设置」页的全局默认。
+
+> ⚠️ **务必收窄授权范围**：只搜你有权限测试的资产。`org` / `domain` / `cert` 是最有效的归属过滤手段。
+
+---
+
 ## 必填 / 推荐配置
 
 | 变量 | 必填 | 说明 | 获取方式 |
