@@ -38,7 +38,7 @@ def _env_llm() -> dict[str, Any]:
 def _env_fofa() -> dict[str, Any]:
     return {
         "key": os.environ.get("FOFA_KEY", ""),
-        "base_url": os.environ.get("FOFA_BASE_URL", "https://fofa.info"),
+        "base_url": os.environ.get("FOFA_BASE_URL") or "https://fofa.info",
         "max_pages": 20,
         "page_size": 100,
         "default_intent_mode": "",
