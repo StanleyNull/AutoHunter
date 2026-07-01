@@ -142,6 +142,7 @@ def _public_fofa_config(task: Task) -> dict:
     cfg = dict(task.fofa_config or {})
     eff = resolve_fofa_defaults(task)
     return {
+        "base_url": eff["base_url"],
         "max_pages": eff["max_pages"],
         "page_size": eff["page_size"],
         "intent_mode": eff["intent_mode"],
@@ -395,6 +396,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         cfg = dict(task.fofa_config or {})
         if "key" in patch and str(patch.get("key") or "").strip():
             cfg["key"] = str(patch["key"]).strip()
+        if "base_url" in patch and patch["base_url"] is not None:
+            cfg["base_url"] = str(patch["base_url"]).strip()
         if "max_pages" in patch and patch["max_pages"] is not None:
             cfg["max_pages"] = max(1, min(int(patch["max_pages"]), 200))
         if "page_size" in patch and patch["page_size"] is not None:
