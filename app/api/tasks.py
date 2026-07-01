@@ -4,12 +4,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dto import CreateTaskRequest, TaskResponse, TaskStats, UpdateTaskRequest
 from app.agents.prompts import normalize_src_type
-from app.db.models import Finding, Killsweep, Review, Target, Task
+from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
 from app.db.session import get_session
 from app.llm.usage import usage_snapshot
 from app.orchestrator import manager
@@ -414,6 +414,30 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     await session.refresh(task)
     stats = await _compute_stats(session, task_id)
     return _task_to_dto(task, stats)
+
+
+@router.delete("/{task_id}", status_code=204)
+async def delete_task(task_id: str, session: AsyncSession = Depends(get_session)):
+    """删除任务及其全部关联数据（目标 / 漏洞 / 审核 / 通杀 / 事件）。
+
+    - 先停掉运行时（终止后台 worker/collector），避免删除过程中仍有写入产生脏数据。
+    - 全局情报库（Intel）为跨任务共享知识，不随任务删除。
+    """
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    # 1) 先彻底停掉该任务的运行时，确保没有后台协程再往这些表写数据。
+    await manager.stop(task_id)
+
+    # 2) 手动删除没有 ORM 级联关系的关联表（Killsweep / TaskEvent）。
+    await session.execute(delete(Killsweep).where(Killsweep.task_id == task_id))
+    await session.execute(delete(TaskEvent).where(TaskEvent.task_id == task_id))
+
+    # 3) 删除任务本体：Target -> Finding -> Review 通过 ORM cascade 一并删除。
+    await session.delete(task)
+    await session.commit()
+    return None
 
 
 @router.get("/{task_id}/board")

@@ -201,6 +201,7 @@ export const api = {
   createTask: (data) => req("POST", "/api/tasks", data),
   getTask: (id) => req("GET", `/api/tasks/${id}`),
   updateTask: (id, data) => req("PATCH", `/api/tasks/${id}`, data),
+  deleteTask: (id) => req("DELETE", `/api/tasks/${id}`),
   board: (id) => req("GET", `/api/tasks/${id}/board`),
   hardTargets: (status, q, opts = {}) => req("GET", `/api/tasks/hard-targets${qs({ status, q, ...opts })}`),
   start: (id) => req("POST", `/api/tasks/${id}/start`),
