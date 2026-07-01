@@ -50,6 +50,23 @@ async function openEdit(task) {
   editingTask.value = await api.getTask(task.id);
   editOpen.value = true;
 }
+const deletingId = ref("");
+async function removeTask(task) {
+  if (deletingId.value) return;
+  const ok = window.confirm(
+    `确定删除任务「${task.name}」？\n\n将一并删除该任务的全部目标、漏洞、审核与通杀记录，且不可恢复。\n（全局情报库不受影响）`,
+  );
+  if (!ok) return;
+  deletingId.value = task.id;
+  try {
+    await api.deleteTask(task.id);
+    tasks.value = tasks.value.filter((t) => t.id !== task.id);
+  } catch (e) {
+    window.alert(`删除失败：${e.message || e}`);
+  } finally {
+    deletingId.value = "";
+  }
+}
 function closeEdit() {
   editOpen.value = false;
   editingTask.value = null;
@@ -114,6 +131,10 @@ watch(authReadyRef, (ready) => {
         <div class="task-card-side">
           <time class="meta task-time">{{ t.created_at.slice(0, 19).replace("T", " ") }}</time>
           <button v-if="writable" class="mini-action" type="button" @click.stop="openEdit(t)">编辑参数</button>
+          <button v-if="writable" class="mini-action danger" type="button"
+            :disabled="deletingId === t.id" @click.stop="removeTask(t)">
+            {{ deletingId === t.id ? "删除中…" : "删除" }}
+          </button>
           <span class="task-chevron" aria-hidden="true">›</span>
         </div>
       </div>

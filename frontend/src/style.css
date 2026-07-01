@@ -567,6 +567,12 @@ main {
   background: color-mix(in oklch, var(--accent-bg) 70%, var(--surface-2));
   border-color: color-mix(in oklch, var(--accent) 46%, var(--border));
 }
+.mini-action.danger { color: var(--danger, #e5484d); border-color: color-mix(in oklch, var(--danger, #e5484d) 30%, var(--border)); }
+.mini-action.danger:hover {
+  background: color-mix(in oklch, var(--danger, #e5484d) 12%, var(--surface-2));
+  border-color: color-mix(in oklch, var(--danger, #e5484d) 55%, var(--border));
+}
+.mini-action:disabled { opacity: 0.55; cursor: not-allowed; }
 .task-chevron {
   color: var(--faint); font-size: 22px; line-height: 1;
   font-weight: 300; padding: 0 2px;
