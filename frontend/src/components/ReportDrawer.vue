@@ -241,7 +241,7 @@ async function askAssistant(preset = "") {
 
         <section class="report-facts">
           <div><span>漏洞类型</span><b>{{ f.vuln_type }}</b></div>
-          <div><span>归属单位</span><b>{{ f.owner || "待确认" }}</b></div>
+          <div><span>归属单位</span><b>{{ f.edu_school || f.owner || "待确认" }}</b></div>
           <div><span>信度</span><b>{{ confidenceText }}</b></div>
           <div><span>复现步骤</span><b>{{ stepCount }}</b></div>
           <div><span>攻击链路</span><b>{{ chainCount }}</b></div>

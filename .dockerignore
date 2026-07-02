@@ -9,6 +9,7 @@ work/
 *.db
 *.sqlite
 *.log
+!app/data_static/edu_ip.db
 .DS_Store
 frontend/node_modules/
 frontend/dist/

@@ -141,8 +141,34 @@ def _finding_dict(f: Finding, r: Review | None, *, compact: bool = False) -> dic
         if (f.assistant_messages or [])
         else _default_assistant_messages(),
         "self_check": f.self_check,
+        # 写报告用的高校归属：这里先用「零阻塞」的纯 IP 查库（不做 DNS，避免拖慢列表）。
+        # 域名目标的归属由 get_finding 详情接口异步补全（见 _resolve_edu_school_async）。
+        "edu_school": _edu_school_fast(f.target_url),
     })
     return item
+
+
+def _edu_school_fast(target_url: str | None) -> str | None:
+    """零阻塞归属：仅当目标本身是 IP 时查库；域名一律返回 None（不触发 DNS）。"""
+    if not target_url:
+        return None
+    try:
+        from app.tools.edu_ip import school_name_no_dns
+        return school_name_no_dns(target_url)
+    except Exception:
+        return None
+
+
+async def _resolve_edu_school_async(target_url: str | None) -> str | None:
+    """详情接口用：域名目标也解析（放线程池 + 3s 超时），任何异常返回 None。"""
+    if not target_url:
+        return None
+    try:
+        from app.tools.edu_ip import lookup_school_async
+        info = await lookup_school_async(target_url, timeout=3.0)
+        return info["school"] if info else None
+    except Exception:
+        return None
 
 
 @router.get("/tasks/{task_id}/findings")
@@ -202,7 +228,11 @@ async def get_finding(finding_id: str, session: AsyncSession = Depends(get_sessi
     if not f:
         raise HTTPException(404, "漏洞不存在")
     r = (await session.execute(select(Review).where(Review.finding_id == f.id))).scalar_one_or_none()
-    return _finding_dict(f, r)
+    d = _finding_dict(f, r)
+    # 域名目标：详情接口异步补全归属（列表接口用零阻塞快路径，这里做完整 DNS 反查）
+    if not d.get("edu_school"):
+        d["edu_school"] = await _resolve_edu_school_async(f.target_url)
+    return d
 
 
 @router.get("/tasks/{task_id}/review-queue")
