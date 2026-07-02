@@ -255,6 +255,21 @@ nav { display: flex; gap: 2px; }
   padding: 0; border-radius: var(--radius-sm); font-size: 15px; color: var(--muted);
 }
 .theme-toggle:hover { color: var(--ink); }
+/* 右上角 GitHub 圆形图标：悬浮转一圈，点击跳转仓库 */
+.github-link {
+  display: inline-grid; place-items: center;
+  width: 34px; height: 34px; padding: 0;
+  border-radius: 50%;
+  color: var(--muted);
+  border: 1px solid var(--line, rgba(255,255,255,0.12));
+  transition: color 0.2s ease, border-color 0.2s ease, transform 0.6s ease;
+}
+.github-link:hover {
+  color: var(--ink);
+  border-color: var(--accent, #3b9eff);
+  transform: rotate(360deg);
+}
+.github-link svg { display: block; }
 .token-switch {
   display: inline-flex; align-items: center; gap: 6px;
   height: 34px; padding: 0 11px; color: var(--muted);
