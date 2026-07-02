@@ -484,7 +484,10 @@ class TaskRunner:
             # 企业模式：目标多为用户指定的具体资产（pre-paycenter/test-gateway 等不同子系统），
             # 不做同款簇冷却/并发限流，每个指定资产都要挖——否则会被"同簇打不穿3个"误跳。
             # 定向深挖目标同样不受同簇冷却影响（人工/审核明确要求继续打穿的例外）。
+            # 手动清单（source=manual）是用户明确点名要打的，逐个挖，绝不因同款簇冷却跳过
+            # （与低成功率预筛的 manual 豁免保持一致，见 _low_success_skip_reason）。
             if (not self._is_enterprise and not target.deepen_context
+                    and target.source != "manual"
                     and not site_collab.is_site_source(target.source) and key):
                 state = cluster_state.get(key, {})
                 if target_cluster.should_cooldown_cluster(state):
