@@ -278,11 +278,17 @@ nav { display: flex; gap: 2px; }
 .token-switch:hover { color: var(--ink); }
 
 /* 换令牌弹层（替代手机端不可靠的 window.prompt） */
+@keyframes token-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes token-modal-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
 .token-modal-backdrop {
   position: fixed; inset: 0; z-index: var(--z-drawer);
   background: oklch(0% 0 0 / 0.55);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
+  animation: token-backdrop-in 0.18s ease;
 }
 .token-modal {
   width: min(420px, 100%);
@@ -291,6 +297,10 @@ nav { display: flex; gap: 2px; }
   border-radius: var(--radius);
   padding: 22px 22px 18px;
   box-shadow: var(--shadow-lg);
+  animation: token-modal-in 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .token-modal-backdrop, .token-modal { animation: none; }
 }
 .token-modal h3 { margin: 0 0 8px; font-size: 16px; }
 .token-modal-hint {
