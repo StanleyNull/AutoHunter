@@ -53,6 +53,44 @@ def _truncate(text: str, limit: Optional[int] = None) -> str:
     return f"{head}\n\n...[输出过长已截断，完整内容已写入工作目录文件]...\n\n{tail}"
 
 
+def _normalize_headers(headers: Any) -> dict[str, str]:
+    """把 LLM 可能乱传的 headers 统一成 {str: str}，容错非 dict 形态，绝不抛异常。
+
+    支持：
+      - dict            → 原样（值转字符串）
+      - list["K: V"]    → 逐行按第一个冒号切分
+      - "K: V\\nK2: V2"  → 按行切分
+      - None / 其它      → {}
+    """
+    if not headers:
+        return {}
+    if isinstance(headers, dict):
+        return {str(k): str(v) for k, v in headers.items()}
+    lines: list[str] = []
+    if isinstance(headers, str):
+        lines = headers.splitlines()
+    elif isinstance(headers, (list, tuple)):
+        for item in headers:
+            if isinstance(item, dict):
+                if "name" in item and "value" in item:
+                    lines.append(f"{item['name']}: {item['value']}")
+                else:
+                    lines.extend(f"{k}: {v}" for k, v in item.items())
+            else:
+                lines.append(str(item))
+    else:
+        return {}
+    out: dict[str, str] = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k = k.strip()
+        if k:
+            out[k] = v.strip()
+    return out
+
+
 class ToolExecutor:
     def __init__(
         self,
@@ -241,6 +279,10 @@ class ToolExecutor:
         follow_redirects: bool = False,
         timeout: int = 20,
     ) -> dict[str, Any]:
+        # LLM 可能把 headers 传成非 dict 形态（list["K: V"] / "K: V\nK2: V2" / None），
+        # 直接喂给 dict()/httpx 会抛 "dictionary update sequence element..." 崩掉整个 agent。
+        # 这里统一规范化成 dict，容错所有 agent 的 http_request 调用。
+        headers = _normalize_headers(headers)
         # 企业 session：把已维持的 cookie/header 合并进本次请求（用户传的同名键优先）。
         merged_headers, session_applied = self._apply_session(headers)
 
