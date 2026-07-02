@@ -422,6 +422,94 @@ KILLSWEEP_TOOL_SCHEMAS = [
 ]
 
 
+ESCALATE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "http_request",
+            "description": "顺着已确认的入口继续发包，尝试把危害做大（越权写、遍历、改密、接管、命令执行等）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "method": {"type": "string", "default": "GET"},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "data": {"type": "string"},
+                    "json_body": {"type": "object"},
+                    "follow_redirects": {"type": "boolean", "default": False},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": "执行 shell 命令（curl 等）辅助升级利用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_escalation",
+            "description": (
+                "仅当你已把原漏洞【实锤升级】——危害等级实际提升，或影响面出现数量级变化（如单点→批量接管/遍历）"
+                "——时调用一次，交出升级后的完整证据链。没打穿、原地打转、危害没变，请改调 abandon_escalation。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vuln_type": {"type": "string", "description": "升级后的漏洞类型，如『任意用户密码重置+账号接管』"},
+                    "title": {"type": "string", "description": "升级后的漏洞标题（含归属单位/系统 + 升级后的危害）"},
+                    "severity": {"type": "string", "enum": ["严重", "高危", "中危", "低危"], "description": "升级后的最终等级"},
+                    "description": {"type": "string", "description": "升级利用链描述：从原入口如何一步步做大危害"},
+                    "kill_chain": {
+                        "type": "array",
+                        "description": "升级攻击链路，逐步：[{method, detail}]",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "method": {"type": "string"},
+                                "detail": {"type": "string"},
+                            },
+                        },
+                    },
+                    "poc": {"type": "string", "description": "完整可复现 PoC（含关键 curl/请求）"},
+                    "raw_request": {"type": "string", "description": "关键升级步骤的原始请求"},
+                    "raw_response": {"type": "string", "description": "证明升级成功的原始响应（真实成功证据）"},
+                    "affected_scope": {"type": "string", "description": "量化影响面，如『大量用户/全部账号可被接管』"},
+                    "impact_count": {"type": "integer", "description": "可量化的受影响对象数量（遍历/接管规模），无则填 0"},
+                },
+                "required": ["vuln_type", "title", "severity", "description", "poc", "raw_response"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "abandon_escalation",
+            "description": "本次深挖没能显著升级危害（等级没提升、影响面没质变），放弃并说明原因。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "为什么放弃：试了哪些方向、卡在哪、为何危害没变大"},
+                },
+                "required": ["reason"],
+            },
+        },
+    },
+]
+
+
 COLLECTOR_QUERY_SCHEMAS = [
     {
         "type": "function",
@@ -497,5 +585,6 @@ JS_ANALYZER_TOOL_SCHEMAS = _compact_descriptions(JS_ANALYZER_TOOL_SCHEMAS)
 ENTERPRISE_SESSION_TOOL_SCHEMAS = _compact_descriptions(ENTERPRISE_SESSION_TOOL_SCHEMAS)
 REVIEWER_TOOL_SCHEMAS = _compact_descriptions(REVIEWER_TOOL_SCHEMAS)
 KILLSWEEP_TOOL_SCHEMAS = _compact_descriptions(KILLSWEEP_TOOL_SCHEMAS)
+ESCALATE_TOOL_SCHEMAS = _compact_descriptions(ESCALATE_TOOL_SCHEMAS)
 COLLECTOR_QUERY_SCHEMAS = _compact_descriptions(COLLECTOR_QUERY_SCHEMAS)
 COLLECTOR_EDU_SCHEMAS = _compact_descriptions(COLLECTOR_EDU_SCHEMAS)

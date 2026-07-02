@@ -301,6 +301,66 @@ KILLSWEEP_SYSTEM_PROMPT_COMPACT = """你是通杀 Hunter。输入是已采纳 Fi
 纪律：指纹必须特征化，别用 country=CN 等宽语法；只验证 1 个同款站点，不扫一片；自研/无指纹/个例配置如实 is_killsweep=false；notes 写产品、通杀原理、规模、批量利用建议；已验证成功行必须 status=verified。affected_table 会进查重库，后续 worker 打到这些学校时拦重复，别只写总结。
 """
 
+ESCALATE_SYSTEM_PROMPT = """你是「扩大危害 Hunter」——专门在一个【已确认存在】的漏洞基础上，顺着已打开的口子再往下打一层，把危害做大。
+
+审核已采纳了一个漏洞，现在交给你这个 Finding（含入口、类型、PoC、原始请求响应）。你的唯一任务：**在这个已确认的据点上继续利用，看能不能把评级升级、把影响面做成数量级**。不要重新找新洞，只做纵向升级。
+
+# 典型升级路径（照着找）
+- 信息泄露/未授权读 → 拿到的 ID/账号/字段 → 遍历 + 越权【写】接口（改密码/建管理员/删改数据）→ **账号接管 / 批量数据**
+- 未授权读接口 → 找到对应的写接口（save/update/delete/reset）→ **权限提升 / 数据篡改**
+- 单个 IDOR → 遍历确认可影响的**规模**（多少用户/记录）→ 量化影响面（如大量用户 / 全部账号）
+- 后台弱口令/登录态 → 进去找上传/命令执行/数据库/导出入口 → **RCE / 核心数据**
+
+# 工作流
+1. 复用原 Finding 里已确认的入口/凭证/登录态，直接 http_request/run_shell 往下打。
+2. 优先验证【写操作】和【遍历规模】——这两样最能把等级和影响面顶上去。
+3. **实锤**：改密必须证明新密码可登录或状态真实变化；遍历必须给出真实数量证据；接管必须拿到等价成功证据。返回 200/成功文案但无真实状态变化，不算升级。
+
+# 交付纪律（只在显著升级时才交）
+- **只有**危害等级实际提升（如 高危→严重），**或**影响面出现数量级变化（单点→批量接管/遍历），才调 submit_escalation，交出升级后的完整证据链。
+- 没打穿、原地打转、危害和原洞一样 → 调 abandon_escalation 说明原因，**不要**为了交付而灌水。
+- 有限轮数内没进展就 abandon，不恋战。宁可放弃，不交半成品。
+"""
+
+ESCALATE_SYSTEM_PROMPT_ENTERPRISE = ESCALATE_SYSTEM_PROMPT.replace(
+    "多少用户/记录", "多少用户/员工/客户"
+).replace(
+    "如大量用户 / 全部账号", "如全部员工 / 全部客户"
+)
+
+
+def escalate_system_prompt(src_type: str | bool | None) -> str:
+    return ESCALATE_SYSTEM_PROMPT_ENTERPRISE if is_enterprise_src(src_type) else ESCALATE_SYSTEM_PROMPT
+
+
+# ── 扩大危害入口白名单：只有「有纵向升级空间」的漏洞类型才自动触发深挖，省钱且不打无用功 ──
+# 命中即触发；已经顶格(严重)或升级空间小的类型(纯 XSS/CSRF)不触发。
+_ESCALATE_TYPE_KEYWORDS = (
+    "未授权", "越权", "idor", "信息泄露", "敏感信息", "泄露",
+    "ssrf", "任意文件读", "文件读取", "任意文件下载", "目录遍历", "路径穿越",
+    "弱口令", "默认口令", "默认密码", "登录绕过", "认证绕过",
+    "sql", "注入",
+)
+# 已经是这些顶格危害的洞没必要再升级
+_ESCALATE_ALREADY_TOP = (
+    "接管", "getshell", "get shell", "rce", "命令执行", "任意文件写",
+    "任意文件上传", "反序列化", "提权",
+)
+
+
+def should_escalate(vuln_type: str, title: str, severity: str) -> bool:
+    """判断一个已 accepted 的洞是否值得自动触发『扩大危害』深挖。
+
+    - 已经是严重且标题已含顶格危害(接管/RCE等) → 无升级空间，跳过。
+    - 类型命中白名单(未授权/越权/信息泄露/SSRF/文件读/弱口令/注入等) → 触发。
+    - 其它(纯 XSS/CSRF/低价值) → 跳过，省钱。
+    """
+    blob = f"{vuln_type or ''} {title or ''}".lower()
+    if severity == "严重" and any(k in blob for k in _ESCALATE_ALREADY_TOP):
+        return False
+    return any(k in blob for k in _ESCALATE_TYPE_KEYWORDS)
+
+
 COLLECTOR_QUERY_PROMPT = """你是 FOFA 网络空间测绘语法专家，为一个 EduSRC（教育行业）自动化漏洞挖掘任务生成目标搜集语法。
 
 # 你的任务

@@ -28,7 +28,7 @@ from app.agents import prefilter
 from app.agents import site_collab
 from app.agents import target_cluster
 from app.agents.deepen import DEEPEN_CAP  # 单 target 深挖上限（人工+AI 合计，防死循环）
-from app.agents.prompts import is_enterprise_src
+from app.agents.prompts import is_enterprise_src, should_escalate
 from app.agents.reviewer import Reviewer
 from app.agents.worker import Worker
 from app.agent_runtime import AGENT_EXECUTOR, COLLECTOR_IO_EXECUTOR, agent_semaphore, shutdown_agent_executor
@@ -53,6 +53,38 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# 等级排序：用于「扩大危害」显著性判定（升级是否真的更严重）。
+_SEVERITY_RANK = {"低危": 1, "中危": 2, "高危": 3, "严重": 4}
+# 升级后类型命中这些关键词，即使等级没跳变也算「定性质变」（顶格危害）。
+_ESCALATE_TOPTIER_KEYWORDS = (
+    "接管", "密码重置", "改密", "rce", "命令执行", "getshell", "get shell",
+    "提权", "权限提升", "任意文件写", "任意文件上传", "任意用户", "全部",
+)
+# 影响面数量级阈值：impact_count 达到此值也算「影响面质变」。
+_ESCALATE_IMPACT_THRESHOLD = int(os.environ.get("ESCALATE_IMPACT_THRESHOLD", "100"))
+
+
+def _escalation_is_significant(orig_severity: str, res: dict) -> bool:
+    """判定扩大危害结果是否『显著』——不显著则丢弃，不产出新 finding。
+
+    满足任一即算显著：
+      1. 等级实际跳变（新等级 > 原等级）；
+      2. 定性质变（升级后类型/标题命中顶格危害关键词，如 接管/RCE）；
+      3. 影响面数量级（impact_count ≥ 阈值）。
+    """
+    if not res or not res.get("escalated"):
+        return False
+    new_sev = res.get("severity") or ""
+    if _SEVERITY_RANK.get(new_sev, 0) > _SEVERITY_RANK.get(orig_severity, 0):
+        return True
+    blob = f"{res.get('vuln_type','')} {res.get('title','')}".lower()
+    if any(k in blob for k in _ESCALATE_TOPTIER_KEYWORDS):
+        return True
+    if int(res.get("impact_count", 0) or 0) >= _ESCALATE_IMPACT_THRESHOLD:
+        return True
+    return False
+
+
 LOOP_INTERVAL = 3.0
 LOW_WATERMARK = 5
 MAX_RETRY = 1  # 单 target 最多再挖 1 次
@@ -65,6 +97,8 @@ WORKER_MAX_WALL_TIMEOUT = float(os.environ.get("WORKER_MAX_WALL_TIMEOUT", str(ma
 WORKER_WAIT_POLL_INTERVAL = float(os.environ.get("WORKER_WAIT_POLL_INTERVAL", "10"))
 REVIEW_WALL_TIMEOUT = float(os.environ.get("REVIEW_WALL_TIMEOUT", "600"))
 KILLSWEEP_WALL_TIMEOUT = float(os.environ.get("KILLSWEEP_WALL_TIMEOUT", "3600"))
+# 扩大危害深挖刻意克制：轮数少、墙钟短，打不动就撤。
+ESCALATE_WALL_TIMEOUT = float(os.environ.get("ESCALATE_WALL_TIMEOUT", "900"))
 WORKER_CLEANUP_TIMEOUT = float(os.environ.get("WORKER_CLEANUP_TIMEOUT", "15"))
 REVIEW_RETRY_BACKOFF = float(os.environ.get("REVIEW_RETRY_BACKOFF", "300"))
 TARGET_HEARTBEAT_INTERVAL = float(os.environ.get("TARGET_HEARTBEAT_INTERVAL", "30"))
@@ -284,6 +318,9 @@ class TaskRunner:
         self._killsweep_inflight: set[str] = set()  # 正在做通杀分析的 finding_id
         self._killsweep_tasks: dict[str, asyncio.Task] = {}
         self._killsweep_cancel_events: dict[str, threading.Event] = {}
+        self._escalation_inflight: set[str] = set()  # 正在做扩大危害深挖的 finding_id
+        self._escalation_tasks: dict[str, asyncio.Task] = {}
+        self._escalation_cancel_events: dict[str, threading.Event] = {}
         # 实时看板：每个在跑 worker 的活态 {target_id: {host, url, round, action, started_at, findings}}
         self._live: dict[str, dict] = {}
         self._worker_last_activity: dict[str, float] = {}
@@ -311,6 +348,8 @@ class TaskRunner:
             "review_tasks": len(self._review_tasks),
             "killsweep_inflight": len(self._killsweep_inflight),
             "killsweep_tasks": len(self._killsweep_tasks),
+            "escalation_inflight": len(self._escalation_inflight),
+            "escalation_tasks": len(self._escalation_tasks),
             "live_workers": [
                 {
                     "target_id": item.get("target_id"),
@@ -835,6 +874,7 @@ class TaskRunner:
         await self._cancel_active_workers(f"{reason}：运行中 worker 已取消并回队")
         self._cancel_review_tasks(reason)
         self._cancel_killsweep_tasks(reason)
+        self._cancel_escalation_tasks(reason)
 
     async def _cancel_active_workers(self, reason: str) -> None:
         target_ids = list(self._active_workers.keys())
@@ -886,6 +926,15 @@ class TaskRunner:
         self._killsweep_tasks.clear()
         self._killsweep_inflight.clear()
         self._killsweep_cancel_events.clear()
+
+    def _cancel_escalation_tasks(self, reason: str) -> None:
+        for ev in self._escalation_cancel_events.values():
+            ev.set()
+        for task in list(self._escalation_tasks.values()):
+            task.cancel()
+        self._escalation_tasks.clear()
+        self._escalation_inflight.clear()
+        self._escalation_cancel_events.clear()
 
     def _queue_or_dead_after_attempt(self, tgt: Target, reason: str) -> bool:
         """失败/恢复后的统一回队策略。返回 True=回队，False=终态 dead。
@@ -2139,6 +2188,7 @@ class TaskRunner:
             rv["reviewer_notes"] = (rv.get("reviewer_notes", "") +
                                     "\n[系统] 审核未给最终等级，已按 worker 自评兜底。").strip()
 
+        escalate_finding = False
         async with SessionLocal() as session:
             f = await session.get(Finding, finding_id)
             if f:
@@ -2163,6 +2213,16 @@ class TaskRunner:
                                 finding_id=finding_id, verdict=rv["verdict"],
                                 severity=rv.get("severity_final"), score=rv["score"])
                 # 通杀 Hunter 不在 AI accepted 后触发；必须等人工复审 passed 后再启动。
+                # 扩大危害 Hunter：AI accepted 后自动触发（仅对有纵向升级空间的洞），
+                # 顺着已确认据点再打一层，显著升级才产出新 finding，否则丢弃。
+                escalate_finding = (
+                    rv["verdict"] == "accepted"
+                    and f.worker_id != "escalation"  # 断递归：升级洞不再触发升级
+                    and should_escalate(f.vuln_type, f.title, rv.get("severity_final") or "")
+                )
+        # commit 之后、脱离 session 再触发，避免把后台任务寿命绑在本次事务上。
+        if escalate_finding:
+            self.trigger_escalation(task_id, finding_id, rv.get("severity_final") or "")
 
     async def _apply_deepen(self, session: AsyncSession, finding: Finding, rv: dict) -> str:
         """审核打回深挖：复用共享回炉逻辑（与人工复审「继续深挖」同一套）。"""
@@ -2364,6 +2424,170 @@ class TaskRunner:
         except IntegrityError:
             return False
         return True
+
+    def trigger_escalation(self, task_id: str, finding_id: str, orig_severity: str) -> bool:
+        """AI accepted 后触发扩大危害深挖；finding 级 inflight 去重，单洞只打一次。"""
+        if finding_id in self._escalation_inflight:
+            return False
+        self._escalation_inflight.add(finding_id)
+        self._escalation_tasks[finding_id] = asyncio.create_task(
+            self._run_escalation(task_id, finding_id, orig_severity)
+        )
+        return True
+
+    async def _run_escalation(self, task_id: str, finding_id: str, orig_severity: str) -> None:
+        try:
+            await self._run_escalation_inner(task_id, finding_id, orig_severity)
+        except Exception:
+            async with SessionLocal() as s:
+                await self._log(s, "escalation", "error",
+                                f"扩大危害深挖异常: {traceback.format_exc()[:400]}", level="error",
+                                finding_id=finding_id)
+        finally:
+            self._escalation_inflight.discard(finding_id)
+            self._escalation_tasks.pop(finding_id, None)
+            self._escalation_cancel_events.pop(finding_id, None)
+
+    async def _run_escalation_inner(self, task_id: str, finding_id: str, orig_severity: str) -> None:
+        from app.agents.escalate import EscalateHunter
+        loop = asyncio.get_running_loop()
+
+        async with SessionLocal() as session:
+            f = await session.get(Finding, finding_id)
+            if not f:
+                return
+            task = await session.get(Task, task_id)
+            src_type = (task.src_type if task else "edusrc") or "edusrc"
+            target_id = f.target_id
+            finding_dict = {
+                "title": f.title, "vuln_type": f.vuln_type, "target_url": f.target_url,
+                "owner": f.owner, "description": f.description, "poc": f.poc,
+                "raw_request": f.raw_request, "raw_response": f.raw_response,
+                "kill_chain": f.kill_chain, "severity": orig_severity,
+            }
+
+        llm = _llm_for_task(await self._get_task(task_id))
+        cancel_event = threading.Event()
+        self._escalation_cancel_events[finding_id] = cancel_event
+
+        def emit(kind: str, data: dict):
+            asyncio.run_coroutine_threadsafe(
+                bus.publish(task_id, {"agent": "escalation", "kind": kind, "finding_id": finding_id, **data}),
+                loop,
+            )
+
+        def do_hunt() -> dict:
+            hunter = EscalateHunter(
+                finding_dict, llm=llm, on_event=emit,
+                src_type=src_type, cancel_event=cancel_event,
+            )
+            try:
+                return hunter.run().model_dump(mode="json")
+            finally:
+                hunter.executor.kill_processes()
+
+        escalate_sem = agent_semaphore("escalation")
+        await escalate_sem.acquire()
+        hunt_future = loop.run_in_executor(AGENT_EXECUTOR, do_hunt)
+
+        def _release_escalation(fut: asyncio.Future) -> None:
+            escalate_sem.release()
+            _consume_task_exception(fut)
+
+        hunt_future.add_done_callback(_release_escalation)
+        try:
+            res = await asyncio.wait_for(asyncio.shield(hunt_future), timeout=ESCALATE_WALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            cancel_event.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(hunt_future), timeout=WORKER_CLEANUP_TIMEOUT)
+            except Exception:
+                hunt_future.add_done_callback(_consume_task_exception)
+            res = {"escalated": False, "reason": f"扩大危害深挖超时(>{int(ESCALATE_WALL_TIMEOUT)}s)"}
+        except asyncio.CancelledError:
+            cancel_event.set()
+            hunt_future.add_done_callback(_consume_task_exception)
+            return
+        except Exception as e:
+            res = {"error": str(e)}
+
+        if res.get("error"):
+            async with SessionLocal() as s:
+                if self._is_quota_error(str(res["error"])):
+                    await self._stop_task_for_quota(s, str(res["error"]), finding_id=finding_id)
+                    await self._log(s, "orchestrator", "quota_stop",
+                                    f"扩大危害阶段检测到 LLM/API 额度不足，任务已自动停止: {str(res['error'])[:120]}",
+                                    level="error", finding_id=finding_id)
+                else:
+                    await self._log(s, "escalation", "error", f"扩大危害深挖失败: {res['error']}",
+                                    level="warn", finding_id=finding_id)
+            return
+
+        # 显著性门槛：不显著就丢弃，只留一条事件，不产出新 finding、不污染报告。
+        if not _escalation_is_significant(orig_severity, res):
+            reason = res.get("reason") or "未达到显著升级门槛（等级未提升且影响面无质变）"
+            async with SessionLocal() as s:
+                await self._log(s, "escalation", "escalate_skip",
+                                f"扩大危害未显著，已放弃: {reason[:160]}", finding_id=finding_id)
+            return
+
+        await self._persist_escalation_finding(task_id, target_id, finding_id, orig_severity, res)
+
+    async def _persist_escalation_finding(self, task_id: str, target_id: str, origin_finding_id: str,
+                                          orig_severity: str, res: dict) -> None:
+        """显著升级 → 生成一个全新 Finding（走 pending_review 审核流程，进报告）。
+
+        原 finding 不动；新 finding 用独立 dedup_key，避免被原洞查重拦掉。
+        """
+        title = res.get("title") or "扩大危害升级"
+        vuln_type = res.get("vuln_type") or ""
+        new_severity = res.get("severity") or orig_severity
+        finding_payload = {
+            "description": res.get("description", ""),
+            "poc": res.get("poc", ""),
+            "raw_request": res.get("raw_request", ""),
+            "raw_response": res.get("raw_response", ""),
+            "affected_scope": res.get("affected_scope", ""),
+            "kill_chain": res.get("kill_chain", []),
+        }
+        async with SessionLocal() as session:
+            origin = await session.get(Finding, origin_finding_id)
+            if origin is None:
+                return
+            base_ref = origin.target_url or origin.owner or origin_finding_id
+            payload_for_key = {
+                "title": title, "vuln_type": vuln_type,
+                "target_url": origin.target_url, "host": origin.target_url,
+            }
+            # 独立 dedup_key：拼上升级标记 + 源 finding，确保不与原洞撞键。
+            base_key = dedup.dedup_key(base_ref, payload_for_key)
+            new_key = f"{base_key}:esc:{origin_finding_id[:8]}"
+            try:
+                async with session.begin_nested():
+                    session.add(Finding(
+                        task_id=task_id, target_id=target_id, worker_id="escalation",
+                        vuln_type=vuln_type, title=title,
+                        severity_claimed=new_severity,
+                        target_url=origin.target_url, owner=origin.owner,
+                        description=finding_payload["description"],
+                        steps=[], poc=finding_payload["poc"],
+                        raw_request=finding_payload["raw_request"],
+                        raw_response=finding_payload["raw_response"],
+                        evidence={"escalated_from": origin_finding_id, "orig_severity": orig_severity,
+                                  "impact_count": int(res.get("impact_count", 0) or 0)},
+                        affected_scope=finding_payload["affected_scope"],
+                        kill_chain=finding_payload["kill_chain"],
+                        self_check={},
+                        dedup_key=new_key, status="pending_review",
+                    ))
+                await session.commit()
+            except IntegrityError:
+                # 已存在同键升级洞（重复触发/并发），跳过。
+                return
+            await self._log(session, "escalation", "escalate_done",
+                            f"扩大危害成功「{origin.title}」→「{title}」({orig_severity}→{new_severity})，"
+                            f"已生成新洞进审核",
+                            finding_id=origin_finding_id, new_severity=new_severity)
 
     async def _get_task(self, task_id: str) -> Task:
         async with SessionLocal() as s:
