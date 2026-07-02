@@ -290,6 +290,78 @@ async def rejected_list(task_id: str, search: Optional[str] = Query(None, alias=
     return [d for d in out if _matches_query(d, search)]
 
 
+@router.get("/tasks/{task_id}/archived")
+async def archived_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                        limit: int = Query(0, ge=0, le=200),
+                        offset: int = Query(0, ge=0),
+                        session: AsyncSession = Depends(get_session)):
+    """AI 未采纳归档：AI 审核判 ignored（疑似误杀）或 deepen 深挖后未升级归档的漏洞。
+    数据保留、默认不进主流程，供人工回看纠错——一键「恢复到复审队列」可救回被误判的好洞。
+
+    支持分页（limit/offset）：量大时前端一次拉 50 条、滚动加载更多，避免一次全量拉取卡顿。
+    搜索走服务端（q），保证跨全部页命中而不是只在已加载页里搜。"""
+    q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
+        Finding.task_id == task_id,
+        Review.verdict.in_(["ignored", "deepen"]),
+        Review.user_status == "pending",   # 用户已处理过的不再摆进来
+        Finding.status != "superseded",    # 正在回炉重挖的 deepen 前身不显示（避免和新一轮重复）
+    ).order_by(Review.reviewed_at.desc().nullslast(), Review.score.desc())
+
+    def _to_dict(f, r):
+        d = _finding_dict(f, r)
+        # 归档原因：ignored=AI 判非漏洞/误杀；deepen=打回深挖但未升级出新洞
+        if r.verdict == "ignored":
+            d["archive_reason"] = "ignored"
+            d["archive_reason_text"] = "AI 判为非漏洞（可能误杀）"
+        else:
+            d["archive_reason"] = "deepen"
+            d["archive_reason_text"] = "打回深挖未升级"
+        d["ignore_reasons"] = r.ignore_reasons or []
+        d["deepen_directive"] = r.deepen_directive or ""
+        return d
+
+    # 有搜索时：DB 层无法覆盖全文匹配（跨报告正文/理由等 JSON 字段），仍需取全量再过滤，
+    # 但过滤后仍按 limit/offset 切片，保持分页协议一致。
+    if search and search.strip():
+        rows = (await session.execute(q)).all()
+        matched = [d for d in (_to_dict(f, r) for f, r in rows) if _matches_query(d, search)]
+        if not limit:
+            return matched
+        page = matched[offset:offset + limit]
+        return {"items": page, "has_more": offset + limit < len(matched),
+                "limit": limit, "offset": offset}
+
+    if not limit:
+        rows = (await session.execute(q)).all()
+        return [_to_dict(f, r) for f, r in rows]
+
+    # DB 层分页：多取 1 条判断是否还有下一页
+    rows = (await session.execute(q.offset(offset).limit(limit + 1))).all()
+    has_more = len(rows) > limit
+    page = [_to_dict(f, r) for f, r in rows[:limit]]
+    return {"items": page, "has_more": has_more, "limit": limit, "offset": offset}
+
+
+@router.post("/results/{finding_id}/restore")
+async def restore_archived(finding_id: str, session: AsyncSession = Depends(get_session)):
+    """把 AI 未采纳（ignored/deepen）的归档漏洞救回复审队列：
+    verdict 改 accepted、user_status 置 pending，人工重新裁决。用于纠正 AI 误判。"""
+    r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "审核记录不存在")
+    if r.verdict not in ("ignored", "deepen"):
+        raise HTTPException(400, "该漏洞不在 AI 未采纳归档中，无需恢复")
+    r.verdict = "accepted"
+    r.user_status = "pending"
+    prev_note = (r.reviewer_notes or "").rstrip()
+    r.reviewer_notes = (prev_note + "\n[人工恢复] 由 AI 未采纳归档手动救回复审队列。").strip()
+    f = await session.get(Finding, finding_id)
+    if f and f.status != "superseded":
+        f.status = "reviewed"
+    await session.commit()
+    return {"ok": True, "id": finding_id}
+
+
 @router.get("/tasks/{task_id}/killsweeps")
 async def killsweep_list(task_id: str, only_hits: bool = True,
                          search: Optional[str] = Query(None, alias="q"),

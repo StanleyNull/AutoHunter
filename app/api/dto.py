@@ -78,6 +78,7 @@ class TaskStats(BaseModel):
     review_pending: int = 0   # 复审队列：AI accepted 且用户 pending
     submit_ready: int = 0     # 待提交：用户复审 passed 且尚未提交
     rejected: int = 0         # 已驳回：用户复审 rejected
+    archived: int = 0         # AI 未采纳：verdict ignored/deepen 且用户 pending、非 superseded
 
 
 class TaskResponse(BaseModel):

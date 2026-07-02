@@ -16,6 +16,7 @@ const queue = ref([]);             // 复审队列
 const submitItems = ref([]);       // 待提交
 const killsweepItems = ref([]);    // 通杀列
 const rejectedItems = ref([]);     // 已驳回
+const archivedItems = ref([]);     // AI 未采纳归档（ignored/deepen，可救回）
 const expandedKillsweeps = ref(new Set());
 const searchDraft = ref("");
 const searchText = ref("");
@@ -31,13 +32,16 @@ const refreshing = ref(false);
 const loadedTaskId = ref("");
 const submitHasMore = ref(false);
 const submitLoading = ref(false);
+const archivedHasMore = ref(false);
+const archivedLoading = ref(false);
+const ARCHIVED_PAGE_SIZE = 50;
 const bulkWorking = ref(false);
 const SUBMIT_PAGE_SIZE = 120;
 const EXPORT_PAGE_SIZE = 80;
 let ws = null, poll = null, boardPoll = null, searchTimer = null;
 let wsReconnectTimer = null, wsReconnectAttempt = 0, wsIntentionalClose = false;
 let eventRefreshTimer = null, eventRefreshPending = null;
-const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected"]);
+const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived"]);
 // 记录哪些列表 tab 已经加载过数据：首屏只拉看板，列表按需加载；后台只刷新看过的列表。
 const loadedTabs = ref(new Set());
 
@@ -100,6 +104,29 @@ async function loadRejected() {
   const rows = await api.rejectedList(id);
   if (id === props.id) rejectedItems.value = rows.map(withSearchCache);
 }
+async function loadArchived(opts = {}) {
+  const id = props.id;
+  const reset = opts.reset !== false;
+  const offset = reset ? 0 : archivedItems.value.length;
+  archivedLoading.value = true;
+  try {
+    const res = await api.archivedList(id, undefined, {
+      limit: ARCHIVED_PAGE_SIZE,
+      offset,
+    });
+    const rows = Array.isArray(res) ? res : (res.items || []);
+    const next = rows.map(withSearchCache);
+    if (id !== props.id) return;
+    archivedItems.value = reset ? next : [...archivedItems.value, ...next];
+    archivedHasMore.value = !Array.isArray(res) && !!res.has_more;
+  } finally {
+    archivedLoading.value = false;
+  }
+}
+async function loadMoreArchived() {
+  if (archivedLoading.value || !archivedHasMore.value) return;
+  await loadArchived({ reset: false });
+}
 
 async function refreshAll(opts = {}) {
   const background = !!opts.background;
@@ -125,6 +152,7 @@ async function loadTabData(t = tab.value) {
   else if (t === "submit") await loadSubmit({ reset: true });
   else if (t === "killsweep") await loadKillsweeps();
   else if (t === "rejected") await loadRejected();
+  else if (t === "archived") await loadArchived();
   else return;
   markTabLoaded(t);
 }
@@ -157,6 +185,9 @@ async function refreshFromEvent(ev) {
   if ((k.includes("finding") || k.includes("review")) && shouldRefreshTab("rejected")) {
     jobs.push(loadTabData("rejected"));
   }
+  if ((k.includes("finding") || k.includes("review")) && shouldRefreshTab("archived")) {
+    jobs.push(loadTabData("archived"));
+  }
   if ((k.includes("submit") || k.includes("review")) && shouldRefreshTab("submit")) {
     jobs.push(loadTabData("submit"));
   }
@@ -183,6 +214,8 @@ function resetTaskState(full = true) {
     submitItems.value = [];
     killsweepItems.value = [];
     rejectedItems.value = [];
+    archivedItems.value = [];
+    archivedHasMore.value = false;
     submitHasMore.value = false;
     loadedTabs.value = new Set();
     clearSearch();
@@ -443,6 +476,20 @@ async function onTaskSaved(updated) {
 function openReview(id) { drawerId.value = id; drawerMode.value = "review"; }
 function openSubmit(id) { drawerId.value = id; drawerMode.value = "submit"; }
 function openRejected(id) { drawerId.value = id; drawerMode.value = "rejected"; }
+function openArchived(id) { drawerId.value = id; drawerMode.value = "archived"; }
+async function restoreArchived(id) {
+  try {
+    await api.restoreArchived(id);
+    toast("已恢复到复审队列");
+    archivedItems.value = archivedItems.value.filter((f) => f.id !== id);
+    const jobs = [];
+    if (shouldRefreshTab("review")) jobs.push(loadTabData("review"));
+    jobs.push(loadBoard());
+    await Promise.all(jobs);
+  } catch (e) {
+    toast(`恢复失败：${e?.message || e}`);
+  }
+}
 function toggleKillsweep(id) {
   const next = new Set(expandedKillsweeps.value);
   if (next.has(id)) next.delete(id);
@@ -611,6 +658,8 @@ const sweepCount = computed(() =>
   Math.max(stats.value.killsweep ?? 0, loadedTabs.value.has("killsweep") ? killsweepItems.value.length : 0));
 const rejectedCount = computed(() =>
   Math.max(stats.value.rejected ?? 0, loadedTabs.value.has("rejected") ? rejectedItems.value.length : 0));
+const archivedCount = computed(() =>
+  Math.max(stats.value.archived ?? 0, loadedTabs.value.has("archived") ? archivedItems.value.length : 0));
 const totalTargets = computed(() =>
   (stats.value.queued ?? 0) + (stats.value.scanning ?? 0) +
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
@@ -729,11 +778,13 @@ const filteredQueue = computed(() => queue.value.filter(matchSearch));
 const filteredSubmit = computed(() => submitItems.value.filter(matchSearch));
 const filteredKillsweeps = computed(() => killsweepItems.value.filter(matchSearch));
 const filteredRejected = computed(() => rejectedItems.value.filter(matchSearch));
+const filteredArchived = computed(() => archivedItems.value.filter(matchSearch));
 const visibleCount = computed(() => {
   if (tab.value === "review") return filteredQueue.value.length;
   if (tab.value === "submit") return filteredSubmit.value.length;
   if (tab.value === "killsweep") return filteredKillsweeps.value.length;
   if (tab.value === "rejected") return filteredRejected.value.length;
+  if (tab.value === "archived") return filteredArchived.value.length;
   return 0;
 });
 const rawCount = computed(() => {
@@ -741,6 +792,7 @@ const rawCount = computed(() => {
   if (tab.value === "submit") return submitItems.value.length;
   if (tab.value === "killsweep") return killsweepItems.value.length;
   if (tab.value === "rejected") return rejectedItems.value.length;
+  if (tab.value === "archived") return archivedItems.value.length;
   return 0;
 });
 function evClass(ev) { return `ev ${ev.level || "info"}`; }
@@ -885,6 +937,10 @@ function parseEventTs(ts) {
       <button type="button" role="tab" :aria-selected="tab === 'rejected'" :class="{ active: tab === 'rejected' }" @click="tab = 'rejected'">
         <span class="tab-long">已驳回</span><span class="tab-short">驳回</span>
         <i v-if="rejectedCount">{{ rejectedCount }}</i>
+      </button>
+      <button type="button" role="tab" :aria-selected="tab === 'archived'" :class="{ active: tab === 'archived' }" @click="tab = 'archived'">
+        <span class="tab-long">AI 未采纳</span><span class="tab-short">未采纳</span>
+        <i v-if="archivedCount">{{ archivedCount }}</i>
       </button>
     </div>
 
@@ -1078,6 +1134,37 @@ function parseEventTs(ts) {
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
+    </div>
+
+    <!-- AI 未采纳归档：ignored（疑似误杀）/ deepen 未升级，保留可回看纠错，一键救回复审 -->
+    <div v-show="tab === 'archived'" class="list-panel">
+      <div class="list-head">
+        <span>AI 未采纳</span>
+        <small>AI 判为非漏洞或深挖未升级的洞，保留在此防误杀，可点开查看、必要时「恢复到复审」</small>
+        <small v-if="archivedItems.length" class="muted">已加载 {{ archivedItems.length }} 条{{ archivedHasMore ? "，还有更多" : "" }}</small>
+      </div>
+      <div v-if="!archivedItems.length" class="empty">
+        暂无 AI 未采纳的漏洞（AI 审核判「非漏洞」或「深挖未升级」的洞会沉淀到这里，防止误杀）
+      </div>
+      <div v-else-if="!filteredArchived.length" class="empty">没有匹配当前关键词的未采纳漏洞</div>
+      <div v-for="f in filteredArchived" :key="f.id" class="result-row archived" @click="openArchived(f.id)">
+        <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
+        <div class="rr-main">
+          <div class="rr-title">
+            <span class="arch-tag" :class="f.archive_reason">{{ f.archive_reason_text }}</span>
+            {{ f.title }}
+          </div>
+          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div v-if="f.ignore_reasons?.length" class="meta rr-note">AI 理由：{{ f.ignore_reasons.join("；") }}</div>
+        </div>
+        <div class="rr-side" @click.stop>
+          <span class="score">{{ f.review?.score ?? "-" }}</span>
+          <button v-if="!readonly" class="mini-action" type="button" @click="restoreArchived(f.id)">恢复到复审</button>
+        </div>
+      </div>
+      <button v-if="archivedHasMore" class="load-more" @click="loadMoreArchived" :disabled="archivedLoading">
+        {{ archivedLoading ? "加载中..." : "加载更多未采纳漏洞" }}
+      </button>
     </div>
 
     <ReportDrawer :finding-id="drawerId" :mode="drawerMode" :src-type="task.src_type"

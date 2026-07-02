@@ -118,6 +118,19 @@ async function restore() {
   emit("close");
 }
 
+async function restoreArchived() {
+  // AI 未采纳（ignored/deepen）：verdict 本非 accepted，只改 user_status 无效，
+  // 必须走专用接口把 verdict 改回 accepted 才能真正进复审队列。
+  try {
+    await api.restoreArchived(f.value.id);
+    emit("toast", "已恢复到复审队列");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
+}
+
 function copyMd() {
   copyText(buildReportMd(f.value)).then(() => emit("toast", "报告已复制（Markdown）"))
     .catch(() => emit("toast", "复制失败，请使用导出按钮"));
@@ -341,6 +354,25 @@ async function askAssistant(preset = "") {
           <span class="grow"></span>
           <button class="deep" @click="deepenOpen = !deepenOpen">+ 继续深挖</button>
           <button class="ok" @click="restore">↩ 恢复到复审队列</button>
+        </div>
+      </div>
+
+      <!-- AI 未采纳操作栏（ignored/deepen 归档）：恢复走专用接口改 verdict，才能真正进复审 -->
+      <div v-if="mode === 'archived' && !readonly" class="review-wrap">
+        <div v-if="deepenOpen" class="deepen-box">
+          <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
+          <textarea v-model="deepenText" rows="2"
+            placeholder="例：用泄露的初始密码 123456 实际登录某个真实账号，证明能进系统拿到数据"></textarea>
+          <div class="deepen-actions">
+            <button class="ghost" @click="deepenOpen = false">取消</button>
+            <button class="go" @click="submitDeepen">↻ 打回深挖并重新入队</button>
+          </div>
+        </div>
+        <div class="review-bar">
+          <span class="rb-hint">AI 未采纳，可救回复审或继续深挖</span>
+          <span class="grow"></span>
+          <button class="deep" @click="deepenOpen = !deepenOpen">+ 继续深挖</button>
+          <button class="ok" @click="restoreArchived">↩ 恢复到复审队列</button>
         </div>
       </div>
     </div>

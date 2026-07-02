@@ -228,6 +228,17 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
         select(func.count()).select_from(Killsweep).where(
             Killsweep.task_id == task_id, Killsweep.is_killsweep == True)  # noqa: E712
     )).scalar() or 0
+    # AI 未采纳归档：与 /archived 接口筛选完全一致，保证徽标数字 == 列表条数（不用点开即预加载）
+    stats.archived = (await session.execute(
+        select(func.count()).select_from(Finding)
+        .join(Review, Review.finding_id == Finding.id)
+        .where(
+            Finding.task_id == task_id,
+            Review.verdict.in_(["ignored", "deepen"]),
+            Review.user_status == "pending",
+            Finding.status != "superseded",
+        )
+    )).scalar() or 0
     return stats
 
 
