@@ -17,7 +17,15 @@ from app.db.session import get_session
 
 router = APIRouter(prefix="/api/runtime-logs", tags=["runtime-logs"])
 
-_SECRET_RE = re.compile(r"\b(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{12,})\b")
+_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_-]{8,}"                       # OpenAI 风格 key
+    r"|Bearer\s+[A-Za-z0-9._-]{12,}"              # Authorization: Bearer
+    r"|(?i:api[_-]?key|token|secret|password|passwd|pwd|fofa[_-]?key)\s*[=:]\s*[^\s'\"&]{6,})"
+)
+# payload 中命中这些键名的值整体打码（避免嵌套结构里漏掉凭证）。
+_SENSITIVE_KEYS = re.compile(
+    r"(?i)(pass(word|wd)?|pwd|secret|token|api[_-]?key|authorization|cookie|fofa[_-]?key|access[_-]?key)"
+)
 _ANOMALY_PATTERNS = (
     "%LLM%", "%异常%", "%error%", "%Error%", "%Traceback%", "%tool_choice%",
     "%自动收敛%", "%取消%", "%超时%", "%timeout%", "%deferred%", "%failed%",
@@ -31,7 +39,14 @@ def _mask_text(value: str, limit: int = 1200) -> str:
 
 def _mask_payload(value: Any) -> Any:
     if isinstance(value, dict):
-        return {str(k)[:80]: _mask_payload(v) for k, v in value.items()}
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            key = str(k)[:80]
+            if _SENSITIVE_KEYS.search(key):
+                out[key] = "<masked>"
+            else:
+                out[key] = _mask_payload(v)
+        return out
     if isinstance(value, list):
         return [_mask_payload(v) for v in value[:50]]
     if isinstance(value, str):

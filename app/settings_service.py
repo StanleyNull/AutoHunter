@@ -17,13 +17,23 @@ SETTINGS_ID = "global"
 _cache: dict[str, Any] = {"llm": {}, "fofa": {}, "defaults": {}}
 
 
+# 统一脱敏占位：不再泄露密钥首尾字符，避免降低离线爆破成本。
+_MASK_PLACEHOLDER = "••••••••"
+
+
 def mask_secret(value: str) -> str:
     v = str(value or "").strip()
     if not v:
         return ""
-    if len(v) <= 8:
-        return "••••••••"
-    return f"{v[:4]}…{v[-4:]}"
+    return _MASK_PLACEHOLDER
+
+
+def is_masked_secret(value: str) -> bool:
+    """判断传入值是否为前端回显的脱敏占位（应视为“未修改”，不可回写覆盖真实密钥）。"""
+    v = str(value or "").strip()
+    if not v:
+        return False
+    return set(v) <= {"*", "•", "·", "●", "…", ".", "○", "◦"}
 
 
 def _env_llm() -> dict[str, Any]:
@@ -177,8 +187,10 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
     if "llm" in payload and payload["llm"]:
         llm = dict(row.llm or {})
         for k, v in payload["llm"].items():
-            if k == "api_key" and not str(v or "").strip():
-                continue
+            if k == "api_key":
+                # 空值或前端回显的脱敏占位都视为“未修改”，保留已存真实密钥。
+                if not str(v or "").strip() or is_masked_secret(v):
+                    continue
             if v is not None:
                 llm[k] = v
         row.llm = llm
@@ -186,8 +198,9 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
     if "fofa" in payload and payload["fofa"]:
         fofa = dict(row.fofa or {})
         for k, v in payload["fofa"].items():
-            if k == "key" and not str(v or "").strip():
-                continue
+            if k == "key":
+                if not str(v or "").strip() or is_masked_secret(v):
+                    continue
             if v is not None:
                 fofa[k] = v
         row.fofa = fofa
@@ -240,6 +253,13 @@ async def list_available_models(base_url: str | None = None, api_key: str | None
     if not key:
         return {"ok": False, "error": "未配置 API Key，无法拉取模型列表", "models": []}
     url = base if base.endswith("/models") else f"{base}/models"
+    # 该请求会携带真实 API Key，必须防 SSRF（防止 base_url 被篡改指向内网/元数据外泄密钥）。
+    from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
+
+    try:
+        assert_safe_outbound_url(url)
+    except SsrfBlocked as e:
+        return {"ok": False, "error": f"base_url 不被允许：{e}", "models": []}
     headers = {"Authorization": f"Bearer {key}"}
     try:
         async with httpx.AsyncClient(timeout=15) as client:

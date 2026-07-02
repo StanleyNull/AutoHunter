@@ -108,6 +108,12 @@ async def lifespan(app: FastAPI):
     lag_monitor = asyncio.create_task(_loop_lag_monitor())
     await init_db()
     await init_settings_cache()
+    if not auth_enabled():
+        DIAG_LOG.warning(
+            "安全告警：未配置任何访问令牌（AUTOHUNTER_API_TOKEN / _READ_TOKEN / _OBSERVER_TOKEN），"
+            "所有 /api 接口（含报告助手命令执行、设置修改、任务删除）对可达网络完全开放。"
+            "生产/公网部署务必设置 AUTOHUNTER_API_TOKEN，或仅监听 127.0.0.1。"
+        )
     if os.environ.get("AUTOHUNTER_RESTORE_ON_STARTUP", "1").lower() not in {"0", "false", "no", "off"}:
         await manager.restore_on_startup()  # 重启恢复 running/idle 任务
     else:

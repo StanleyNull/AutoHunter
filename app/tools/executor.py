@@ -102,7 +102,12 @@ class ToolExecutor:
 
     # ---- run_shell ----
     def run_shell(self, command: str, timeout: Optional[int] = None) -> dict[str, Any]:
-        timeout = timeout or worker_config.shell_timeout
+        try:
+            timeout = int(timeout) if timeout else worker_config.shell_timeout
+        except (TypeError, ValueError):
+            timeout = worker_config.shell_timeout
+        # 硬上限 + 下限：防 LLM 传超大/非法 timeout 长期占用 worker 槽位（DoS）。
+        timeout = max(1, min(timeout, worker_config.shell_timeout_max))
         try:
             check_command(command, enterprise=self.enterprise)
         except CommandBlocked as e:

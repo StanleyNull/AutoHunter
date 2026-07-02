@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import base64
+import os
 from typing import Any
 
 import httpx
 
 BASE = "https://fofa.info"
+
+# 允许指向内网/私有的 FOFA base_url 白名单（私有部署/镜像场景，逗号分隔的 host）。
+# 默认空——即默认阻断把携带 FOFA key 的请求发往内网/云元数据。
+_FOFA_ALLOWED_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get("FOFA_ALLOWED_HOSTS", "").split(",")
+    if h.strip()
+}
 
 
 class FofaError(Exception):
@@ -27,6 +36,16 @@ async def search(key: str, query: str, page: int = 1, size: int = 100,
     if not key:
         raise FofaError("缺少 FOFA key")
     base = (base_url or BASE).rstrip("/")
+    # 请求会把真实 FOFA key 放进 query，必须防 SSRF（篡改 base_url 外泄 key）。
+    # 私有 FOFA 部署可通过 FOFA_ALLOWED_HOSTS 显式放行。
+    from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
+
+    try:
+        assert_safe_outbound_url(
+            f"{base}/api/v1/search/all", allow_extra_hosts=_FOFA_ALLOWED_HOSTS
+        )
+    except SsrfBlocked as e:
+        raise FofaError(f"FOFA base_url 不被允许：{e}") from e
     params = {
         "key": key, "qbase64": _qbase64(query),
         "fields": fields, "page": str(page), "size": str(size), "full": "false",

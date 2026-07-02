@@ -34,6 +34,8 @@ class LLMConfig(BaseModel):
 class WorkerConfig(BaseModel):
     # run_shell 单命令超时（秒）
     shell_timeout: int = int(os.environ.get("WORKER_SHELL_TIMEOUT", "120"))
+    # run_shell 超时硬上限（秒）：防 LLM 传入 timeout=999999 长期占满 worker 槽位。
+    shell_timeout_max: int = int(os.environ.get("WORKER_SHELL_TIMEOUT_MAX", "600"))
     # 工具输出回传 LLM 前的截断字节数（当轮模型看完整一次即可，无需长期占历史）
     output_truncate: int = int(os.environ.get("WORKER_OUTPUT_TRUNCATE", "4096"))
     # 实际回传给 LLM 的工具输出上限。即使老环境把 WORKER_OUTPUT_TRUNCATE 设得很大，
