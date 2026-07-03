@@ -182,13 +182,62 @@ class LLMClient:
         self.usage_key = usage_key
         if not self.config.api_key:
             raise RuntimeError("缺少 LLM_API_KEY，请在 .env 中配置")
-        self._messages_protocol = "openmodel.ai" in self.config.base_url.lower()
+        # 协议自适应：先按显式配置/强特征确定；不确定时给个默认猜测(未锁定)，
+        # 运行时若首个请求报“协议不匹配”特征错误，自动切另一种协议重试并沿用。
+        self._messages_protocol, self._protocol_locked = self._detect_messages_protocol()
+        self._protocol_autoswitched = False
         self._is_https = self.config.base_url.lower().startswith("https")
         # TLS 自适应：默认走正规证书校验；只有当 base_url 是 https 且首次遇到
         # “证书校验失败”（多为自建中转/网关的自签证书）时，才自动降级为不校验并沿用。
         # 也支持显式 LLM_INSECURE_TLS=1 一开始就不校验（兜底）。
         self._insecure_tls = os.environ.get("LLM_INSECURE_TLS", "").strip() in ("1", "true", "True")
         self.client = self._build_client(insecure=self._insecure_tls)
+
+    def _detect_messages_protocol(self) -> tuple[bool, bool]:
+        """判定协议，返回 (是否 Anthropic Messages, 是否已锁定)。
+
+        - 环境变量 LLM_PROTOCOL 显式指定 → 锁定（messages/anthropic → True，openai/chat → False）。
+        - base_url 强特征（openmodel.ai / 路径含 messages / anthropic）→ 锁定 messages。
+        - base_url 强特征（路径含 chat/completions）→ 锁定 openai。
+        - 都没命中 → 默认按 openai 猜测，但**不锁定**，交给运行时自适应纠正。
+        """
+        explicit = os.environ.get("LLM_PROTOCOL", "").strip().lower()
+        if explicit in ("messages", "anthropic"):
+            return True, True
+        if explicit in ("openai", "chat", "completions"):
+            return False, True
+        url = self.config.base_url.lower()
+        if "openmodel.ai" in url or "/messages" in url or "anthropic" in url:
+            return True, True
+        if "/chat/completions" in url or "chat/completions" in url:
+            return False, True
+        return False, False  # 默认 openai，未锁定，运行时可自适应切换
+
+    def _maybe_switch_protocol(self, exc: Exception) -> bool:
+        """协议自适应：首个请求报“协议不匹配”特征错误时，自动切另一种协议重试。
+
+        仅在未锁定且未切换过时生效，只切一次（切完置位，不会来回横跳/死循环）。
+        典型触发：走错端点导致 404 / not found / no such / method not allowed /
+        提示 messages 或 chat/completions 路径不对等。
+        """
+        if self._protocol_locked or self._protocol_autoswitched:
+            return False
+        text = f"{exc} {getattr(exc, '__cause__', '')} {getattr(exc, 'detail', '')}".lower()
+        proto_markers = (
+            "404", "not found", "no such", "method not allowed", "405",
+            "unknown path", "invalid path", "/messages", "chat/completions",
+            "not a valid", "unsupported endpoint", "does not exist",
+        )
+        if any(m in text for m in proto_markers):
+            self._messages_protocol = not self._messages_protocol
+            self._protocol_autoswitched = True
+            logger.warning(
+                "LLM 端点疑似协议不匹配，已自动切换为 %s 协议重试(model=%s)",
+                "Anthropic Messages" if self._messages_protocol else "OpenAI Chat",
+                self.config.model,
+            )
+            return True
+        return False
 
     def _build_client(self, insecure: bool) -> OpenAI:
         """构造 OpenAI 客户端。insecure=True 时用不校验证书的 httpx client。"""
@@ -263,6 +312,9 @@ class LLMClient:
                     continue
                 last_exc = _classify_error(e)
                 kind = getattr(last_exc, "kind", "?")
+                # 协议自适应：端点用错协议（走错路径 404 等）时自动切 messages/openai 重试。
+                if self._maybe_switch_protocol(last_exc):
+                    continue
                 if (
                     tools
                     and not tool_choice_fallback_used
