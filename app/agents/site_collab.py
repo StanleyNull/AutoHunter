@@ -242,6 +242,133 @@ def _classify_endpoint(path: str, method: str, checks: str = "", result: str = "
     return "综合 API 验证", "先判断公开/需登录，再按未授权、越权、参数注入、数据泄露逐项验证。"
 
 
+# 三阶段元数据：给前端「协作态势」面板渲染阶段流水线用。
+PHASES: tuple[dict, ...] = (
+    {"phase": 0, "key": "recon", "label": "侦察盘点",
+     "desc": "site_map / site_js 摸清全站入口、API 与前端密钥"},
+    {"phase": 1, "key": "theme", "label": "主题深挖",
+     "desc": "认证越权 / 未授权配置 / 文件 / 注入RCE / 业务逻辑 五路分头深挖"},
+    {"phase": 2, "key": "focus", "label": "定向追打",
+     "desc": "围绕侦察发现的具体 API 逐项验证打穿"},
+)
+
+
+def _route_meta(source: str) -> SiteRoute | None:
+    """把任意 site source（含 site_fXX 追打）映射到路线定义。"""
+    return route_for_source(source)
+
+
+def build_collab_overview(rows: list[dict]) -> dict | None:
+    """把该任务的 site 路线聚合成前端可直接渲染的「协作态势」结构。
+
+    rows: 每条是一个 site target 的精简 dict，字段：
+        source, status(queued/assigned/scanning/done/skipped/dead),
+        verdict, priority_reason, findings(int), deepen_count(int)
+
+    返回三阶段(phase)结构：每阶段含 label/desc + 该阶段路线卡片列表 +
+    汇总计数；并推断整体所处阶段 current_phase。非 site 任务传空 rows → None。
+    """
+    site_rows = [r for r in rows if is_site_source(r.get("source"))]
+    if not site_rows:
+        return None
+
+    RUNNING = {"assigned", "scanning"}
+
+    def _status_of(r: dict) -> str:
+        s = (r.get("status") or "").lower()
+        if s in RUNNING:
+            return "running"
+        if s == "queued":
+            return "queued"
+        return "done"
+
+    # 定向追打(site_fXX)可能有很多条，聚合成一个"虚拟路线卡"，不逐条铺开。
+    phase_buckets: dict[int, list[dict]] = {0: [], 1: [], 2: []}
+    focus_agg = {"total": 0, "running": 0, "queued": 0, "done": 0, "findings": 0}
+
+    for r in site_rows:
+        src = r.get("source") or ""
+        route = _route_meta(src)
+        if route is None:
+            continue
+        st = _status_of(r)
+        fcount = int(r.get("findings") or 0)
+        if route.phase == 2:  # 追打路线聚合
+            focus_agg["total"] += 1
+            focus_agg[st] += 1
+            focus_agg["findings"] += fcount
+            continue
+        phase_buckets[route.phase].append({
+            "source": src,
+            "label": route.label,
+            "focus": route.focus,
+            "status": st,
+            "verdict": r.get("verdict") or "",
+            "findings": fcount,
+            "deepen_count": int(r.get("deepen_count") or 0),
+        })
+
+    # 追打聚合成单张卡塞进 phase 2（有才显示）
+    if focus_agg["total"] > 0:
+        agg_status = "running" if focus_agg["running"] else ("queued" if focus_agg["queued"] else "done")
+        phase_buckets[2].append({
+            "source": "site_focus",
+            "label": f"定向 API 追打 ×{focus_agg['total']}",
+            "focus": FOCUSED_ROUTE.focus,
+            "status": agg_status,
+            "verdict": "",
+            "findings": focus_agg["findings"],
+            "deepen_count": 0,
+            "is_aggregate": True,
+            "aggregate": focus_agg,
+        })
+
+    # 每阶段状态：有 running→active；全 done→done；有 queued 但没 running→pending；空→idle
+    phases_out = []
+    for meta in PHASES:
+        cards = phase_buckets[meta["phase"]]
+        running = sum(1 for c in cards if c["status"] == "running")
+        queued = sum(1 for c in cards if c["status"] == "queued")
+        done = sum(1 for c in cards if c["status"] == "done")
+        findings = sum(c["findings"] for c in cards)
+        if not cards:
+            pstate = "idle"
+        elif running:
+            pstate = "active"
+        elif queued:
+            pstate = "pending"
+        else:
+            pstate = "done"
+        phases_out.append({
+            **meta,
+            "state": pstate,
+            "routes": cards,
+            "counts": {"total": len(cards), "running": running,
+                       "queued": queued, "done": done, "findings": findings},
+        })
+
+    # 推断整体当前阶段：取最后一个"有活动(active/pending)"的阶段；都 done 则取最高有卡的阶段。
+    current = 0
+    for p in phases_out:
+        if p["state"] in ("active", "pending"):
+            current = p["phase"]
+    if all(p["state"] in ("idle", "done") for p in phases_out):
+        for p in phases_out:
+            if p["state"] == "done":
+                current = p["phase"]
+
+    total_routes = sum(p["counts"]["total"] for p in phases_out)
+    total_findings = sum(p["counts"]["findings"] for p in phases_out)
+    total_running = sum(p["counts"]["running"] for p in phases_out)
+
+    return {
+        "current_phase": current,
+        "phases": phases_out,
+        "totals": {"routes": total_routes, "findings": total_findings,
+                   "running": total_running},
+    }
+
+
 def followup_specs_from_coverage(
     coverage: list[dict],
     *,

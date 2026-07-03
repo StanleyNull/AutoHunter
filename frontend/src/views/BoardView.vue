@@ -12,6 +12,7 @@ const tab = ref("board");          // board | review | submit | killsweep | reje
 const boardPanel = ref("workers"); // workers | stream（手机端看板切换）
 const events = ref([]);
 const liveWorkers = ref([]);       // 在跑 worker 活态
+const siteCollab = ref(null);      // 单站协作态势（三阶段路线流水线，仅 site 任务）
 const queue = ref([]);             // 复审队列
 const submitItems = ref([]);       // 待提交
 const killsweepItems = ref([]);    // 通杀列
@@ -222,6 +223,7 @@ function resetTaskState(full = true) {
   }
   events.value = [];
   liveWorkers.value = [];
+  siteCollab.value = null;
   drawerId.value = null;
   editOpen.value = false;
 }
@@ -320,11 +322,16 @@ function fmtEvent(ev) {
   }
 }
 
+function phaseStateText(state) {
+  return { active: "进行中", pending: "排队中", done: "已完成", idle: "未开始" }[state] || "";
+}
+
 async function loadBoard() {
   const id = props.id;
   const b = await api.board(id);
   if (id !== props.id) return;
   liveWorkers.value = b.live_workers || [];
+  siteCollab.value = b.site_collab || null;
   if (task.value) {
     if (b.task_status) task.value.status = b.task_status;
     if (b.stats) task.value.stats = b.stats;
@@ -881,6 +888,59 @@ function parseEventTs(ts) {
       </div>
       <div class="mission-progress"><i :style="{ transform: `scaleX(${progressPct / 100})` }"></i></div>
     </div>
+
+    <!-- 单站协作态势：三阶段流水线（侦察→主题深挖→定向追打），体现同站多路线协同 -->
+    <section v-if="siteCollab" class="collab-panel">
+      <header class="collab-head">
+        <div class="collab-title">
+          <span class="collab-badge">单站协作</span>
+          <b>协作态势</b>
+          <small>同一目标拆成多条路线协同攻击，共享覆盖上下文、逐阶段深入</small>
+        </div>
+        <div class="collab-summary">
+          <span><i>{{ siteCollab.totals.routes }}</i>路线</span>
+          <span class="live" v-if="siteCollab.totals.running"><i>{{ siteCollab.totals.running }}</i>进行中</span>
+          <span class="hit" v-if="siteCollab.totals.findings"><i>{{ siteCollab.totals.findings }}</i>已出洞</span>
+        </div>
+      </header>
+      <div class="collab-flow">
+        <div
+          v-for="(p, pi) in siteCollab.phases"
+          :key="p.key"
+          class="collab-phase"
+          :class="[`state-${p.state}`, { current: p.phase === siteCollab.current_phase }]"
+        >
+          <div class="phase-rail">
+            <span class="phase-dot"></span>
+            <span v-if="pi < siteCollab.phases.length - 1" class="phase-line"></span>
+          </div>
+          <div class="phase-body">
+            <div class="phase-head">
+              <span class="phase-step">阶段 {{ p.phase + 1 }}</span>
+              <b>{{ p.label }}</b>
+              <span class="phase-state-tag" :class="`st-${p.state}`">{{ phaseStateText(p.state) }}</span>
+            </div>
+            <p class="phase-desc">{{ p.desc }}</p>
+            <div v-if="p.routes.length" class="phase-routes">
+              <div
+                v-for="r in p.routes"
+                :key="r.source"
+                class="route-chip"
+                :class="`rc-${r.status}`"
+                :title="r.focus"
+              >
+                <span class="route-status-dot"></span>
+                <span class="route-label">{{ r.label }}</span>
+                <span v-if="r.findings" class="route-hit">{{ r.findings }}</span>
+              </div>
+            </div>
+            <p v-else class="phase-empty">
+              {{ p.phase === 0 ? "待启动" : (p.phase === 1 ? "等侦察完成后自动派发" : "等待侦察发现具体入口") }}
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <div v-if="collectorVisible" class="collector-stage">
       <div class="collector-stage-head">

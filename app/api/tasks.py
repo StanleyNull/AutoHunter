@@ -8,6 +8,7 @@ from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dto import CreateTaskRequest, TaskResponse, TaskStats, UpdateTaskRequest
+from app.agents import site_collab
 from app.agents.prompts import normalize_src_type
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
 from app.db.session import get_session
@@ -454,6 +455,29 @@ async def delete_task(task_id: str, session: AsyncSession = Depends(get_session)
     return None
 
 
+async def _compute_site_collab(session: AsyncSession, task_id: str) -> dict | None:
+    """单站协作态势：把该任务的 site 路线按三阶段聚合，供前端「协作态势」面板渲染。
+    每条路线带上它名下已产出的 finding 数（未 superseded），让流水线能体现各路线战果。"""
+    fc_rows = (await session.execute(
+        select(Finding.target_id, func.count())
+        .where(Finding.task_id == task_id, Finding.status != "superseded")
+        .group_by(Finding.target_id)
+    )).all()
+    fc = {tid: n for tid, n in fc_rows}
+
+    rows = (await session.execute(
+        select(Target.id, Target.source, Target.status, Target.verdict,
+               Target.priority_reason, Target.deepen_count)
+        .where(Target.task_id == task_id)
+    )).all()
+    payload = [{
+        "source": r.source, "status": r.status, "verdict": r.verdict,
+        "priority_reason": r.priority_reason, "deepen_count": r.deepen_count,
+        "findings": fc.get(r.id, 0),
+    } for r in rows]
+    return site_collab.build_collab_overview(payload)
+
+
 @router.get("/{task_id}/board")
 async def task_board(task_id: str, request: Request, session: AsyncSession = Depends(get_session)):
     """实时看板快照：在跑 worker 活态 + 目标进度 + 最近事件（用于刷新后恢复）。"""
@@ -505,6 +529,11 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
         if len(events) >= 60:
             break
 
+    # 单站协作态势（仅 site 任务）：三阶段路线流水线，不含敏感数据，观察者也可看。
+    site_overview = None
+    if task.target_source == "site":
+        site_overview = await _compute_site_collab(session, task_id)
+
     return {
         "task_status": task.status,
         "live_workers": live,
@@ -513,6 +542,7 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
         "model_config_data": _observer_model_config() if observer else _public_model_config(task),
         "llm_usage": {} if observer else usage_snapshot(task.id, resolve_llm_config(task).model),
         "events": events,
+        "site_collab": site_overview,
     }
 
 
