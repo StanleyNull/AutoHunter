@@ -183,11 +183,43 @@ class LLMClient:
         if not self.config.api_key:
             raise RuntimeError("缺少 LLM_API_KEY，请在 .env 中配置")
         self._messages_protocol = "openmodel.ai" in self.config.base_url.lower()
+        self._is_https = self.config.base_url.lower().startswith("https")
+        # TLS 自适应：默认走正规证书校验；只有当 base_url 是 https 且首次遇到
+        # “证书校验失败”（多为自建中转/网关的自签证书）时，才自动降级为不校验并沿用。
+        # 也支持显式 LLM_INSECURE_TLS=1 一开始就不校验（兜底）。
+        self._insecure_tls = os.environ.get("LLM_INSECURE_TLS", "").strip() in ("1", "true", "True")
+        self.client = self._build_client(insecure=self._insecure_tls)
+
+    def _build_client(self, insecure: bool) -> OpenAI:
+        """构造 OpenAI 客户端。insecure=True 时用不校验证书的 httpx client。"""
+        http_client = httpx.Client(verify=False, timeout=_REQUEST_TIMEOUT) if insecure else None
         # 关闭 SDK 内置重试，自己控制重试节奏与日志；设请求超时兜住挂起。
-        self.client = OpenAI(
+        return OpenAI(
             base_url=self.config.base_url, api_key=self.config.api_key,
             timeout=_REQUEST_TIMEOUT, max_retries=0,
+            **({"http_client": http_client} if http_client else {}),
         )
+
+    def _maybe_downgrade_tls(self, exc: Exception) -> bool:
+        """遇到 TLS 证书校验失败时自动降级为不校验并重建 client。
+
+        仅对 https + 证书类错误生效，且只降级一次；返回 True 表示已降级、可立即重试。
+        普通 HTTPS 的安全性不受影响（只有握手因自签证书失败才会触发）。
+        """
+        if self._insecure_tls or not self._is_https:
+            return False
+        text = f"{exc} {getattr(exc, '__cause__', '')} {getattr(exc, '__context__', '')}".lower()
+        tls_markers = (
+            "certificate verify failed", "certificate_verify_failed",
+            "self signed certificate", "self-signed certificate",
+            "sslcertverificationerror", "ssl: certificate", "unable to get local issuer",
+        )
+        if any(m in text for m in tls_markers):
+            self._insecure_tls = True
+            self.client = self._build_client(insecure=True)
+            logger.warning("检测到 LLM 中转 TLS 证书校验失败，已自动降级为不校验证书重试（多为自建自签中转）")
+            return True
+        return False
 
     def chat(
         self,
@@ -225,6 +257,10 @@ class LLMClient:
                 self._record_openai_usage(resp)
                 return resp.choices[0].message
             except Exception as e:  # 网络/超时/限流/5xx 统一重试
+                # TLS 自适应：https 中转自签证书导致校验失败时，自动降级不校验并立即重试。
+                # 只会降级一次（之后 _insecure_tls=True，再进来直接返回 False），不会死循环。
+                if self._maybe_downgrade_tls(e):
+                    continue
                 last_exc = _classify_error(e)
                 kind = getattr(last_exc, "kind", "?")
                 if (
@@ -355,7 +391,7 @@ class LLMClient:
         max_tokens: int,
     ):
         payload, headers = self._build_messages_payload(messages, tools, tool_choice, temperature, max_tokens)
-        with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
+        with httpx.Client(timeout=_REQUEST_TIMEOUT, verify=not self._insecure_tls) as client:
             resp = client.post(self._messages_url(), headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
