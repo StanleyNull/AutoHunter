@@ -7,7 +7,7 @@
 接入方式：在此实现 `query_leaked_creds(domain, max_creds)`，
 返回 {ok, domain, creds:[{host, username, password, path, score}], note}。
 
-Powered By StanleyNull  
+Powered By StanleyNull
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 #  AutoHunter 引导安装脚本
-#  Powered By StanleyNull   
+#  Powered By StanleyNull
 #
 #  用法：  bash scripts/install.sh
 #  作用：  检查环境 → 交互式采集必填参数 → 生成 .env → 构建并启动容器
@@ -39,7 +39,7 @@ banner() {
                     >>  锁定 · 侦察 · 出洞  <<
 BANNER
   printf "${C_RESET}"
-  printf "${C_DIM}        Powered By StanleyNull    ${C_RESET}\n\n"
+  printf "${C_DIM}        Powered By StanleyNull${C_RESET}\n\n"
 }
 
 # ---------- 环境检查 ----------
@@ -227,7 +227,7 @@ print_summary() {
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"; [ -z "$ip" ] && ip="服务器IP"
 
   printf "\n${C_GREEN}${C_BOLD}============================================================${C_RESET}\n"
-  printf "${C_GREEN}${C_BOLD}  部署完成  ·  Powered By StanleyNull  ${C_RESET}\n"
+  printf "${C_GREEN}${C_BOLD}  部署完成  ·  Powered By StanleyNull${C_RESET}\n"
   printf "${C_GREEN}${C_BOLD}============================================================${C_RESET}\n\n"
   printf "  控制台地址 :  ${C_CYAN}http://%s:%s/${C_RESET}\n" "$ip" "$port"
   printf "  本机访问   :  ${C_CYAN}http://127.0.0.1:%s/${C_RESET}\n" "$port"

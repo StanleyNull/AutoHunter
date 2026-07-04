@@ -2,7 +2,7 @@
 set -eu
 
 # ============================================================================
-#  AutoHunter  ·  Powered By StanleyNull    ·  CC BY-NC 4.0
+#  AutoHunter  ·  Powered By StanleyNull  ·  CC BY-NC 4.0
 # ============================================================================
 
 HOST="${AUTOHUNTER_HOST:-0.0.0.0}"

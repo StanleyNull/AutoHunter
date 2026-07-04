@@ -6,7 +6,7 @@
 
 `锁定 · 侦察 · 出洞`
 
-Powered By **StanleyNull** ·  · License: CC BY-NC 4.0
+Powered By **StanleyNull** · License: CC BY-NC 4.0
 
 </div>
 
@@ -293,14 +293,14 @@ hunt.example.com {
 本项目采用 **[CC BY-NC 4.0](./LICENSE)**（署名-非商业性使用）：
 
 - ✅ 可自由使用、修改、二次分发
-- ✅ **必须保留原作者署名**：`Powered By StanleyNull ()`
+- ✅ **必须保留原作者署名**：`Powered By StanleyNull`
 - ❌ **禁止任何商业用途**
 
 ---
 
 <div align="center">
 
-**Powered By StanleyNull** · 
+**Powered By StanleyNull**
 
 *仅供授权安全测试与研究 · 请遵守当地法律法规*
 

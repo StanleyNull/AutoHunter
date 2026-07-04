@@ -148,8 +148,6 @@ onUnmounted(() => {
   <footer class="app-credit" aria-label="署名">
     <span>Powered By <b>StanleyNull</b></span>
     <span class="app-credit-sep">·</span>
-    <span></span>
-    <span class="app-credit-sep">·</span>
     <span>CC BY-NC 4.0</span>
   </footer>
 
