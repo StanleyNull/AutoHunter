@@ -12,6 +12,10 @@ Powered By **StanleyNull** · License: CC BY-NC 4.0
 
 🌱 **本项目为 Demo 级别，作者抛砖引玉，希望对大家有所帮助。**
 
+**战绩可查**
+
+<img src="assets/proof-results.png" alt="战绩可查" width="480">
+
 </div>
 
 ---
