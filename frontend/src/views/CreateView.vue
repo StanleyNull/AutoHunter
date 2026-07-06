@@ -10,6 +10,7 @@ const form = reactive({
   src_type: "edusrc",
   vuln_types: "sql_injection,rce,unauthorized_access,idor,file_upload,captcha_bypass",
   target_source: "fofa",
+  engine: "",
   fofa_query: "",
   intent_mode: "",
   manual_targets: "",
@@ -47,6 +48,7 @@ async function submit() {
     src_type: form.src_type,
     vuln_types: form.vuln_types.split(",").map((s) => s.trim()).filter(Boolean),
     target_source: form.target_source,
+    engine: form.engine,
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
     src_rules: form.src_rules,
@@ -100,6 +102,17 @@ onMounted(async () => {
           <option value="manual">手动清单</option>
           <option value="both">两者</option>
           <option value="site">单站协作</option>
+        </select>
+      </label>
+      <label v-if="!isSiteMode">搜索引擎
+        <select v-model="form.engine">
+          <option value="">默认引擎</option>
+          <option value="fofa">FOFA</option>
+          <option value="quake">360 Quake</option>
+          <option value="hunter">Hunter (鹰图)</option>
+          <option value="zoomeye">ZoomEye</option>
+          <option value="shodan">Shodan</option>
+          <option value="censys">Censys</option>
         </select>
       </label>
       <label v-if="!isSiteMode">搜集方式

@@ -738,6 +738,14 @@ const targetSourceName = computed(() => (({
   both: "FOFA+手动",
   site: "单站协作",
 })[task.value?.target_source] || task.value?.target_source || "-"));
+const engineName = computed(() => (({
+  fofa: "FOFA",
+  quake: "360 Quake",
+  hunter: "Hunter",
+  zoomeye: "ZoomEye",
+  shodan: "Shodan",
+  censys: "Censys",
+})[task.value?.engine] || task.value?.engine || "FOFA"));
 const missionScopeText = computed(() => {
   if (task.value?.target_source === "site") {
     return task.value?.fofa_query || task.value?.manual_targets?.[0] || "单站协作";
@@ -854,6 +862,7 @@ function parseEventTs(ts) {
         <div class="mission-meta">
           <span>{{ taskModeName }}</span>
           <span>{{ targetSourceName }}</span>
+          <span v-if="task.engine && task.engine !== 'fofa'" class="engine-badge">🔍 {{ engineName }}</span>
           <span>{{ missionScopeText }}</span>
           <span>并发 {{ task.concurrency }}</span>
           <span>{{ runState.hint }}</span>

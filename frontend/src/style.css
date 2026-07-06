@@ -1052,6 +1052,12 @@ main {
   background: var(--bg); border: 1px solid var(--border-soft); border-radius: 999px;
   padding: 5px 10px; font-size: 12px;
 }
+.mission-meta .engine-badge {
+  background: color-mix(in oklch, var(--accent) 15%, var(--bg));
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
 .mission-runtime {
   display: flex; flex-wrap: wrap; gap: 8px;
   margin-top: 10px;
