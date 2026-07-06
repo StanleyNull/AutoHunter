@@ -41,6 +41,7 @@ const form = reactive({
   src_type: "edusrc",
   vuln_types: "",
   target_source: "fofa",
+  engine: "",
   fofa_query: "",
   intent_mode: "",
   manual_targets: "",
@@ -74,6 +75,7 @@ function fill(task) {
   form.src_type = task.src_type || "edusrc";
   form.vuln_types = (task.vuln_types || []).join(",");
   form.target_source = task.target_source || "fofa";
+  form.engine = task.engine || "";
   form.fofa_query = task.fofa_query || "";
   form.intent_mode = fofaCfg.intent_mode || "";
   form.manual_targets = (task.manual_targets || []).join("\n");
@@ -129,6 +131,7 @@ async function save() {
     src_type: form.src_type,
     vuln_types: form.vuln_types.split(",").map((s) => s.trim()).filter(Boolean),
     target_source: form.target_source,
+    engine: form.engine,
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
     src_rules: form.src_rules,
@@ -166,6 +169,17 @@ async function save() {
             <option value="manual">手动清单</option>
             <option value="both">两者</option>
             <option value="site">单站协作</option>
+          </select>
+        </label>
+        <label v-if="!isSiteMode">搜索引擎
+          <select v-model="form.engine">
+            <option value="">默认引擎</option>
+            <option value="fofa">FOFA</option>
+            <option value="quake">360 Quake</option>
+            <option value="hunter">Hunter (鹰图)</option>
+            <option value="zoomeye">ZoomEye</option>
+            <option value="shodan">Shodan</option>
+            <option value="censys">Censys</option>
           </select>
         </label>
         <label v-if="!isSiteMode">搜集方式
