@@ -48,16 +48,31 @@ class QuakeEngine(SearchEngine):
             msg = data.get("message", str(data.get("data", "")))
             raise ValueError(f"Quake 错误: {msg}")
 
-        items = data.get("data", {}).get("items", [])
+        items = data.get("data", [])
+        meta = data.get("meta", {})
+        pagination = meta.get("pagination", {})
+        total = pagination.get("total", 0)
+
         results = []
         for item in items:
             host = item.get("hostname") or item.get("ip", "")
             port = str(item.get("port", ""))
+            # 从 service 字段提取标题
+            service = item.get("service", {}) or {}
+            title = ""
+            if isinstance(service, dict):
+                resp_text = service.get("response", "")
+                for line in resp_text.split("\n"):
+                    if line.lower().startswith("<title>"):
+                        title = line[7:].rsplit("</", 1)[0].strip()
+                        break
+                if not title:
+                    title = service.get("name", "")
             results.append([
                 host,
                 item.get("ip", ""),
                 port,
-                item.get("service", {}).get("title", "") if isinstance(item.get("service"), dict) else "",
+                title,
                 host,
                 item.get("org", ""),
             ])
@@ -65,7 +80,7 @@ class QuakeEngine(SearchEngine):
         return EngineResult(
             fields=["host", "ip", "port", "title", "domain", "org"],
             results=results,
-            size=data.get("data", {}).get("total", 0),
+            size=total,
             page=page,
             engine="quake",
         )
