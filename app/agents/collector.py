@@ -25,10 +25,10 @@ from app.agents import collector_llm, playbook_router, prefilter, scorer, site_c
 from app.agents import target_cluster
 from app.agents.prompts import is_enterprise_src
 from app.db.models import Target, Task
-from app.fofa import client as fofa
+from app.engines import get_engine, EngineResult
 from app.tools.leakcreds import query_leaked_creds
 from app.llm.client import LLMClient, LLMError
-from app.settings_service import llm_client_for_task_optional, resolve_fofa_defaults, resolve_skip_score_threshold
+from app.settings_service import llm_client_for_task_optional, resolve_engine_config, resolve_skip_score_threshold
 
 _EDUSRC_ORG_FILTER = 'org="China Education and Research Network Center"'
 _PREFILTER_CONCURRENCY = int(os.environ.get("COLLECTOR_PREFILTER_CONCURRENCY", "12"))
@@ -234,7 +234,7 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
     cfg = dict(task.fofa_config or {})
     history: list[str] = list(cfg.get("history", []))
     raw = (task.fofa_query or "").strip()
-    intent_mode = cfg.get("intent_mode") or resolve_fofa_defaults(task).get("intent_mode", "")
+    intent_mode = cfg.get("intent_mode") or resolve_engine_config(task).get("intent_mode", "")
     # 'syntax' / 'intent'，未设则启发式判断
 
     # 启发式：含 FOFA 字段符号视为语法，否则视为自然语言意图
@@ -401,12 +401,18 @@ async def _fofa_collect(
             await progress(phase, text, **payload)
 
     cfg = dict(task.fofa_config or {})
-    defaults = resolve_fofa_defaults(task)
+    defaults = resolve_engine_config(task)
+    engine_name = defaults["engine"]
+    engine = get_engine(engine_name)
+    if engine is None:
+        return 0
+
     key = defaults["key"]
     if not key:
         return 0
     max_pages = int(defaults["max_pages"])
     size = int(defaults["page_size"])
+    base_url = defaults.get("base_url") or engine.get_default_base_url()
 
     llm = _llm_for_task(task)
     history: list[str] = list(cfg.get("history", []))
@@ -425,37 +431,36 @@ async def _fofa_collect(
 
     next_cursor = cursor + 1
     try:
-        res = await fofa.search(key, cur_query, page=next_cursor, size=size,
-                                base_url=defaults.get("base_url"))
-    except fofa.FofaError as e:
-        # FOFA 失败不阻断主循环，但必须：
-        # 1) 游标不前进——否则一次瞬时错误就把当前页永久跳过（漏搜）。
-        # 2) 显式上报到看板——否则只会刷一堆「候选0/存活0/过滤器0/0」，
-        #    看板上完全看不出是 FOFA 挂了，极难排查（本次踩坑点）。
+        res = await engine.search(key, cur_query, page=next_cursor, page_size=size,
+                                  base_url=base_url)
+    except (ValueError, Exception) as e:
         err = f"{e}"[:300]
         cfg["last_fofa_error"] = err
         cfg["collector_phase"] = "fofa_error"
-        # 账号级致命错误（key 无效/过期/无 F 点/权限）连续累计，达阈值由上层暂停任务；
-        # 瞬时错误（网络/超时）重置计数，避免偶发抖动误触发暂停。
-        if getattr(e, "account_error", False):
+        # 账号级致命错误标记（各引擎用不同的错误判断逻辑）
+        err_lower = str(e).lower()
+        is_account_err = any(m in err_lower for m in (
+            "key", "token", "无效", "过期", "余额", "quota", "permission",
+            "unauthorized", "forbidden", "account", "401", "403",
+        ))
+        if is_account_err:
             cfg["fofa_auth_fail_count"] = int(cfg.get("fofa_auth_fail_count", 0)) + 1
             await report(
                 "fofa_error",
-                f"FOFA 账号无效（第 {cfg['fofa_auth_fail_count']} 次）：{err}",
+                f"{engine.display_name} 账号无效（第 {cfg['fofa_auth_fail_count']} 次）：{err}",
                 fofa_error=err, cursor=cursor, fofa_auth_fail=cfg["fofa_auth_fail_count"],
             )
         else:
             cfg["fofa_auth_fail_count"] = 0
             await report(
                 "fofa_error",
-                f"FOFA 检索失败，已跳过本轮（游标停留第 {cursor} 页，下轮重试）：{err}",
+                f"{engine.display_name} 检索失败，已跳过本轮（游标停留第 {cursor} 页，下轮重试）：{err}",
                 fofa_error=err, cursor=cursor,
             )
         task.fofa_config = {**cfg}
         return 0
     cursor = next_cursor
     cfg["fofa_auth_fail_count"] = 0
-    # 成功即清掉旧的错误标记，避免看板长期挂着一条早已恢复的 FOFA 报错。
     cfg.pop("last_fofa_error", None)
 
     # host 归属兜底过滤：即使 FOFA 语法因运算符优先级或 LLM 演化丢锚点而放宽范围，
@@ -471,10 +476,10 @@ async def _fofa_collect(
         anchor_domains = _extract_scope_anchors((task.fofa_query or "")).get("domains") or []
         scope_domains = set(anchor_domains)
 
-    fields = res["fields"]
+    fields = res.fields
     candidates: list[dict] = []
     dropped_oos = 0
-    for row in res["results"]:
+    for row in res.results:
         rec = dict(zip(fields, row)) if isinstance(row, list) else row
         host = normalize_host(rec.get("host") or rec.get("domain") or rec.get("ip") or "")
         if not host or host in seen:

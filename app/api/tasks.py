@@ -15,7 +15,7 @@ from app.db.session import get_session
 from app.llm.usage import usage_snapshot
 from app.orchestrator import manager
 from app.security import resolve_role, token_from_headers
-from app.settings_service import resolve_fofa_defaults, resolve_llm_config, resolve_worker_prompt_version
+from app.settings_service import resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -141,8 +141,9 @@ def _public_model_config(task: Task) -> dict:
 
 def _public_fofa_config(task: Task) -> dict:
     cfg = dict(task.fofa_config or {})
-    eff = resolve_fofa_defaults(task)
+    eff = resolve_engine_config(task)
     return {
+        "engine": eff.get("engine", "fofa"),
         "base_url": eff["base_url"],
         "max_pages": eff["max_pages"],
         "page_size": eff["page_size"],
@@ -166,11 +167,12 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
     return TaskResponse(
         id=t.id, name=_observer_task_name(t.name, t.id) if observer else t.name, status=t.status, src_type=t.src_type,
         vuln_types=t.vuln_types or [], target_source=t.target_source,
-        fofa_query="" if observer else t.fofa_query, concurrency=t.concurrency,
+        engine=t.engine or "", fofa_query="" if observer else t.fofa_query, concurrency=t.concurrency,
         src_rules="" if observer else (t.src_rules or ""),
         manual_targets=[] if observer else (t.manual_targets or []),
         model_config_data=model_config,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
+        engine_config={} if observer else {"engine": t.engine or ""},
         llm_usage={} if observer else usage_snapshot(t.id, model_config.get("model", "")),
         created_at=t.created_at.isoformat(), updated_at=t.updated_at.isoformat(),
         stats=stats, pending_user_review=pending_user_review,
@@ -247,12 +249,20 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
 async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(get_session)):
     if req.target_source not in {"fofa", "manual", "both", "site"}:
         raise HTTPException(400, "target_source 必须是 fofa/manual/both/site")
+    engine_name = req.engine or ""
+    # 引擎配置：合并 engine_config 和向后兼容的 fofa_config
+    fofa_cfg = req.fofa_config.model_dump(exclude_defaults=True) if req.fofa_config else {}
+    eng_cfg = req.engine_config.model_dump(exclude_defaults=True) if req.engine_config else {}
+    if engine_name and engine_name != "fofa" and eng_cfg.get("key"):
+        fofa_cfg["key"] = eng_cfg["key"]
+    if eng_cfg.get("base_url"):
+        fofa_cfg["base_url"] = eng_cfg["base_url"]
     task = Task(
         name=req.name, src_type=normalize_src_type(req.src_type), vuln_types=req.vuln_types,
         src_rules=req.src_rules, target_source=req.target_source,
-        fofa_query=req.fofa_query, manual_targets=req.manual_targets,
+        engine=engine_name, fofa_query=req.fofa_query, manual_targets=req.manual_targets,
         model_config_json=req.model_config_data.model_dump(exclude_defaults=True),
-        fofa_config=req.fofa_config.model_dump(exclude_defaults=True), concurrency=req.concurrency,
+        fofa_config=fofa_cfg, concurrency=req.concurrency,
         status="created",
     )
     session.add(task)
@@ -384,6 +394,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         if req.target_source not in {"fofa", "manual", "both", "site"}:
             raise HTTPException(400, "target_source 必须是 fofa/manual/both/site")
         task.target_source = req.target_source
+    if req.engine is not None:
+        task.engine = req.engine
     if req.manual_targets is not None:
         task.manual_targets = [t.strip() for t in req.manual_targets if str(t).strip()]
     if req.concurrency is not None:
@@ -402,6 +414,15 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         if str(patch.get("api_key") or "").strip():
             cfg["api_key"] = str(patch["api_key"]).strip()
         task.model_config_json = cfg
+
+    if req.engine_config is not None:
+        ec_patch = req.engine_config.model_dump(exclude_unset=True)
+        ec_cfg = dict(task.fofa_config or {})
+        if "key" in ec_patch and str(ec_patch.get("key") or "").strip():
+            ec_cfg["key"] = str(ec_patch["key"]).strip()
+        if "base_url" in ec_patch and ec_patch["base_url"] is not None:
+            ec_cfg["base_url"] = ec_patch["base_url"]
+        task.fofa_config = ec_cfg
 
     if req.fofa_config is not None:
         patch = req.fofa_config.model_dump(exclude_unset=True)
