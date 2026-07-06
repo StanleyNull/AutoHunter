@@ -8,17 +8,23 @@ from pydantic import BaseModel, Field
 
 class ModelConfigDTO(BaseModel):
     base_url: str = "https://api.deepseek.com/v1"
-    api_key: str = ""           # 留空则用服务端 .env 默认
+    api_key: str = ""
     model: str = "deepseek-chat"
-    prompt_version: str = ""     # current / legacy / modern；留空则用全局默认
+    prompt_version: str = ""
 
 
 class FofaConfigDTO(BaseModel):
-    key: str = ""               # 留空则用服务端 .env 默认
-    base_url: str = ""          # 自定义 FOFA API 端点；留空则用服务端 .env 默认(官方 https://fofa.info)
+    key: str = ""
+    base_url: str = ""
     max_pages: int = 20
     page_size: int = 100
-    intent_mode: str = ""       # syntax=用户给的是FOFA语法 / intent=自然语言意图(LLM翻译) / 空=自动判断
+    intent_mode: str = ""
+
+
+class EngineConfigDTO(BaseModel):
+    """多引擎配置。"""
+    key: str = ""
+    base_url: str = ""
 
 
 class CreateTaskRequest(BaseModel):
@@ -26,11 +32,13 @@ class CreateTaskRequest(BaseModel):
     src_type: str = "edusrc"
     vuln_types: list[str] = Field(default_factory=list)
     src_rules: str = ""
-    target_source: str = "fofa"        # fofa / manual / both / site
+    target_source: str = "fofa"
+    engine: str = ""                                           # 搜索引擎：fofa/quake/hunter/...
     fofa_query: str = ""
     manual_targets: list[str] = Field(default_factory=list)
     model_config_data: ModelConfigDTO = Field(default_factory=ModelConfigDTO)
     fofa_config: FofaConfigDTO = Field(default_factory=FofaConfigDTO)
+    engine_config: EngineConfigDTO = Field(default_factory=EngineConfigDTO)  # 引擎 Key/URL
     concurrency: int = 3
 
 
@@ -49,16 +57,23 @@ class PartialFofaConfigDTO(BaseModel):
     intent_mode: Optional[str] = None
 
 
+class PartialEngineConfigDTO(BaseModel):
+    key: Optional[str] = None
+    base_url: Optional[str] = None
+
+
 class UpdateTaskRequest(BaseModel):
     name: Optional[str] = None
     src_type: Optional[str] = None
     vuln_types: Optional[list[str]] = None
     src_rules: Optional[str] = None
     target_source: Optional[str] = None
+    engine: Optional[str] = None                                 # 切换引擎
     fofa_query: Optional[str] = None
     manual_targets: Optional[list[str]] = None
     model_config_data: Optional[PartialModelConfigDTO] = None
     fofa_config: Optional[PartialFofaConfigDTO] = None
+    engine_config: Optional[PartialEngineConfigDTO] = None
     concurrency: Optional[int] = None
 
 
@@ -66,19 +81,18 @@ class TaskStats(BaseModel):
     queued: int = 0
     scanning: int = 0
     done: int = 0
-    dead: int = 0          # 硬骨头库：重试/超时/异常仍无果
-    skipped: int = 0       # 低分垃圾资产直接跳过
+    dead: int = 0
+    skipped: int = 0
     findings_total: int = 0
     pending_review: int = 0
     accepted: int = 0
     ignored: int = 0
-    deepen: int = 0        # 被审核打回深挖的线索数
-    killsweep: int = 0     # 通杀列命中数（人工复审通过后触发通杀 Hunter）
-    # 各 Tab 的权威计数（用户复审维度），供前端徽标/指标卡直接用，不再依赖懒加载数组
-    review_pending: int = 0   # 复审队列：AI accepted 且用户 pending
-    submit_ready: int = 0     # 待提交：用户复审 passed 且尚未提交
-    rejected: int = 0         # 已驳回：用户复审 rejected
-    archived: int = 0         # AI 未采纳：verdict ignored/deepen 且用户 pending、非 superseded
+    deepen: int = 0
+    killsweep: int = 0
+    review_pending: int = 0
+    submit_ready: int = 0
+    rejected: int = 0
+    archived: int = 0
 
 
 class TaskResponse(BaseModel):
@@ -88,17 +102,18 @@ class TaskResponse(BaseModel):
     src_type: str
     vuln_types: list[str]
     target_source: str
+    engine: str = ""
     fofa_query: str
     concurrency: int
     src_rules: str = ""
     manual_targets: list[str] = Field(default_factory=list)
     model_config_data: dict = Field(default_factory=dict)
     fofa_config: dict = Field(default_factory=dict)
+    engine_config: dict = Field(default_factory=dict)
     llm_usage: dict = Field(default_factory=dict)
     created_at: str
     updated_at: str
     stats: Optional[TaskStats] = None
-    # 待人工复审数（AI accepted 且用户未处理）——任务卡片红点用，列表接口轻量填充
     pending_user_review: int = 0
 
 
@@ -117,13 +132,21 @@ class FofaSettingsDTO(BaseModel):
     default_intent_mode: Optional[str] = None
 
 
+class EngineSettingsDTO(BaseModel):
+    """单个搜索引擎的设置。"""
+    key: Optional[str] = None
+    base_url: Optional[str] = None
+
+
 class DefaultsSettingsDTO(BaseModel):
     concurrency: Optional[int] = None
     skip_score_threshold: Optional[float] = None
     worker_prompt_version: Optional[str] = None
+    engine: Optional[str] = None
 
 
 class SettingsUpdateRequest(BaseModel):
     llm: Optional[LLMSettingsDTO] = None
     fofa: Optional[FofaSettingsDTO] = None
+    engines: Optional[dict[str, EngineSettingsDTO]] = None   # 按引擎名索引
     defaults: Optional[DefaultsSettingsDTO] = None

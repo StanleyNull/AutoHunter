@@ -39,6 +39,7 @@ class Task(Base):
     manual_targets: Mapped[list] = mapped_column(JSON, default=list)
     model_config_json: Mapped[dict] = mapped_column("model_config", JSON, default=dict)
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
+    engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
@@ -257,5 +258,6 @@ class SystemSettings(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default="global")
     llm: Mapped[dict] = mapped_column(JSON, default=dict)       # base_url/api_key/model/temperature
     fofa: Mapped[dict] = mapped_column(JSON, default=dict)      # key/max_pages/page_size/default_intent_mode
-    defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold 等
+    engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
+    defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

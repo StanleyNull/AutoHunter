@@ -11,10 +11,11 @@ from app.config import LLMConfig, llm_config
 from app.agents.prompts import normalize_worker_prompt_version
 from app.db.models import SystemSettings, Task
 from app.db.session import SessionLocal
+from app.engines import get_engine, list_engines, get_default_engine
 
 SETTINGS_ID = "global"
 
-_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "defaults": {}}
+_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}}
 
 
 # 统一脱敏占位：不再泄露密钥首尾字符，避免降低离线爆破成本。
@@ -29,7 +30,7 @@ def mask_secret(value: str) -> str:
 
 
 def is_masked_secret(value: str) -> bool:
-    """判断传入值是否为前端回显的脱敏占位（应视为“未修改”，不可回写覆盖真实密钥）。"""
+    """判断传入值是否为前端回显的脱敏占位（应视为"未修改"，不可回写覆盖真实密钥）。"""
     v = str(value or "").strip()
     if not v:
         return False
@@ -55,11 +56,37 @@ def _env_fofa() -> dict[str, Any]:
     }
 
 
+def _env_engines() -> dict[str, Any]:
+    """从环境变量读取所有已注册引擎的 API Key 和 base_url。
+    约定环境变量名为 {ENGINE_ENV_KEY}_KEY 和 {ENGINE_ENV_KEY}_BASE_URL。
+    """
+    result: dict[str, dict[str, str]] = {}
+    for eng in list_engines():
+        name = eng["name"]
+        env_key = name.upper()
+        key = os.environ.get(f"{env_key}_KEY", "")
+        base_url = os.environ.get(f"{env_key}_BASE_URL", "")
+        if key:
+            result.setdefault(name, {})["key"] = key
+        if base_url:
+            result.setdefault(name, {})["base_url"] = base_url
+    # 兼容旧 FOFA_KEY / FOFA_BASE_URL
+    if "fofa" not in result:
+        fofa_key = os.environ.get("FOFA_KEY", "")
+        fofa_base = os.environ.get("FOFA_BASE_URL", "")
+        if fofa_key:
+            result["fofa"] = {"key": fofa_key}
+            if fofa_base:
+                result["fofa"]["base_url"] = fofa_base
+    return result
+
+
 def _env_defaults() -> dict[str, Any]:
     return {
         "concurrency": 3,
         "skip_score_threshold": float(os.environ.get("SKIP_SCORE_THRESHOLD", "-10")),
         "worker_prompt_version": normalize_worker_prompt_version(os.environ.get("WORKER_PROMPT_VERSION", "legacy")),
+        "engine": os.environ.get("SEARCH_ENGINE", get_default_engine()),
     }
 
 
@@ -76,6 +103,7 @@ def effective_settings() -> dict[str, Any]:
     return {
         "llm": _merge_section(_cache.get("llm"), _env_llm()),
         "fofa": _merge_section(_cache.get("fofa"), _env_fofa()),
+        "engines": _merge_section(_cache.get("engines"), _env_engines()),
         "defaults": _merge_section(_cache.get("defaults"), _env_defaults()),
     }
 
@@ -91,29 +119,77 @@ def resolve_llm_config(task: Task | None = None) -> LLMConfig:
     )
 
 
-def resolve_fofa_key(task: Task | None = None) -> str:
-    eff = effective_settings()["fofa"]
+# ── 引擎相关解析函数 ──────────────────────────────────────────
+
+def resolve_engine_name(task: Task | None = None) -> str:
+    """获取任务使用的搜索引擎名称。"""
+    if task and task.engine:
+        return task.engine
+    eff = effective_settings()["defaults"]
+    return str(eff.get("engine") or get_default_engine())
+
+
+def resolve_engine_key(engine_name: str, task: Task | None = None) -> str:
+    """获取指定引擎的 API Key（任务级 > DB缓存 > 环境变量）。"""
+    eff = effective_settings()["engines"]
+    # 任务级 fofa_config 兼容旧版
+    if engine_name == "fofa" and task:
+        cfg = task.fofa_config or {}
+        if cfg.get("key"):
+            return str(cfg["key"])
+    eng_cfg = eff.get(engine_name, {})
+    return str(eng_cfg.get("key") or "")
+
+
+def resolve_engine_base_url(engine_name: str, task: Task | None = None) -> str:
+    """获取指定引擎的 base_url。"""
+    engine = get_engine(engine_name)
+    default = engine.get_default_base_url() if engine else ""
+    eff = effective_settings()["engines"]
+    # 任务级 fofa_config 兼容旧版
+    if engine_name == "fofa" and task:
+        cfg = task.fofa_config or {}
+        if cfg.get("base_url"):
+            return str(cfg["base_url"])
+    eng_cfg = eff.get(engine_name, {})
+    return str(eng_cfg.get("base_url") or default)
+
+
+def resolve_engine_config(task: Task | None = None) -> dict[str, Any]:
+    """解析任务使用的引擎完整配置。"""
+    engine_name = resolve_engine_name(task)
+    # 兼容旧版 fofa_config 分页设置
     cfg = (task.fofa_config or {}) if task else {}
-    return str(cfg.get("key") or eff.get("key") or "")
+    eff = effective_settings()["engines"]
+    eng_cfg = eff.get(engine_name, {})
+    return {
+        "engine": engine_name,
+        "key": resolve_engine_key(engine_name, task),
+        "base_url": resolve_engine_base_url(engine_name, task),
+        "max_pages": int(cfg.get("max_pages") or eng_cfg.get("max_pages") or 20),
+        "page_size": int(cfg.get("page_size") or eng_cfg.get("page_size") or 100),
+        "intent_mode": str(cfg.get("intent_mode") or ""),
+    }
+
+
+# ── 旧版兼容 ──────────────────────────────────────────────────
+
+def resolve_fofa_key(task: Task | None = None) -> str:
+    """兼容旧版：等价于 resolve_engine_key('fofa', task)。"""
+    return resolve_engine_key("fofa", task)
 
 
 def resolve_fofa_base_url(task: Task | None = None) -> str:
-    eff = effective_settings()["fofa"]
-    cfg = (task.fofa_config or {}) if task else {}
-    return str(cfg.get("base_url") or eff.get("base_url") or "https://fofa.info").rstrip("/")
+    """兼容旧版：等价于 resolve_engine_base_url('fofa', task)。"""
+    return resolve_engine_base_url("fofa", task)
 
 
 def resolve_fofa_defaults(task: Task | None = None) -> dict[str, Any]:
-    eff = effective_settings()["fofa"]
-    cfg = (task.fofa_config or {}) if task else {}
-    return {
-        "key": resolve_fofa_key(task),
-        "base_url": resolve_fofa_base_url(task),
-        "max_pages": int(cfg.get("max_pages") or eff.get("max_pages") or 20),
-        "page_size": int(cfg.get("page_size") or eff.get("page_size") or 100),
-        "intent_mode": str(cfg.get("intent_mode") or eff.get("default_intent_mode") or ""),
-    }
+    """兼容旧版。"""
+    return resolve_engine_config(task)
 
+
+# ── 其他 ──────────────────────────────────────────────────────
 
 def resolve_skip_score_threshold() -> float:
     return float(effective_settings()["defaults"].get("skip_score_threshold", -10))
@@ -131,6 +207,21 @@ def public_settings_view() -> dict[str, Any]:
     eff = effective_settings()
     llm = eff["llm"]
     fofa = eff["fofa"]
+    engines = eff.get("engines", {})
+    defaults = eff["defaults"]
+
+    # 构建引擎列表视图
+    engines_view = {}
+    for eng in list_engines():
+        name = eng["name"]
+        ecfg = engines.get(name, {})
+        engines_view[name] = {
+            "display_name": eng["display_name"],
+            "key": mask_secret(ecfg.get("key", "")),
+            "key_set": bool(ecfg.get("key")),
+            "base_url": ecfg.get("base_url", ""),
+        }
+
     return {
         "llm": {
             "base_url": llm["base_url"],
@@ -147,11 +238,14 @@ def public_settings_view() -> dict[str, Any]:
             "key": mask_secret(fofa.get("key") or ""),
             "key_set": bool(fofa.get("key")),
         },
+        "engines": engines_view,
         "defaults": {
-            "concurrency": int(eff["defaults"].get("concurrency") or 3),
-            "skip_score_threshold": float(eff["defaults"].get("skip_score_threshold", -10)),
-            "worker_prompt_version": normalize_worker_prompt_version(eff["defaults"].get("worker_prompt_version")),
+            "concurrency": int(defaults.get("concurrency") or 3),
+            "skip_score_threshold": float(defaults.get("skip_score_threshold", -10)),
+            "worker_prompt_version": normalize_worker_prompt_version(defaults.get("worker_prompt_version")),
+            "engine": defaults.get("engine", get_default_engine()),
         },
+        "available_engines": list_engines(),
         "updated_at": _cache.get("updated_at"),
     }
 
@@ -167,6 +261,7 @@ async def refresh_cache(session: AsyncSession) -> SystemSettings:
     _cache = {
         "llm": dict(row.llm or {}),
         "fofa": dict(row.fofa or {}),
+        "engines": dict(row.engines or {}),
         "defaults": dict(row.defaults or {}),
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -188,7 +283,6 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
         llm = dict(row.llm or {})
         for k, v in payload["llm"].items():
             if k == "api_key":
-                # 空值或前端回显的脱敏占位都视为“未修改”，保留已存真实密钥。
                 if not str(v or "").strip() or is_masked_secret(v):
                     continue
             if v is not None:
@@ -204,6 +298,23 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
             if v is not None:
                 fofa[k] = v
         row.fofa = fofa
+
+    # 多引擎配置
+    if "engines" in payload and payload["engines"]:
+        engines = dict(row.engines or {})
+        for eng_name, eng_cfg in payload["engines"].items():
+            if not isinstance(eng_cfg, dict):
+                continue
+            current = dict(engines.get(eng_name, {}))
+            for k, v in eng_cfg.items():
+                if k == "key":
+                    if not str(v or "").strip() or is_masked_secret(v):
+                        continue
+                if v is not None:
+                    current[k] = v
+            if current:
+                engines[eng_name] = current
+        row.engines = engines
 
     if "defaults" in payload and payload["defaults"]:
         defaults = dict(row.defaults or {})
@@ -239,10 +350,7 @@ def llm_client_for_task_optional(task: Task | None = None):
 
 
 async def list_available_models(base_url: str | None = None, api_key: str | None = None) -> dict[str, Any]:
-    """拉取模型商可用模型列表（OpenAI 兼容 GET /models）。
-
-    base_url/api_key 留空时用有效配置（DB+env）。失败时返回 {ok:False, error, models:[]}，
-    前端可据此降级为手动输入。"""
+    """拉取模型商可用模型列表（OpenAI 兼容 GET /models）。"""
     import httpx
 
     eff = effective_settings()["llm"]
@@ -253,7 +361,6 @@ async def list_available_models(base_url: str | None = None, api_key: str | None
     if not key:
         return {"ok": False, "error": "未配置 API Key，无法拉取模型列表", "models": []}
     url = base if base.endswith("/models") else f"{base}/models"
-    # 该请求会携带真实 API Key，必须防 SSRF（防止 base_url 被篡改指向内网/元数据外泄密钥）。
     from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 
     try:
@@ -269,7 +376,6 @@ async def list_available_models(base_url: str | None = None, api_key: str | None
         data = resp.json()
     except Exception as e:
         return {"ok": False, "error": f"拉取模型列表失败：{type(e).__name__}", "models": []}
-    # OpenAI 兼容：{"data":[{"id":"..."},...]}；也兜底 {"models":[...]} 等格式
     items = data.get("data") or data.get("models") or []
     models: list[str] = []
     for it in items:
