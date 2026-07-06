@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlparse
 
@@ -430,30 +431,67 @@ async def _fofa_collect(
             history.append(new_q)
 
     next_cursor = cursor + 1
+
+    # 频率限制冷却检查：如果还在冷却期内，直接跳过本轮
+    rate_limit_until = float(cfg.get("rate_limit_until", 0))
+    if rate_limit_until > time.monotonic():
+        remain = rate_limit_until - time.monotonic()
+        cfg["collector_phase"] = "fofa_error"
+        await report(
+            "fofa_error",
+            f"{engine.display_name} 频率限制冷却中（还剩 {remain:.0f} 秒），跳过本轮",
+            fofa_error="rate_limit_cooldown", cursor=cursor, cooldown_remaining=remain,
+        )
+        task.fofa_config = {**cfg}
+        return 0
+
     try:
         res = await engine.search(key, cur_query, page=next_cursor, page_size=size,
                                   base_url=base_url)
     except QuakeRateLimitError as e:
+        # Quake 专用限流异常（带 retry_after 提示）
         err = f"{e}"[:300]
+        rl_count = int(cfg.get("rate_limit_count", 0)) + 1
+        backoff = min(10 * (2 ** (rl_count - 1)), 300)
+        cfg["rate_limit_count"] = rl_count
+        cfg["rate_limit_until"] = time.monotonic() + backoff
         cfg["last_fofa_error"] = err
         cfg["collector_phase"] = "fofa_error"
         cfg["fofa_auth_fail_count"] = 0
-        # 频率限制：记录并等待后再重试，避免空转刷屏
-        wait = getattr(e, "retry_after", 5.0)
         await report(
             "fofa_error",
-            f"{engine.display_name} 频率限制，等待 {int(wait)} 秒后重试：{err}",
-            fofa_error=err, cursor=cursor, retry_after=wait,
+            f"{engine.display_name} 频率限制（第 {rl_count} 次），等待 {backoff} 秒后重试：{err}",
+            fofa_error=err, cursor=cursor, retry_after=backoff, rate_limit_count=rl_count,
         )
         task.fofa_config = {**cfg}
-        await asyncio.sleep(wait)
+        await asyncio.sleep(backoff)
         return 0
     except (ValueError, Exception) as e:
         err = f"{e}"[:300]
+        err_lower = str(e).lower()
+        # 通用频率限制检测（不限引擎，匹配常见限流关键词）
+        _is_rate_limit = any(m in err_lower for m in (
+            "rate limit", "too many", "过于频繁", "请求太频繁", "q3005", "429", "retry after",
+        ))
+        if _is_rate_limit:
+            rl_count = int(cfg.get("rate_limit_count", 0)) + 1
+            backoff = min(10 * (2 ** (rl_count - 1)), 300)
+            cfg["rate_limit_count"] = rl_count
+            cfg["rate_limit_until"] = time.monotonic() + backoff
+            cfg["last_fofa_error"] = err
+            cfg["collector_phase"] = "fofa_error"
+            cfg["fofa_auth_fail_count"] = 0
+            await report(
+                "fofa_error",
+                f"{engine.display_name} 频率限制（第 {rl_count} 次），等待 {backoff} 秒后重试：{err}",
+                fofa_error=err, cursor=cursor, retry_after=backoff, rate_limit_count=rl_count,
+            )
+            task.fofa_config = {**cfg}
+            await asyncio.sleep(backoff)
+            return 0
         cfg["last_fofa_error"] = err
         cfg["collector_phase"] = "fofa_error"
         # 账号级致命错误标记（各引擎用不同的错误判断逻辑）
-        err_lower = str(e).lower()
         is_account_err = any(m in err_lower for m in (
             "key", "token", "无效", "过期", "余额", "quota", "permission",
             "unauthorized", "forbidden", "account", "401", "403",
@@ -476,6 +514,8 @@ async def _fofa_collect(
         return 0
     cursor = next_cursor
     cfg["fofa_auth_fail_count"] = 0
+    cfg["rate_limit_count"] = 0  # 成功请求重置限流计数
+    cfg.pop("rate_limit_until", None)
     cfg.pop("last_fofa_error", None)
 
     # host 归属兜底过滤：即使 FOFA 语法因运算符优先级或 LLM 演化丢锚点而放宽范围，
