@@ -11,17 +11,20 @@ DEEPEN_CAP = 2  # 单 target 被打回深挖的最大次数（人工 + AI 合计
 
 
 def apply_deepen(session, finding: Finding, tgt: Target | None, directive: str,
-                 source: str = "ai") -> tuple[bool, str]:
+                 source: str = "ai", force: bool = False) -> tuple[bool, str]:
     """执行一次深挖回炉。返回 (是否生效, 日志后缀)。
 
     session: 调用方持有的 session（同步操作 ORM 对象属性，由调用方 commit）。
     source: 'ai' / 'user'，用于 priority_reason 标注来源。
+    force:  True 时跳过 DEEPEN_CAP 检查，供人工复审强制深挖使用；
+            AI 管线（reviewer / worker_lead）始终走 cap 保护，防止死循环。
     """
     directive = (directive or "").strip()
-    if not tgt or not directive or tgt.deepen_count >= DEEPEN_CAP:
+    cap_hit = tgt and tgt.deepen_count >= DEEPEN_CAP
+    if not tgt or not directive or (cap_hit and not force):
         finding.status = "reviewed"
-        if tgt and tgt.deepen_count >= DEEPEN_CAP:
-            why = f"深挖次数已达上限({DEEPEN_CAP})"
+        if cap_hit and not force:
+            why = f"深挖次数已达上限({DEEPEN_CAP})，如需强制深挖请使用人工强制入口"
         elif not directive:
             why = "未给深挖指令"
         else:
@@ -49,6 +52,9 @@ def apply_deepen(session, finding: Finding, tgt: Target | None, directive: str,
     tgt.heartbeat_at = None
     tgt.dead_reason = ""
     tgt.priority_score = (tgt.priority_score or 0) + 100.0
-    tag = "人工深挖" if source == "user" else "深挖"
+    if source == "user":
+        tag = "强制深挖" if force else "人工深挖"
+    else:
+        tag = "深挖"
     tgt.priority_reason = f"[{tag}#{tgt.deepen_count}] {directive[:80]}"
     return True, f" → 打回{tag}#{tgt.deepen_count}：{directive[:80]}"

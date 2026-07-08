@@ -1,6 +1,8 @@
 """全局系统配置 API。"""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +13,7 @@ from app.settings_service import (
     list_available_models,
     public_settings_view,
     refresh_cache,
+    resolve_proxy_config,
     update_settings,
 )
 
@@ -49,3 +52,88 @@ async def put_settings(
 ):
     payload = body.model_dump(exclude_unset=True)
     return await update_settings(session, payload)
+
+
+# ===== 一键连通性测试 =====
+
+
+@router.post("/test/llm")
+async def test_llm(session: AsyncSession = Depends(get_session)):
+    """测试 LLM 连通性：拉取模型列表，能拉到即连通。"""
+    await refresh_cache(session)
+    result = await list_available_models()
+    if result.get("ok"):
+        return {"ok": True, "message": f"连通正常，可用模型 {len(result.get('models', []))} 个"}
+    return {"ok": False, "message": result.get("error", "测试失败")}
+
+
+@router.post("/test/fofa")
+async def test_fofa(session: AsyncSession = Depends(get_session)):
+    """测试 FOFA 连通性：发一个最小查询（ip="1.1.1.1", size=1）。"""
+    await refresh_cache(session)
+    from app.fofa import client as fofa_client
+    from app.settings_service import resolve_fofa_key, resolve_fofa_base_url
+
+    key = resolve_fofa_key()
+    base_url = resolve_fofa_base_url()
+    if not key:
+        return {"ok": False, "message": "未配置 FOFA key"}
+    try:
+        result = await fofa_client.search(
+            key=key, query='ip="1.1.1.1"', page=1, size=1, base_url=base_url,
+        )
+        total = result.get("size", 0)
+        return {"ok": True, "message": f"连通正常，FOFA 返回 size={total}"}
+    except fofa_client.FofaError as e:
+        return {"ok": False, "message": str(e)}
+    except Exception as e:
+        return {"ok": False, "message": f"测试异常: {type(e).__name__}: {e}"}
+
+
+@router.post("/test/ssh")
+async def test_ssh(session: AsyncSession = Depends(get_session)):
+    """测试 SSH 代理连通性：对每台配置的服务器执行 echo ok。"""
+    await refresh_cache(session)
+    pc = resolve_proxy_config()
+    if not pc.available:
+        return {"ok": False, "message": "未配置代理服务器"}
+
+    results = []
+    all_ok = True
+    for srv in pc.server_list:
+        # 解析 user@host:port
+        if ":" in srv.split("@")[-1]:
+            user_host, port = srv.rsplit(":", 1)
+        else:
+            user_host, port = srv, "22"
+        key_path = pc.ssh_key_path
+        cmd = [
+            "ssh", "-i", key_path,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            "-p", port, user_host, "echo ok",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            out = stdout.decode("utf-8", "replace").strip()
+            err = stderr.decode("utf-8", "replace").strip()
+            if proc.returncode == 0 and "ok" in out:
+                results.append({"server": srv, "ok": True, "message": "连通正常"})
+            else:
+                all_ok = False
+                results.append({"server": srv, "ok": False, "message": err[:200] or out[:200] or f"exit={proc.returncode}"})
+        except asyncio.TimeoutError:
+            all_ok = False
+            results.append({"server": srv, "ok": False, "message": "超时（15s）"})
+        except Exception as e:
+            all_ok = False
+            results.append({"server": srv, "ok": False, "message": f"{type(e).__name__}: {e}"})
+
+    summary = "; ".join(f"{r['server']}: {'OK' if r['ok'] else r['message']}" for r in results)
+    return {"ok": all_ok, "message": summary, "details": results}

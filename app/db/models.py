@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+CST = timezone(timedelta(hours=8))  # 东八区（北京时间）
 
 
 def _uuid() -> str:
@@ -19,6 +21,19 @@ def _uuid() -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def to_cst_iso(dt: datetime | None) -> str | None:
+    """数据库存 UTC naive 时间（列无时区信息），输出统一转东八区 ISO 字符串。
+
+    前端用 slice(0,19) 截取时直接得到东八区时间值；用 new Date 解析时按
+    +08:00 偏移正确换算本地时区。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(CST).isoformat()
 
 
 class Base(DeclarativeBase):
@@ -84,6 +99,12 @@ class Target(Base):
     deepen_count: Mapped[int] = mapped_column(Integer, default=0)
     # 搜集阶段顺带查到的、过滤打分后的该域泄露凭证（喂给 worker 作额外攻击面）。
     leaked_creds: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # WAF IP 封禁确认标记：交叉验证后确认本机 IP 被目标 WAF 封禁
+    ip_ban_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # needs_auth 评估：Worker 判定目标需要用户提供凭证/完成注册时填写的结构化判断
+    auth_assessment: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 用户提交的凭证（账号密码或 Cookie/Token），由前端凭证表单提交
+    user_credentials: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     assigned_worker: Mapped[str] = mapped_column(String(64), default="")
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -260,4 +281,5 @@ class SystemSettings(Base):
     fofa: Mapped[dict] = mapped_column(JSON, default=dict)      # key/max_pages/page_size/default_intent_mode
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
+    proxy: Mapped[dict] = mapped_column(JSON, default=dict)     # ssh_servers/ssh_key_path（WAF IP 封禁代理复测）
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

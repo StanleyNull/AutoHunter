@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
 from app.agents.deepen import apply_deepen
 from app.settings_service import llm_client_for_task
-from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
+from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 from app.events import bus
 from app.llm.client import LLMClient, LLMError
@@ -100,7 +100,7 @@ def _finding_dict(f: Finding, r: Review | None, *, compact: bool = False) -> dic
         "target_url": f.target_url,
         "owner": f.owner,
         "status": f.status,
-        "created_at": f.created_at.isoformat(),
+        "created_at": to_cst_iso(f.created_at),
         "review": None if not r else {
             "verdict": r.verdict,
             "confidence": r.confidence,
@@ -400,7 +400,7 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
             "affected_table": k.affected_table or [],
             "notes": k.notes,
             "status": k.status,
-            "created_at": k.created_at.isoformat(),
+            "created_at": to_cst_iso(k.created_at),
         }
         if _matches_query(item, search):
             out.append(item)
@@ -1038,13 +1038,15 @@ async def user_review(finding_id: str, req: UserReviewRequest,
 
 
 class DeepenRequest(BaseModel):
-    directive: str  # 人工附带的深挖指令：告诉 worker 这一轮去把什么打穿
+    directive: str   # 人工附带的深挖指令：告诉 worker 这一轮去把什么打穿
+    force: bool = False  # True 时绕过 DEEPEN_CAP，人工强制深挖（不计入自动管线限制）
 
 
 @router.post("/results/{finding_id}/deepen")
 async def user_deepen(finding_id: str, req: DeepenRequest,
                       session: AsyncSession = Depends(get_session)):
     """人工复审「继续深挖」：把该 finding 对应目标带定向指令重新入队，让 worker 再挖一轮。
+    force=True 时不受 DEEPEN_CAP 限制，适合人工判断后执意继续的场景。
     与 AI 审核打回深挖走同一套回炉逻辑（原 finding superseded + 目标拉到队首）。"""
     directive = (req.directive or "").strip()
     if not directive:
@@ -1054,14 +1056,17 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
         raise HTTPException(404, "漏洞不存在")
     r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
     tgt = await session.get(Target, f.target_id)
-    ok, suffix = apply_deepen(session, f, tgt, directive, source="user")
+    ok, suffix = apply_deepen(session, f, tgt, directive, source="user", force=req.force)
+    if not ok:
+        # 深挖未生效（次数上限 / 无目标 / 无指令）：不改 user_status，避免归档列表丢条目
+        await session.rollback()
+        raise HTTPException(409, f"无法深挖：{suffix.strip(' →')}")
     if r:
-        # 把这次人工动作记到审核记录上：复审备注 + 标记非通过非驳回（已回炉，从复审/驳回列表移走）
+        # 深挖生效：把人工动作记到审核记录上，并从复审/归档列表移走
+        tag = "强制深挖" if req.force else "人工继续深挖"
         r.deepen_directive = directive
-        r.user_notes = ((r.user_notes or "") + f"\n[人工继续深挖] {directive}").strip()
+        r.user_notes = ((r.user_notes or "") + f"\n[{tag}] {directive}").strip()
         r.user_status = "deepening"
         r.user_reviewed_at = _now()
     await session.commit()
-    if not ok:
-        raise HTTPException(409, f"无法深挖：{suffix.strip(' →')}")
     return {"ok": True, "message": suffix.strip(" →")}

@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import subprocess
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -35,7 +36,7 @@ from app.agent_runtime import (
     AGENT_EXECUTOR, COLLECTOR_IO_EXECUTOR, WORKER_MAX_CONCURRENCY,
     agent_semaphore, shutdown_agent_executor,
 )
-from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
+from app.db.models import CST, Finding, Killsweep, Review, Target, Task, TaskEvent
 from app.db.session import SessionLocal
 from app.events import bus
 from app.llm.client import LLMClient
@@ -52,8 +53,8 @@ logger = logging.getLogger("autohunter.orchestrator")
 
 
 def _now_iso() -> str:
-    """当前时刻的 UTC ISO 字符串（带 +00:00 偏移），供实时事件统一携带时区。"""
-    return datetime.now(timezone.utc).isoformat()
+    """当前时刻的东八区（北京时间）ISO 字符串（带 +08:00 偏移），供实时事件统一携带时区。"""
+    return datetime.now(CST).isoformat()
 
 
 # 等级排序：用于「扩大危害」显著性判定（升级是否真的更严重）。
@@ -266,12 +267,69 @@ def _probe_urls(url: str, host: str) -> list[str]:
     return urls
 
 
-def _probe_target_liveness(url: str, host: str, timeout: float) -> dict:
+def _probe_via_ssh_proxy(url: str, proxy_config, timeout: float) -> dict:
+    """通过 SSH 代理探活，防止 WAF 封本地 IP 导致误判不可达。
+
+    本机 IP 被目标 WAF 封禁时，本地 HTTP 请求会被丢包/重置/超时，
+    导致 _probe_target_liveness 误判目标不可达。此时通过 SSH 代理
+    发一个干净的 curl 请求交叉验证：代理能通说明目标本身存活，
+    本地不通是 IP 层面的问题。
+    """
+    servers = proxy_config.server_list
+    if not servers:
+        return {"alive": False, "reason": "无可用代理服务器"}
+
+    srv = servers[0]
+    key_path = proxy_config.ssh_key_path
+    # 解析 user@host:port
+    if ":" in srv.split("@")[-1]:
+        user_host, port = srv.rsplit(":", 1)
+    else:
+        user_host, port = srv, "22"
+
+    curl_cmd = (
+        f"curl -s -o /dev/null -w '%{{http_code}}' -m {int(timeout)} -k '{url}'"
+    )
+    ssh_cmd = [
+        "ssh", "-i", key_path,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        "-p", port, user_host,
+        curl_cmd,
+    ]
+
+    try:
+        result = subprocess.run(
+            ssh_cmd, capture_output=True, text=True,
+            timeout=timeout + 10,  # SSH 连接开销
+        )
+        status_code = (result.stdout or "").strip().strip("'")
+        if status_code.isdigit():
+            code = int(status_code)
+            if 0 < code < 500:
+                return {"alive": True, "url": url, "status": code, "skip": False}
+            if code >= 500:
+                return {
+                    "alive": True, "url": url, "status": code,
+                    "skip": True, "reason": f"服务异常({code})",
+                }
+        # curl 无输出 = 连接失败
+        err = (result.stderr or "")[:200]
+        return {"alive": False, "reason": f"代理探活失败：{err}"}
+    except subprocess.TimeoutExpired:
+        return {"alive": False, "reason": "代理探活超时"}
+    except Exception as exc:
+        return {"alive": False, "reason": f"代理探活异常：{str(exc)[:180]}"}
+
+
+def _probe_target_liveness(url: str, host: str, timeout: float, proxy_config=None) -> dict:
     """同步派发前预筛，给 run_in_executor 调用。
 
     - 任意可访问 HTTP 响应都算 alive；
     - prefilter 判定的 CDN/静态/5xx 等返回 skip=True，不交给 worker 消耗 token；
-    - http/https 都不通才 alive=False。
+    - http/https 都不通才 alive=False；
+    - 本地探活失败时，若配置了 SSH 代理，通过代理交叉验证防止 WAF 封 IP 误判。
     """
     urls = _probe_urls(url, host)
     skipped: list[dict] = []
@@ -296,6 +354,15 @@ def _probe_target_liveness(url: str, host: str, timeout: float) -> dict:
                 "skip": True,
                 "reason": reason,
             }
+
+    # 所有本地探活 URL 都失败了，尝试通过 SSH 代理交叉验证
+    if proxy_config and proxy_config.available:
+        probe_url = urls[0] if urls else (url or host)
+        proxy_result = _probe_via_ssh_proxy(probe_url, proxy_config, timeout)
+        if proxy_result.get("alive"):
+            proxy_result["via_proxy"] = True
+            return proxy_result
+
     return {
         "alive": False,
         "url": urls[0] if urls else (url or host),
@@ -497,6 +564,13 @@ class TaskRunner:
             # 空闲、实际还有目标虚挂，直到 reclaim(最多 ~150s)才回收——保持 running 更真实。
             inflight = await self._count_inflight(session)
             busy = bool(self._active_workers) or inflight > 0
+
+            # 5. IP 封禁复测：首轮目标全部完成且无活跃 worker 时，把封禁目标回队代理复测
+            if queued == 0 and not busy:
+                retest_count = await self._maybe_retest_ip_banned(session)
+                if retest_count:
+                    queued = retest_count  # 有目标回队，不进 idle
+
             if queued == 0 and not busy and task.status == "running":
                 if task.status != "idle":
                     task.status = "idle"
@@ -521,6 +595,44 @@ class TaskRunner:
                 Target.task_id == self.task_id,
                 Target.status.in_(("assigned", "scanning")))
         )).scalar() or 0
+
+    async def _maybe_retest_ip_banned(self, session: AsyncSession) -> int:
+        """首轮无待处理目标后，复测 IP 封禁目标（回队并标记代理模式）。返回回队数量。"""
+        from app.settings_service import resolve_proxy_config
+        if not resolve_proxy_config().available:
+            return 0
+
+        from sqlalchemy import func
+        banned = (await session.execute(
+            select(Target).where(
+                Target.task_id == self.task_id,
+                Target.status == "ip_banned",
+            )
+        )).scalars().all()
+
+        if not banned:
+            return 0
+
+        requeued = 0
+        for tgt in banned:
+            tgt.status = "queued"
+            tgt.verdict = ""
+            tgt.retry_count = 0
+            tgt.deepen_context = {
+                "directive": "IP 封禁复测：你的 IP 被目标 WAF 封禁，必须全程通过 SSH 代理发送请求。",
+                "ip_ban_retest": True,
+                "source": "ip_ban_retest",
+            }
+            tgt.last_error = "IP 封禁复测：切换代理模式"
+            tgt.dead_reason = ""
+            requeued += 1
+
+        if requeued:
+            await self._log(session, "orchestrator", "ip_ban_retest",
+                            f"首轮结束，{requeued} 个 IP 封禁目标回队代理复测",
+                            level="info")
+            await session.commit()
+        return requeued
 
     async def _pop_queued(self, session: AsyncSession) -> Target | None:
         # 按 EduSRC 优先级评分降序派发：高价值目标先挖。
@@ -651,7 +763,21 @@ class TaskRunner:
             alive_url = probe.get("url") or ""
             if alive_url and alive_url != target.url:
                 target.url = alive_url
+            # 本地探活失败但代理探活成功 → 本机 IP 疑似被封，标记代理模式
+            if probe.get("via_proxy"):
+                target.ip_ban_confirmed = True
+                target.deepen_context = {
+                    "directive": "本地 IP 疑似被 WAF 封禁（派发前探活本地不通、代理可达），全程通过 SSH 代理发送请求。",
+                    "ip_ban_retest": True,
+                    "source": "ip_ban_retest",
+                }
             await session.commit()
+            if probe.get("via_proxy"):
+                await self._log(
+                    session, "orchestrator", "target_revived_via_proxy",
+                    f"目标本地探活失败但代理可达，疑似 IP 被封，已标记代理模式派发",
+                    level="warn", target_id=target.id, host=target.host,
+                )
             if removed_unreachable:
                 await self._log(
                     session, "orchestrator", "target_unreachable",
@@ -718,6 +844,8 @@ class TaskRunner:
                 pending.append((target.id, target.url, target.host))
 
         if pending:
+            from app.settings_service import resolve_proxy_config
+            proxy_config = resolve_proxy_config()
             sem = asyncio.Semaphore(max(1, QUEUE_LIVENESS_CONCURRENCY))
 
             async def one(target_id: str, url: str, host: str) -> tuple[str, dict]:
@@ -725,7 +853,10 @@ class TaskRunner:
                     try:
                         res = await loop.run_in_executor(
                             COLLECTOR_IO_EXECUTOR,
-                            lambda: _probe_target_liveness(url, host, QUEUE_LIVENESS_TIMEOUT),
+                            lambda: _probe_target_liveness(
+                                url, host, QUEUE_LIVENESS_TIMEOUT,
+                                proxy_config=proxy_config,
+                            ),
                         )
                     except Exception as exc:
                         res = {
@@ -737,7 +868,9 @@ class TaskRunner:
                     return target_id, res
 
             for target_id, res in await asyncio.gather(*(one(*item) for item in pending)):
-                if res.get("alive") and not res.get("skip"):
+                # 代理探活恢复的目标不缓存：缓存路径不含 via_proxy 标记，
+                # 重入队列时需重新探活以正确触发代理模式。
+                if res.get("alive") and not res.get("skip") and not res.get("via_proxy"):
                     self._queue_liveness_ok_until[target_id] = now + QUEUE_LIVENESS_CACHE_TTL
                 else:
                     self._queue_liveness_ok_until.pop(target_id, None)
@@ -1384,8 +1517,8 @@ class TaskRunner:
         self._live[target_id] = {
             "target_id": target_id, "host": host, "url": url,
             "round": 0, "action": "启动中…", "findings": 0,
-            "started_at": _now().isoformat(),
-            "last_activity_at": _now().isoformat(),
+            "started_at": _now_iso(),
+            "last_activity_at": _now_iso(),
         }
 
         def _update_live(kind: str, data: dict):
@@ -1393,7 +1526,7 @@ class TaskRunner:
             if not st:
                 return
             self._worker_last_activity[target_id] = loop.time()
-            st["last_activity_at"] = _now().isoformat()
+            st["last_activity_at"] = _now_iso()
             if "round" in data:
                 st["round"] = data["round"]
             if kind == "tool_http":
@@ -1478,6 +1611,7 @@ class TaskRunner:
                     "title": tgt.title or "", "is_edu": tgt.is_edu,
                     "source": tgt.source or "", "priority_reason": tgt.priority_reason or "",
                     "leaked_creds": tgt.leaked_creds or [],
+                    "user_credentials": tgt.user_credentials or None,
                 }
                 try:
                     plan = playbook_router.route_target(
@@ -1671,7 +1805,7 @@ class TaskRunner:
         final_result.setdefault("_runtime", {})
         final_result["_runtime"].update({
             "started_at": live_snapshot.get("started_at"),
-            "finished_at": _now().isoformat(),
+            "finished_at": _now_iso(),
             "duration_seconds": max(0.0, loop.time() - started_monotonic),
         })
         await self._persist_worker_result(task_id, target_id, final_result)
@@ -2032,6 +2166,28 @@ class TaskRunner:
                 pass
             elif transient_llm_error:
                 pass
+            elif verdict == Verdict.needs_auth.value:
+                # 目标有攻击面但需要用户提供凭证/完成注册才能继续深入。
+                assessment = result.get("auth_assessment") or {}
+                reg_status = assessment.get("reg_status", "")
+                if reg_status == "not_registrable":
+                    # 不可注册（CAS/SSO/邮箱限制/邀请制等）→ 直接跳过，不进 pending_input
+                    tgt.status = "skipped"
+                    tgt.verdict = "needs_auth"
+                    tgt.auth_assessment = assessment
+                    tgt.assigned_worker = ""
+                    tgt.heartbeat_at = None
+                    tgt.last_error = ""
+                    tgt.dead_reason = assessment.get("block_reason", "")[:300] or "目标不可注册，无法获取登录态"
+                else:
+                    # 可注册但仅差验证码 → 等待用户提交凭证
+                    tgt.status = "pending_input"
+                    tgt.verdict = "needs_auth"
+                    tgt.auth_assessment = assessment
+                    tgt.assigned_worker = ""
+                    tgt.heartbeat_at = None
+                    tgt.last_error = ""
+                    tgt.dead_reason = ""
             elif verdict == Verdict.found.value or findings:
                 tgt.status = "done"
                 tgt.assigned_worker = ""
@@ -2089,6 +2245,13 @@ class TaskRunner:
                         if no_vuln_retry_reason else
                         (summary_text[:300] or "本轮确认无可利用漏洞，不再默认重试")
                     )
+            elif verdict == "ip_banned":
+                tgt.status = "ip_banned"
+                tgt.ip_ban_confirmed = True
+                tgt.assigned_worker = ""
+                tgt.heartbeat_at = None
+                tgt.last_error = (summary_text or "IP 被 WAF 封禁")[:500]
+                tgt.dead_reason = ""
             elif verdict == "timeout":
                 if tgt.retry_count < MAX_RETRY:
                     tgt.retry_count += 1
@@ -2148,6 +2311,22 @@ class TaskRunner:
                 await self._log(session, "worker", "target_done",
                                 f"目标 {tgt.host} 因 LLM 持续异常收敛置 dead（回队达上限 {MAX_TRANSIENT_LLM_REQUEUE} 次）",
                                 level="warn", target_id=target_id, verdict="dead", findings=0)
+            elif verdict == "ip_banned":
+                await self._log(session, "worker", "target_ip_banned",
+                                f"目标 {tgt.host} 确认 IP 被 WAF 封禁，等待首轮完成后代理复测",
+                                level="warn", target_id=target_id, verdict="ip_banned", findings=0)
+            elif verdict == "needs_auth":
+                assessment = result.get("auth_assessment") or {}
+                reg_status = assessment.get("reg_status", "")
+                block_reason = assessment.get("block_reason", "")
+                if reg_status == "not_registrable":
+                    await self._log(session, "worker", "target_done",
+                                    f"目标 {tgt.host} 不可注册，已自动跳过：{block_reason or reg_status}",
+                                    level="info", target_id=target_id, verdict="skipped", findings=len(findings))
+                else:
+                    await self._log(session, "worker", "target_needs_auth",
+                                    f"目标 {tgt.host} 需要手动注册/提供凭证：{block_reason or reg_status}",
+                                    level="info", target_id=target_id, verdict="needs_auth", findings=len(findings))
             else:
                 await self._log(session, "worker", "target_done",
                                 f"目标 {tgt.host} 完成: {verdict}, {len(findings)} 个漏洞",

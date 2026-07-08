@@ -187,12 +187,13 @@ class Worker:
 
     def run(self) -> WorkerResult:
         if self.deepen_context:
-            user_content = self._intel_block() + self._duplicate_block() + self._deepen_brief()
+            user_content = self._intel_block() + self._duplicate_block() + self._build_proxy_block() + self._deepen_brief()
             self._emit("worker_start", target=self.target, mode="deepen", prompt_version=self.prompt_version)
         else:
             user_content = (
                 self._intel_block()
                 + self._duplicate_block()
+                + self._build_proxy_block()
                 + f"目标：{self.target}\n\n"
                 + "只挖此目标；自主侦察取证，结束调用 finish。"
             )
@@ -407,6 +408,7 @@ class Worker:
             rounds=rounds,
             error=None if self._finished else f"达到最大轮数 {max_rounds} 未主动结束",
             deepen_lead=(self._finished or {}).get("deepen_lead", ""),
+            auth_assessment=(self._finished or {}).get("auth_assessment"),
             reported_intel=self._reported_intel,
             reported_coverage=self._reported_coverage,
         )
@@ -440,6 +442,48 @@ class Worker:
             error="worker cancelled by task control",
         )
 
+    def _build_proxy_block(self) -> str:
+        """构建 SSH 代理信息块，注入 worker prompt。仅当代理配置可用时生成。"""
+        from app.settings_service import resolve_proxy_config
+        proxy_config = resolve_proxy_config()
+        if not proxy_config.available:
+            return ""
+        servers = proxy_config.server_list
+        key_path = proxy_config.ssh_key_path
+        # 取第一台作为示例
+        srv = servers[0]
+        # 解析 user@host:port
+        if ":" in srv.split("@")[-1]:
+            user_host, port = srv.rsplit(":", 1)
+        else:
+            user_host, port = srv, "22"
+
+        ssh_cmd = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p {port} {user_host}"
+
+        lines = [
+            "\n# 代理服务器（IP 封禁时使用）",
+            f"可用代理: {', '.join(servers)}",
+            f"SSH 连接命令: {ssh_cmd} \"命令\"",
+            "",
+            "使用场景：",
+            "1. 当你连续收到 403/WAF 拦截且怀疑是 IP 被封时，用代理发一个干净 GET 交叉验证：",
+            f'   run_shell: {ssh_cmd} "curl -s -o /dev/null -w \'%{{http_code}}\\n\' \'目标URL\'"',
+            "   若代理返回 200 而你本地 403 → IP 被封，调用 finish(verdict=ip_banned)",
+            "2. 若确认 IP 封禁后需继续测试（复测模式），所有 HTTP 请求改为：",
+            f'   run_shell: {ssh_cmd} "curl -s -k -X METHOD \'URL\' -H \'Header: Value\' -d \'data\'"',
+            "   用代理 curl 的输出作为你的 http_request 替代",
+            "",
+        ]
+
+        # 如果是 IP 封禁复测模式，强调必须全程用代理
+        if self.deepen_context and self.deepen_context.get("ip_ban_retest"):
+            lines.append("!! 本次为 IP 封禁复测：你的本机 IP 已确认被目标 WAF 封禁。")
+            lines.append("所有对目标的请求必须通过上述 SSH 代理执行，不要直接用 http_request。")
+            lines.append("用 run_shell + ssh curl 替代所有 http_request 调用。")
+            lines.append("")
+
+        return "\n".join(lines)
+
     def _deepen_brief(self) -> str:
         ctx = self.deepen_context or {}
         directive = ctx.get("directive", "").strip()
@@ -463,6 +507,17 @@ class Worker:
             "2. 打穿了（取到真实数据/造成实锤危害）就用 submit_finding 提交完整利用链 + 原始请求响应证据。",
             "3. 反复尝试确实打不穿、证明只是理论可能，就 finish(verdict=no_vuln) 并说明卡在哪，绝不交半成品。",
         ]
+        # 用户提交的凭证注入：当 deepen_context.source=user_credentials 时，在 brief 中附带用户凭证
+        user_creds = (self.target_meta or {}).get("user_credentials")
+        if user_creds:
+            cred_lines = ["", "# 用户提供的登录凭证（请先用 session_set 登记，再登录后深挖）"]
+            if user_creds.get("type") == "password":
+                cred_lines.append(f"账号：{user_creds.get('username', '')}")
+                cred_lines.append(f"密码：{user_creds.get('password', '')}")
+            elif user_creds.get("type") == "cookie":
+                cred_lines.append(f"Cookie/Token：{user_creds.get('cookie', '')}")
+            cred_lines.append("这是用户授权你使用的入场券，登录后继续实证危害才算出洞。不要修改任何账号密码。")
+            parts += ["\n".join(cred_lines)]
         return "\n".join(parts)
 
     def _dispatch(self, name: str, args: dict, rnd: int) -> dict:
@@ -619,6 +674,7 @@ class Worker:
                 "verdict": args.get("verdict", "no_vuln"),
                 "summary": args.get("summary", ""),
                 "deepen_lead": (args.get("deepen_lead") or "").strip(),
+                "auth_assessment": args.get("auth_assessment") if args.get("verdict") == "needs_auth" else None,
             }
             self._emit("worker_finish", verdict=self._finished["verdict"],
                        summary=self._finished["summary"][:300],

@@ -1,16 +1,15 @@
 """任务相关 API：创建 / 列表 / 详情 / 启停。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dto import CreateTaskRequest, TaskResponse, TaskStats, UpdateTaskRequest
-from app.agents import site_collab
+from app.api.findings import _finding_dict
+from app.agents import collector, site_collab
 from app.agents.prompts import normalize_src_type
-from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
+from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 from app.llm.usage import usage_snapshot
 from app.orchestrator import manager
@@ -20,22 +19,12 @@ from app.settings_service import resolve_engine_config, resolve_llm_config, reso
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
-def _iso_utc(dt: datetime | None) -> str | None:
-    """DB 里的时间是 UTC naive（存的是 _now()=UTC，但列无时区信息）。
-    输出时补上 UTC 时区标识（…+00:00），前端 new Date 才能正确换算本地时区。
-    """
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
-
-
 # Activity Stream 历史回放：过滤高频低价值事件（与前端 BoardView 规则对齐）。
 _STREAM_NOISE_KINDS = frozenset({"refill", "cluster_cooldown_skip", "skip", "ping"})
 _STREAM_IMPORTANT_KINDS = frozenset({
     "collector_phase",
     "target_done", "target_requeued", "timeout", "auto_deepen", "salvage",
+    "manual_redig", "task_reset", "target_needs_auth", "manual_skip",
     "coverage_reported", "site_followups_spawned",
     "review_done", "review_deferred", "review_cancelled",
     "reclaim", "recover", "workers_cancelled", "quota_stop",
@@ -160,7 +149,8 @@ def _public_fofa_config(task: Task) -> dict:
 
 
 def _task_to_dto(t: Task, stats: TaskStats | None = None,
-                 pending_user_review: int = 0, observer: bool = False) -> TaskResponse:
+                 pending_user_review: int = 0, pending_archived: int = 0,
+                 observer: bool = False) -> TaskResponse:
     model_config = _public_model_config(t)
     if observer:
         model_config = _observer_model_config()
@@ -174,8 +164,9 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
         engine_config={} if observer else {"engine": t.engine or ""},
         llm_usage={} if observer else usage_snapshot(t.id, model_config.get("model", "")),
-        created_at=t.created_at.isoformat(), updated_at=t.updated_at.isoformat(),
+        created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
         stats=stats, pending_user_review=pending_user_review,
+        pending_archived=pending_archived,
     )
 
 
@@ -195,6 +186,8 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
             stats.dead += cnt
         elif status == "skipped":
             stats.skipped += cnt
+        elif status == "pending_input":
+            stats.pending_input += cnt
 
     # findings 两项计数合并为一次扫表（conditional aggregation）：
     # findings_total 排除 superseded（被打回深挖让位的旧线索，不算真实漏洞）。
@@ -284,8 +277,24 @@ async def list_tasks(request: Request, session: AsyncSession = Depends(get_sessi
     )
     for tid, cnt in pr_rows.all():
         pending_map[tid] = cnt
+    # AI 未采纳归档数（ignored/deepen 且用户 pending 且 finding 非 superseded）
+    archived_map: dict[str, int] = {}
+    ar_rows = await session.execute(
+        select(Review.task_id, func.count())
+        .join(Finding, Finding.id == Review.finding_id)
+        .where(
+            Review.verdict.in_(["ignored", "deepen"]),
+            Review.user_status == "pending",
+            Finding.status != "superseded",
+        )
+        .group_by(Review.task_id)
+    )
+    for tid, cnt in ar_rows.all():
+        archived_map[tid] = cnt
     observer = _is_observer(request)
-    return [_task_to_dto(t, pending_user_review=pending_map.get(t.id, 0), observer=observer) for t in tasks]
+    return [_task_to_dto(t, pending_user_review=pending_map.get(t.id, 0),
+                        pending_archived=archived_map.get(t.id, 0),
+                        observer=observer) for t in tasks]
 
 
 @router.get("/hard-targets")
@@ -355,8 +364,8 @@ async def global_hard_targets(
             "priority_reason": "" if observer else t.priority_reason,
             "dead_reason": "" if observer else t.dead_reason,
             "last_error": "" if observer else t.last_error,
-            "created_at": t.created_at.isoformat(),
-            "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+            "created_at": to_cst_iso(t.created_at),
+            "updated_at": to_cst_iso(t.updated_at),
         })
     return {
         "items": out,
@@ -545,7 +554,7 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
         events.append({
             "agent": e.agent, "kind": e.kind, "level": e.level,
             "message": "" if observer else e.message,
-            "ts": _iso_utc(e.ts),
+            "ts": to_cst_iso(e.ts),
         })
         if len(events) >= 60:
             break
@@ -592,8 +601,383 @@ async def list_targets(task_id: str, request: Request, status: str | None = None
         "priority_reason": "" if observer else t.priority_reason, "retry_count": t.retry_count,
         "deepen_count": t.deepen_count, "dead_reason": "" if observer else t.dead_reason,
         "last_error": "" if observer else t.last_error,
-        "created_at": t.created_at.isoformat(),
+        "created_at": to_cst_iso(t.created_at),
     } for t in rows]
+
+
+# ===== Target 明细 =====
+@router.get("/{task_id}/targets/{target_id}/detail")
+async def target_detail(task_id: str, target_id: str, request: Request,
+                        session: AsyncSession = Depends(get_session)):
+    """Target 明细：基本信息 + findings 列表 + 该目标最近事件。"""
+    tgt = await session.get(Target, target_id)
+    if not tgt or tgt.task_id != task_id:
+        raise HTTPException(404, "目标不存在")
+    observer = _is_observer(request)
+
+    # findings（含 review 状态）
+    f_rows = (await session.execute(
+        select(Finding, Review)
+        .outerjoin(Review, Review.finding_id == Finding.id)
+        .where(Finding.target_id == target_id)
+        .order_by(Finding.created_at.desc())
+    )).all()
+    findings = [_finding_dict(f, r, compact=True) for f, r in f_rows]
+
+    # 该目标最近事件：从最近 200 条事件中筛 payload 含 target_id 的
+    ev_rows = (await session.execute(
+        select(TaskEvent).where(TaskEvent.task_id == task_id)
+        .order_by(TaskEvent.id.desc()).limit(200)
+    )).scalars().all()
+    events = []
+    for e in ev_rows:
+        payload = e.payload or {}
+        if payload.get("target_id") == target_id:
+            events.append({
+                "agent": e.agent, "kind": e.kind, "level": e.level,
+                "message": "" if observer else e.message,
+                "ts": to_cst_iso(e.ts),
+            })
+            if len(events) >= 30:
+                break
+
+    # 已有 findings 计数（用于前端判断是否可重挖）
+    finding_count = await session.scalar(
+        select(func.count()).where(
+            Finding.target_id == target_id, Finding.status != "superseded")
+    )
+
+    return {
+        "target": {
+            "id": tgt.id,
+            "url": _observer_url(tgt.url, tgt.host) if observer else tgt.url,
+            "host": _observer_host(tgt.host) if observer else tgt.host,
+            "ip": _observer_ip(tgt.ip) if observer else tgt.ip,
+            "org": _observer_text(tgt.org) if observer else tgt.org,
+            "school": _observer_text(tgt.school) if observer else tgt.school,
+            "title": _observer_text(tgt.title) if observer else tgt.title,
+            "status": tgt.status, "verdict": tgt.verdict,
+            "is_edu": tgt.is_edu, "priority_score": tgt.priority_score,
+            "priority_reason": "" if observer else tgt.priority_reason,
+            "retry_count": tgt.retry_count, "deepen_count": tgt.deepen_count,
+            "dead_reason": "" if observer else tgt.dead_reason,
+            "last_error": "" if observer else tgt.last_error,
+            "ip_ban_confirmed": tgt.ip_ban_confirmed,
+            "auth_assessment": "" if observer else (tgt.auth_assessment or None),
+            "user_credentials": None if observer else (tgt.user_credentials or None),
+            "existing_findings": finding_count or 0,
+            "created_at": to_cst_iso(tgt.created_at),
+        },
+        "findings": findings,
+        "events": events,
+    }
+
+
+# ===== 单 Target 重挖 =====
+@router.post("/{task_id}/targets/{target_id}/redig")
+async def redig_target(task_id: str, target_id: str, request: Request,
+                       session: AsyncSession = Depends(get_session)):
+    """手动重挖单个目标。
+
+    核心策略：保留旧 findings 作为 dedup 屏障，Worker 重挖时自动接收
+    duplicate_history 上下文，被拦截重复发现、被迫探索新攻击面。
+    不设置 deepen_context（重挖不是定向深挖，是 target 级重新扫描）。
+    """
+    if _is_observer(request):
+        raise HTTPException(403, "观察者模式无写入权限")
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    tgt = await session.get(Target, target_id)
+    if not tgt or tgt.task_id != task_id:
+        raise HTTPException(404, "目标不存在")
+
+    # 运行中的任务不能重挖正在扫描的目标
+    if task.status == "running" and tgt.status in ("scanning", "assigned"):
+        raise HTTPException(409, "目标正在挖掘中，无法重挖")
+
+    # 统计已有 findings（用于日志和返回）
+    finding_count = await session.scalar(
+        select(func.count()).where(
+            Finding.target_id == target_id, Finding.status != "superseded")
+    )
+
+    # 重置 target 状态：保留 findings 作为 dedup 屏障
+    tgt.status = "queued"
+    tgt.verdict = ""
+    tgt.assigned_worker = ""
+    tgt.heartbeat_at = None
+    tgt.dead_reason = ""
+    tgt.last_error = ""
+    tgt.retry_count = 0
+    tgt.ip_ban_confirmed = False
+    # 清除 deepen_context：重挖是 target 级重新扫描，不是 finding 级深挖
+    # 保留 deepen_count 作为审计记录
+    tgt.deepen_context = None
+    # Boost 优先级拉到队首
+    tgt.priority_score = (tgt.priority_score or 0) + 100.0
+    # 轻量指令：标注重挖模式，引导 Worker 探索新攻击面
+    tgt.priority_reason = (
+        f"[重挖] 该目标已完成首轮挖掘，发现 {finding_count or 0} 个漏洞，"
+        f"请探索未覆盖的攻击面和漏洞类型"
+    )
+
+    session.add(TaskEvent(
+        task_id=task_id, agent="orchestrator", kind="manual_redig",
+        level="info",
+        message=f"手动重挖目标 {tgt.host}：已发现 {finding_count or 0} 个漏洞，"
+                f"重置入队探索新攻击面",
+        payload={"target_id": target_id, "existing_findings": finding_count or 0},
+    ))
+    await session.commit()
+
+    return {
+        "ok": True,
+        "existing_findings": finding_count or 0,
+        "message": f"目标已重置入队，保留 {finding_count or 0} 个已有漏洞作为去重屏障",
+    }
+
+
+# ===== 提交凭证并复测 =====
+@router.post("/{task_id}/targets/{target_id}/credentials")
+async def provide_credentials(task_id: str, target_id: str, request: Request,
+                              data: dict = Body(...),
+                              session: AsyncSession = Depends(get_session)):
+    """用户为 pending_input 状态的目标提交凭证，触发重新入队复测。
+
+    data 格式：
+      {"type": "password", "username": "...", "password": "..."}
+      或
+      {"type": "cookie", "cookie": "..."}
+    """
+    if _is_observer(request):
+        raise HTTPException(403, "观察者模式无写入权限")
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    tgt = await session.get(Target, target_id)
+    if not tgt or tgt.task_id != task_id:
+        raise HTTPException(404, "目标不存在")
+    if tgt.status != "pending_input":
+        raise HTTPException(409, f"目标当前状态为 {tgt.status}，仅 pending_input 状态可提交凭证")
+
+    body = data or {}
+    cred_type = body.get("type", "password")
+    if cred_type == "password":
+        creds = {"type": "password", "username": body.get("username", ""), "password": body.get("password", "")}
+    elif cred_type == "cookie":
+        creds = {"type": "cookie", "cookie": body.get("cookie", "")}
+    else:
+        raise HTTPException(400, "type 必须为 password 或 cookie")
+
+    assessment = tgt.auth_assessment or {}
+    next_steps = assessment.get("next_steps", "")
+    # 把用户凭证写入 deepen_context，让 Worker 拿到后直接登录深挖
+    tgt.deepen_context = {
+        "directive": (
+            f"用户已提供登录凭证（{cred_type}）。请先用 session_set 登记登录态，"
+            f"再登录后深入验证。{next_steps}"
+        ),
+        "vuln_type": "",
+        "original_title": "",
+        "original_summary": "",
+        "from_finding_id": "",
+        "source": "user_credentials",
+    }
+    tgt.user_credentials = creds
+    tgt.status = "queued"
+    tgt.verdict = ""
+    tgt.assigned_worker = ""
+    tgt.heartbeat_at = None
+    tgt.last_error = ""
+    tgt.dead_reason = ""
+    tgt.retry_count = 0
+    # 清除 auth_assessment（已用完）
+    tgt.auth_assessment = None
+    # 凭证可能过期（尤其是 Cookie/Session），必须最高优先级复测
+    # 10000 远超常规评分(0-100)和深挖/重挖的+100提升，确保凭证目标始终排队首
+    tgt.priority_score = 10000.0
+    tgt.priority_reason = f"[用户提交凭证] 用户已提供 {cred_type} 凭证，重新入队复测"
+
+    session.add(TaskEvent(
+        task_id=task_id, agent="orchestrator", kind="manual_redig",
+        level="info",
+        message=f"用户为 {tgt.host} 提交了 {cred_type} 凭证，已重置入队复测",
+        payload={"target_id": target_id, "cred_type": cred_type},
+    ))
+    await session.commit()
+
+    return {
+        "ok": True,
+        "message": "凭证已提交，目标已重新入队，Worker 将使用凭证登录后深挖",
+    }
+
+
+# ===== 跳过待注册目标 =====
+@router.post("/{task_id}/targets/{target_id}/skip")
+async def skip_pending_target(task_id: str, target_id: str, request: Request,
+                              session: AsyncSession = Depends(get_session)):
+    """用户跳过 pending_input 状态的目标，将其置为 skipped。"""
+    if _is_observer(request):
+        raise HTTPException(403, "观察者模式无写入权限")
+    tgt = await session.get(Target, target_id)
+    if not tgt or tgt.task_id != task_id:
+        raise HTTPException(404, "目标不存在")
+    if tgt.status != "pending_input":
+        raise HTTPException(409, f"目标当前状态为 {tgt.status}，仅 pending_input 状态可跳过")
+
+    tgt.status = "skipped"
+    tgt.verdict = "needs_auth"
+    tgt.assigned_worker = ""
+    tgt.heartbeat_at = None
+    tgt.dead_reason = "用户跳过手动注册"
+    assessment = tgt.auth_assessment or {}
+    reg_status = assessment.get("reg_status", "")
+    block_reason = assessment.get("block_reason", "")
+
+    session.add(TaskEvent(
+        task_id=task_id, agent="orchestrator", kind="manual_skip",
+        level="info",
+        message=f"用户跳过 {tgt.host}：{block_reason or reg_status or '需要手动注册'}",
+        payload={"target_id": target_id},
+    ))
+    await session.commit()
+
+    return {"ok": True, "message": "目标已跳过"}
+
+
+# ===== 补充资产搜集（非 FOFA 途径）=====
+@router.post("/{task_id}/collect-targets")
+async def collect_targets(task_id: str, request: Request,
+                         session: AsyncSession = Depends(get_session)):
+    """手动触发补充资产搜集（证书透明度日志等非 FOFA 途径）。
+
+    从已有 Target 和 FOFA 语法中提取根域名，通过 crt.sh 发现子域名，
+    经过预筛/评分/去重后入库。新增 Target 标记为 source="ct"。
+    无论任务处于何种状态均可执行；若任务处于 running/idle，
+    新入队目标会被编排器自动拾取。
+    """
+    if _is_observer(request):
+        raise HTTPException(403, "观察者模式无写入权限")
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    try:
+        result = await collector.collect_supplementary(session, task)
+    except Exception as e:
+        raise HTTPException(500, f"搜集失败: {e}")
+
+    session.add(TaskEvent(
+        task_id=task_id, agent="collector", kind="collect_supplementary",
+        level="info",
+        message=(f"手动搜集完成：入队 {result.get('added', 0)} 个新目标"
+                 f"（候选 {result.get('candidates', 0)} 个，"
+                 f"根域名 {len(result.get('root_domains', []))} 个）"),
+        payload=result,
+    ))
+    await session.commit()
+
+    return {"ok": True, **result}
+
+
+# ===== 任务进度重置 =====
+@router.post("/{task_id}/reset")
+async def reset_task_progress(task_id: str, request: Request,
+                              session: AsyncSession = Depends(get_session)):
+    """重置任务进度：所有 target 重置为 queued。
+
+    保留全部 findings 作为 dedup 屏障——Worker 重挖时自动接收
+    duplicate_history 上下文，被拦截重复发现、被迫探索新攻击面。
+    要求任务处于 stopped/idle/paused 状态。
+    """
+    if _is_observer(request):
+        raise HTTPException(403, "观察者模式无写入权限")
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    if task.status == "running":
+        raise HTTPException(409, "任务正在运行中，请先停止任务再重置进度")
+
+    # 重置所有 target（任务已停，所有 worker 已取消，安全重置全部）
+    rows = (await session.execute(
+        select(Target).where(Target.task_id == task_id)
+    )).scalars().all()
+    reset_count = 0
+    for tgt in rows:
+        tgt.status = "queued"
+        tgt.verdict = ""
+        tgt.assigned_worker = ""
+        tgt.heartbeat_at = None
+        tgt.dead_reason = ""
+        tgt.last_error = ""
+        tgt.retry_count = 0
+        tgt.ip_ban_confirmed = False
+        tgt.deepen_context = None
+        tgt.priority_score = (tgt.priority_score or 0) + 50.0
+        tgt.priority_reason = "[进度重置] 保留已有漏洞作为去重屏障，重新扫描探索新攻击面"
+        reset_count += 1
+
+    # 统计已有 findings
+    finding_count = await session.scalar(
+        select(func.count()).where(
+            Finding.task_id == task_id, Finding.status != "superseded")
+    )
+
+    session.add(TaskEvent(
+        task_id=task_id, agent="orchestrator", kind="task_reset",
+        level="info",
+        message=f"任务进度重置：{reset_count} 个目标重置入队，"
+                f"保留 {finding_count or 0} 个已有漏洞作为去重屏障",
+        payload={"reset_targets": reset_count, "existing_findings": finding_count or 0},
+    ))
+    await session.commit()
+
+    return {
+        "ok": True,
+        "reset_targets": reset_count,
+        "existing_findings": finding_count or 0,
+        "message": f"已重置 {reset_count} 个目标入队，"
+                   f"保留 {finding_count or 0} 个已有漏洞作为去重屏障",
+    }
+
+
+@router.post("/batch/pause")
+async def batch_pause_tasks(session: AsyncSession = Depends(get_session)):
+    """一键暂停所有运行中/空闲的任务。"""
+    rows = (await session.execute(
+        select(Task).where(Task.status.in_(["running", "idle"]))
+    )).scalars().all()
+    paused_ids = []
+    for task in rows:
+        task.status = "paused"
+        paused_ids.append(task.id)
+    await session.commit()
+    for tid in paused_ids:
+        await manager.pause(tid)
+    return {"ok": True, "paused": len(paused_ids), "task_ids": paused_ids}
+
+
+@router.post("/batch/start")
+async def batch_start_tasks(session: AsyncSession = Depends(get_session)):
+    """一键启动所有已暂停的任务。"""
+    rows = (await session.execute(
+        select(Task).where(Task.status == "paused")
+    )).scalars().all()
+    started_ids = []
+    for task in rows:
+        task.status = "running"
+        if task.fofa_config and task.fofa_config.get("fofa_auth_fail_count"):
+            fc = dict(task.fofa_config)
+            fc["fofa_auth_fail_count"] = 0
+            fc.pop("last_fofa_error", None)
+            task.fofa_config = fc
+        started_ids.append(task.id)
+    await session.commit()
+    for tid in started_ids:
+        await manager.ensure_running(tid)
+    return {"ok": True, "started": len(started_ids), "task_ids": started_ids}
+
 
 @router.post("/{task_id}/start", response_model=TaskResponse)
 async def start_task(task_id: str, session: AsyncSession = Depends(get_session)):

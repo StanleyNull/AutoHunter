@@ -225,6 +225,15 @@ export const api = {
   start: (id) => req("POST", `/api/tasks/${id}/start`),
   pause: (id) => req("POST", `/api/tasks/${id}/pause`),
   stop: (id) => req("POST", `/api/tasks/${id}/stop`),
+  resetProgress: (id) => req("POST", `/api/tasks/${id}/reset`),
+  collectTargets: (id) => req("POST", `/api/tasks/${id}/collect-targets`),
+  targets: (id, status, limit) => req("GET", `/api/tasks/${id}/targets${qs({ status, limit })}`),
+  targetDetail: (taskId, targetId) => req("GET", `/api/tasks/${taskId}/targets/${targetId}/detail`),
+  redigTarget: (taskId, targetId) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/redig`),
+  provideCredentials: (taskId, targetId, data) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/credentials`, data),
+  skipPendingTarget: (taskId, targetId) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/skip`),
+  batchPause: () => req("POST", "/api/tasks/batch/pause"),
+  batchStart: () => req("POST", "/api/tasks/batch/start"),
   results: (id, conf, q) => req("GET", `/api/tasks/${id}/results${qs({ confidence: conf, q })}`),
   reviewQueue: (id, q) => req("GET", `/api/tasks/${id}/review-queue${qs({ q })}`),
   submitList: (id, submitted, q, opts = {}) =>
@@ -240,10 +249,13 @@ export const api = {
   reportAssistantStream: (id, message, onEvent) =>
     streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent),
   userReview: (id, data) => req("PATCH", `/api/results/${id}`, data),
-  deepen: (id, directive) => req("POST", `/api/results/${id}/deepen`, { directive }),
+  deepen: (id, directive, force = false) => req("POST", `/api/results/${id}/deepen`, { directive, force }),
   getSettings: () => req("GET", "/api/settings"),
   updateSettings: (data) => req("PUT", "/api/settings", data),
   listModels: (base_url, api_key) => req("POST", "/api/settings/models", { base_url, api_key }),
+  testLLM: () => req("POST", "/api/settings/test/llm"),
+  testFOFA: () => req("POST", "/api/settings/test/fofa"),
+  testSSH: () => req("POST", "/api/settings/test/ssh"),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit) =>

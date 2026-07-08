@@ -46,6 +46,36 @@ const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archive
 // 记录哪些列表 tab 已经加载过数据：首屏只拉看板，列表按需加载；后台只刷新看过的列表。
 const loadedTabs = ref(new Set());
 
+// Target 面板状态
+const targetPanelOpen = ref(false);
+const targetList = ref([]);
+const targetListLoading = ref(false);
+const targetFilter = ref("");  // all / alive / done / dead / skipped / queued
+const targetSearch = ref("");  // 搜索关键词
+const filteredTargetList = computed(() => {
+  const q = targetSearch.value.trim().toLowerCase();
+  if (!q) return targetList.value;
+  return targetList.value.filter((t) =>
+    (t.host || "").toLowerCase().includes(q) ||
+    (t.url || "").toLowerCase().includes(q) ||
+    (t.title || "").toLowerCase().includes(q) ||
+    (t.school || "").toLowerCase().includes(q) ||
+    (t.org || "").toLowerCase().includes(q)
+  );
+});
+const targetDetailData = ref(null);
+const targetDetailLoading = ref(false);
+const redigWorking = ref(false);
+const resetWorking = ref(false);
+const collectWorking = ref(false);
+const showResetConfirm = ref(false);
+// 凭证提交表单状态
+const credType = ref("password");
+const credUsername = ref("");
+const credPassword = ref("");
+const credCookie = ref("");
+const credWorking = ref(false);
+
 function toast(m) { toastMsg.value = m; setTimeout(() => (toastMsg.value = ""), 2200); }
 
 function onAuthOrTokenChange() {
@@ -275,6 +305,7 @@ const LOG_INFO_IMPORTANT = new Set([
   "review_done", "review_deferred", "review_cancelled",
   "reclaim", "recover", "workers_cancelled", "quota_stop",
   "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
+  "target_needs_auth",
 ]);
 
 function isImportantEvent(ev) {
@@ -370,7 +401,8 @@ function connectWs() {
     if (events.value.length > 200) events.value.pop();
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
-        || k.includes("submit") || k.includes("killsweep") || k.includes("worker")) {
+        || k.includes("target_needs") || k.includes("submit")
+        || k.includes("killsweep") || k.includes("worker")) {
       scheduleEventRefresh(ev);
     }
   };
@@ -463,6 +495,160 @@ async function ctl(action) {
   await api[action](props.id);
   toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
   await Promise.all([loadTask(), loadBoard()]);
+}
+
+// ===== Target 面板 =====
+const TARGET_STATUS_LABELS = {
+  queued: "排队中", assigned: "已分配", scanning: "挖掘中",
+  done: "已完成", dead: "已放弃", skipped: "已跳过",
+  ip_banned: "IP封禁",
+  pending_input: "待注册",
+};
+
+async function openTargetPanel() {
+  targetPanelOpen.value = true;
+  targetDetailData.value = null;
+  await loadTargetList();
+}
+
+function closeTargetPanel() {
+  targetPanelOpen.value = false;
+  targetDetailData.value = null;
+}
+
+async function loadTargetList() {
+  targetListLoading.value = true;
+  try {
+    const status = targetFilter.value === "alive" ? "alive" :
+                   targetFilter.value === "all" || !targetFilter.value ? null : targetFilter.value;
+    targetList.value = await api.targets(props.id, status, 500);
+  } catch (e) {
+    toast("加载目标列表失败");
+  } finally {
+    targetListLoading.value = false;
+  }
+}
+
+async function openTargetDetail(tid) {
+  targetDetailLoading.value = true;
+  targetDetailData.value = null;
+  try {
+    targetDetailData.value = await api.targetDetail(props.id, tid);
+  } catch (e) {
+    toast("加载目标详情失败");
+  } finally {
+    targetDetailLoading.value = false;
+  }
+}
+
+function closeTargetDetail() {
+  targetDetailData.value = null;
+}
+
+async function redigTarget(tid) {
+  if (redigWorking.value) return;
+  redigWorking.value = true;
+  try {
+    const res = await api.redigTarget(props.id, tid);
+    toast(res.message || "已重置入队重挖");
+    // 刷新详情和列表
+    await openTargetDetail(tid);
+    await loadTargetList();
+    await loadBoard();
+  } catch (e) {
+    toast(e.message || "重挖失败");
+  } finally {
+    redigWorking.value = false;
+  }
+}
+
+async function resetProgress() {
+  if (resetWorking.value) return;
+  resetWorking.value = true;
+  try {
+    const res = await api.resetProgress(props.id);
+    toast(res.message || "进度已重置");
+    showResetConfirm.value = false;
+    await Promise.all([loadTask(), loadBoard()]);
+    if (targetPanelOpen.value) await loadTargetList();
+  } catch (e) {
+    toast(e.message || "重置失败");
+  } finally {
+    resetWorking.value = false;
+  }
+}
+
+async function submitCredentials(tid) {
+  if (credWorking.value) return;
+  if (credType.value === "password" && (!credUsername.value || !credPassword.value)) {
+    toast("请填写账号和密码");
+    return;
+  }
+  if (credType.value === "cookie" && !credCookie.value) {
+    toast("请填写 Cookie/Token");
+    return;
+  }
+  credWorking.value = true;
+  try {
+    const data = credType.value === "password"
+      ? { type: "password", username: credUsername.value, password: credPassword.value }
+      : { type: "cookie", cookie: credCookie.value };
+    const res = await api.provideCredentials(props.id, tid, data);
+    toast(res.message || "凭证已提交，目标已重新入队");
+    credUsername.value = "";
+    credPassword.value = "";
+    credCookie.value = "";
+    await openTargetDetail(tid);
+    await loadTargetList();
+    await loadBoard();
+  } catch (e) {
+    toast(e.message || "提交凭证失败");
+  } finally {
+    credWorking.value = false;
+  }
+}
+
+async function skipTarget(tid) {
+  if (credWorking.value) return;
+  if (!window.confirm("确认跳过此目标？跳过后将不再自动测试此目标。")) return;
+  credWorking.value = true;
+  try {
+    const res = await api.skipPendingTarget(props.id, tid);
+    toast(res.message || "目标已跳过");
+    await openTargetDetail(tid);
+    await loadTargetList();
+    await loadBoard();
+  } catch (e) {
+    toast(e.message || "跳过失败");
+  } finally {
+    credWorking.value = false;
+  }
+}
+
+async function collectTargets() {
+  if (collectWorking.value) return;
+  collectWorking.value = true;
+  toast("正在通过证书透明度日志搜索新资产，可能需要 30-60 秒...");
+  try {
+    const res = await api.collectTargets(props.id);
+    const added = res.added || 0;
+    const candidates = res.candidates || 0;
+    if (added > 0) {
+      toast(`搜集完成：发现 ${candidates} 个候选，入队 ${added} 个新目标`);
+    } else {
+      toast(res.reason === "no_root_domains"
+        ? "无法提取根域名：任务需先有目标或 FOFA 语法含域名锚点"
+        : res.reason === "no_new_hosts"
+        ? "未发现新资产（已有目标已覆盖全部子域名）"
+        : "搜集完成，未入队新目标");
+    }
+    await Promise.all([loadTask(), loadBoard()]);
+    if (targetPanelOpen.value) await loadTargetList();
+  } catch (e) {
+    toast(e.message || "搜集失败");
+  } finally {
+    collectWorking.value = false;
+  }
 }
 
 function openEdit() {
@@ -669,11 +855,13 @@ const archivedCount = computed(() =>
   Math.max(stats.value.archived ?? 0, loadedTabs.value.has("archived") ? archivedItems.value.length : 0));
 const totalTargets = computed(() =>
   (stats.value.queued ?? 0) + (stats.value.scanning ?? 0) +
-  (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
+  (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0) +
+  (stats.value.pending_input ?? 0)
 );
 const resolvedTargets = computed(() =>
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
 );
+const pendingInputCount = computed(() => stats.value.pending_input ?? 0);
 const progressPct = computed(() =>
   totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0
 );
@@ -822,10 +1010,14 @@ function evTime(ev) {
 }
 function parseEventTs(ts) {
   if (!ts) return new Date();
-  // 后端时间统一是 UTC。带时区标识（Z/+/-）直接解析；
-  // 万一是无时区的 naive 串（如 2026-06-27T02:29:00），按 UTC 补 Z，避免被当本地时区差 8 小时。
+  // 后端时间统一是东八区（带 +08:00 偏移）。带时区标识（Z/+/-）直接解析；
+  // 万一是无时区的 naive 串，按 UTC 补 Z，避免被当本地时区差 8 小时。
   const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(ts);
   return new Date(hasTz ? ts : `${ts}Z`);
+}
+function fmtTime(iso) {
+  if (!iso) return "";
+  return iso.slice(0, 19).replace("T", " ");
 }
 </script>
 
@@ -894,6 +1086,8 @@ function parseEventTs(ts) {
           <button class="primary" @click="ctl('start')" :disabled="task.status === 'running'">启动</button>
           <button @click="ctl('pause')" :disabled="task.status !== 'running'">暂停</button>
           <button @click="ctl('stop')">停止</button>
+          <button @click="collectTargets" :disabled="collectWorking">{{ collectWorking ? "搜索中..." : "搜索新Target" }}</button>
+          <button class="danger" @click="showResetConfirm = true" :disabled="task.status === 'running'">重置进度</button>
         </div>
         <div v-else class="mission-actions readonly-hint">{{ authRoleRef === 'readonly' ? "只读模式" : "未认证" }}</div>
       </div>
@@ -966,7 +1160,8 @@ function parseEventTs(ts) {
     <TaskEditModal :open="editOpen" :task="task" @close="closeEdit" @saved="onTaskSaved" />
 
     <div class="metric-grid">
-      <div class="metric-card">
+      <div class="metric-card clickable" @click="openTargetPanel" title="点击查看目标列表">
+        <span v-if="pendingInputCount" class="metric-badge pending-badge" @click.stop="openTargetPanel(); targetFilter = 'pending_input'; loadTargetList()" title="待注册目标">{{ pendingInputCount }}</span>
         <span class="metric-k">TARGETS</span><b>{{ totalTargets }}</b><em>目标总数</em>
       </div>
       <div class="metric-card active">
@@ -1085,7 +1280,7 @@ function parseEventTs(ts) {
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
-          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }} · {{ fmtTime(f.created_at) }}</div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
@@ -1225,7 +1420,7 @@ function parseEventTs(ts) {
             <span class="arch-tag" :class="f.archive_reason">{{ f.archive_reason_text }}</span>
             {{ f.title }}
           </div>
-          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }} · {{ fmtTime(f.created_at) }}</div>
           <div v-if="f.ignore_reasons?.length" class="meta rr-note">AI 理由：{{ f.ignore_reasons.join("；") }}</div>
         </div>
         <div class="rr-side" @click.stop>
@@ -1240,6 +1435,216 @@ function parseEventTs(ts) {
 
     <ReportDrawer :finding-id="drawerId" :mode="drawerMode" :src-type="task.src_type"
       @close="drawerId = null" @updated="onDrawerUpdated" @toast="toast" />
+
+       <!-- 重置进度确认弹窗 -->
+    <div v-if="showResetConfirm" class="modal-overlay" @click.self="showResetConfirm = false">
+      <div class="modal-card reset-confirm">
+        <h3>重置任务进度</h3>
+        <p>将所有目标重置为排队中，保留已发现的漏洞作为去重屏障。<br/>
+        Worker 重挖时将自动跳过已发现的漏洞，专注探索新攻击面。</p>
+        <p v-if="task?.status === 'running'" class="warn-text">任务运行中，请先停止任务再重置。</p>
+        <div class="modal-actions">
+          <button @click="showResetConfirm = false">取消</button>
+          <button class="danger" @click="resetProgress" :disabled="resetWorking || task?.status === 'running'">
+            {{ resetWorking ? "重置中..." : "确认重置" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Target 面板 -->
+    <div v-if="targetPanelOpen" class="modal-overlay target-panel-overlay" @click.self="closeTargetPanel">
+      <div class="modal-card target-panel">
+        <!-- Target 列表视图 -->
+        <template v-if="!targetDetailData">
+          <div class="tp-header">
+            <h3>目标列表 <small>{{ filteredTargetList.length }}/{{ targetList.length }} 个目标</small></h3>
+            <button class="tp-close" @click="closeTargetPanel">✕</button>
+          </div>
+          <div class="tp-filters">
+            <button v-for="s in ['', 'alive', 'queued', 'done', 'dead', 'skipped', 'pending_input']"
+              :key="s"
+              :class="{ active: targetFilter === s }"
+              @click="targetFilter = s; loadTargetList()">
+              {{ s === '' ? '全部' : s === 'alive' ? '在挖' : TARGET_STATUS_LABELS[s] || s }}
+            </button>
+          </div>
+          <div class="tp-search">
+            <span>⌕</span>
+            <input v-model="targetSearch" placeholder="搜索：域名 / URL / 标题 / 学校 / 单位" />
+          </div>
+          <div class="tp-list">
+            <div v-if="targetListLoading" class="empty sm">加载中...</div>
+            <div v-else-if="!filteredTargetList.length" class="empty sm">{{ targetSearch.trim() ? '没有匹配的目标' : '暂无目标' }}</div>
+            <div v-for="t in filteredTargetList" :key="t.id" class="tp-row" @click="openTargetDetail(t.id)">
+              <span class="tp-status" :class="`st-${t.status}`">{{ TARGET_STATUS_LABELS[t.status] || t.status }}</span>
+              <div class="tp-info">
+                <div class="tp-host">{{ t.host || t.url }}</div>
+                <div class="tp-meta">
+                  <span v-if="t.title">{{ t.title }}</span>
+                  <span v-if="t.school">{{ t.school }}</span>
+                  <span v-if="t.is_edu" class="edu-tag">教育</span>
+                  <span v-if="t.deepen_count">深挖×{{ t.deepen_count }}</span>
+                  <span v-if="t.retry_count">重试×{{ t.retry_count }}</span>
+                </div>
+                <div v-if="t.dead_reason || t.last_error" class="tp-error">{{ t.dead_reason || t.last_error }}</div>
+              </div>
+              <span class="tp-score" v-if="t.priority_score > 0">★{{ Math.round(t.priority_score) }}</span>
+            </div>
+          </div>
+        </template>
+
+        <!-- Target 明细视图 -->
+        <template v-else>
+          <div class="tp-header">
+            <button class="tp-back" @click="closeTargetDetail">← 返回列表</button>
+            <h3 v-if="targetDetailData.target">
+              {{ targetDetailData.target.host || targetDetailData.target.url }}
+            </h3>
+            <button class="tp-close" @click="closeTargetPanel">✕</button>
+          </div>
+          <div v-if="targetDetailLoading" class="empty sm">加载中...</div>
+          <template v-else-if="targetDetailData.target">
+            <div class="tp-detail-info">
+              <div class="tp-detail-row">
+                <span class="tp-label">状态</span>
+                <span class="tp-status" :class="`st-${targetDetailData.target.status}`">
+                  {{ TARGET_STATUS_LABELS[targetDetailData.target.status] || targetDetailData.target.status }}
+                </span>
+              </div>
+              <div class="tp-detail-row" v-if="targetDetailData.target.title">
+                <span class="tp-label">标题</span>
+                <span>{{ targetDetailData.target.title }}</span>
+              </div>
+              <div class="tp-detail-row" v-if="targetDetailData.target.school">
+                <span class="tp-label">归属</span>
+                <span>{{ targetDetailData.target.school }}</span>
+              </div>
+              <div class="tp-detail-row" v-if="targetDetailData.target.org">
+                <span class="tp-label">单位</span>
+                <span>{{ targetDetailData.target.org }}</span>
+              </div>
+              <div class="tp-detail-row" v-if="targetDetailData.target.ip">
+                <span class="tp-label">IP</span>
+                <span>{{ targetDetailData.target.ip }}</span>
+              </div>
+              <div class="tp-detail-row" v-if="targetDetailData.target.dead_reason">
+                <span class="tp-label">终止原因</span>
+                <span class="tp-error-text">{{ targetDetailData.target.dead_reason }}</span>
+              </div>
+              <div class="tp-detail-row" v-if="targetDetailData.target.priority_reason">
+                <span class="tp-label">优先级理由</span>
+                <span class="tp-reason-text">{{ targetDetailData.target.priority_reason }}</span>
+              </div>
+            </div>
+
+            <!-- AI 注册评估 + 凭证提交（仅 pending_input 状态） -->
+            <div v-if="targetDetailData.target.status === 'pending_input' && targetDetailData.target.auth_assessment" class="tp-auth-section">
+              <div class="tp-section-head"><span>AI 注册评估</span></div>
+              <div class="tp-auth-box">
+                <div class="tp-auth-row">
+                  <span class="tp-label">注册可行性</span>
+                  <span class="tp-auth-status" :class="`reg-${targetDetailData.target.auth_assessment.reg_status}`">
+                    {{ ({registrable_verification_needed: '✅ 可注册（仅差验证码）', not_registrable: '❌ 不可注册', registrable_no_blocker: '✅ 可注册'})[targetDetailData.target.auth_assessment.reg_status] || targetDetailData.target.auth_assessment.reg_status }}
+                  </span>
+                </div>
+                <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.block_reason">
+                  <span class="tp-label">阻断原因</span>
+                  <span>{{ targetDetailData.target.auth_assessment.block_reason }}</span>
+                </div>
+                <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.registration_url">
+                  <span class="tp-label">注册地址</span>
+                  <a :href="targetDetailData.target.auth_assessment.registration_url" target="_blank" class="tp-link">{{ targetDetailData.target.auth_assessment.registration_url }}</a>
+                </div>
+                <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.evidence_request">
+                  <span class="tp-label">AI 尝试证据</span>
+                  <pre class="tp-auth-evidence">{{ targetDetailData.target.auth_assessment.evidence_request }}</pre>
+                </div>
+                <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.what_user_needs_to_provide">
+                  <span class="tp-label">需要提供</span>
+                  <span>{{ targetDetailData.target.auth_assessment.what_user_needs_to_provide }}</span>
+                </div>
+                <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.next_steps">
+                  <span class="tp-label">下一步建议</span>
+                  <span>{{ targetDetailData.target.auth_assessment.next_steps }}</span>
+                </div>
+              </div>
+
+              <!-- 凭证提交表单（仅可注册的目标） -->
+              <div v-if="targetDetailData.target.auth_assessment.reg_status !== 'not_registrable' && !readonly" class="tp-cred-form">
+                <div class="tp-section-head"><span>提交凭证并复测</span></div>
+                <div class="tp-cred-type">
+                  <label><input type="radio" v-model="credType" value="password" /> 账号密码</label>
+                  <label><input type="radio" v-model="credType" value="cookie" /> Cookie/Token</label>
+                </div>
+                <template v-if="credType === 'password'">
+                  <input v-model="credUsername" placeholder="账号" class="tp-cred-input" />
+                  <input v-model="credPassword" type="password" placeholder="密码" class="tp-cred-input" />
+                </template>
+                <template v-else>
+                  <textarea v-model="credCookie" placeholder="Cookie 或 Authorization Token" class="tp-cred-input tp-cred-textarea"></textarea>
+                </template>
+                <div class="tp-cred-actions">
+                  <button class="primary" @click="submitCredentials(targetDetailData.target.id)" :disabled="credWorking">
+                    {{ credWorking ? "提交中..." : "提交凭证并复测" }}
+                  </button>
+                  <button @click="skipTarget(targetDetailData.target.id)" :disabled="credWorking">跳过此目标</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 重挖按钮 -->
+            <div class="tp-redig-bar" v-if="!readonly">
+              <div class="tp-redig-info">
+                <span v-if="targetDetailData.target.existing_findings > 0">
+                  已发现 <b>{{ targetDetailData.target.existing_findings }}</b> 个漏洞（将作为去重屏障）
+                </span>
+                <span v-else>该目标尚未发现漏洞</span>
+              </div>
+              <button class="danger" @click="redigTarget(targetDetailData.target.id)"
+                :disabled="redigWorking || targetDetailData.target.status === 'scanning' || targetDetailData.target.status === 'assigned'">
+                {{ redigWorking ? "重挖中..." : "重挖此目标" }}
+              </button>
+            </div>
+
+            <!-- Findings 列表 -->
+            <div class="tp-section-head" v-if="targetDetailData.findings?.length">
+              <span>漏洞列表 ({{ targetDetailData.findings.length }})</span>
+              <small>点击查看详情</small>
+            </div>
+            <div v-if="targetDetailData.findings?.length" class="tp-findings">
+              <div v-for="f in targetDetailData.findings" :key="f.id" class="tp-finding"
+                @click="drawerId = f.id; drawerMode = 'view'; targetPanelOpen = false">
+                <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
+                <div class="tp-finding-main">
+                  <div class="tp-finding-title">{{ f.title }}</div>
+                  <div class="tp-finding-meta">
+                    {{ f.vuln_type }} · {{ f.target_url }}
+                    <span v-if="f.review?.verdict"> · 审核: {{ f.review.verdict }}</span>
+                  </div>
+                </div>
+                <span class="tp-finding-status" :class="`fs-${f.status}`">{{ f.status }}</span>
+              </div>
+            </div>
+            <div v-else class="empty sm">该目标暂无漏洞记录</div>
+
+            <!-- 事件历史 -->
+            <div class="tp-section-head" v-if="targetDetailData.events?.length">
+              <span>事件历史 ({{ targetDetailData.events.length }})</span>
+            </div>
+            <div v-if="targetDetailData.events?.length" class="tp-events">
+              <div v-for="(e, i) in targetDetailData.events" :key="i" class="tp-event">
+                <span class="tp-event-agent">{{ AGENT_LABEL[e.agent] || e.agent }}</span>
+                <span class="tp-event-kind">{{ e.kind }}</span>
+                <span class="tp-event-msg" v-if="e.message">{{ e.message }}</span>
+                <span class="tp-event-ts">{{ fmtTime(e.ts) }}</span>
+              </div>
+            </div>
+          </template>
+        </template>
+      </div>
+    </div>
+
     <div v-if="toastMsg" class="toast">{{ toastMsg }}</div>
     </template>
   </section>

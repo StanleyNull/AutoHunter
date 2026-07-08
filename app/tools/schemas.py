@@ -231,11 +231,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "finish",
-            "description": "结束对当前目标的挖掘。所有该挖的都挖完了，或确认无漏洞时调用。",
+            "description": "结束对当前目标的挖掘。所有该挖的都挖完了，或确认无漏洞时调用。IP 被 WAF 封禁且交叉验证确认时也调用（verdict=ip_banned，目标将在后续代理模式下复测）。目标需要用户提供凭证/完成注册才能继续时调用 verdict=needs_auth（需附带 auth_assessment）。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "verdict": {"type": "string", "enum": ["found", "no_vuln"], "description": "found=至少提交过一个漏洞；no_vuln=确认无漏洞"},
+                    "verdict": {"type": "string", "enum": ["found", "no_vuln", "ip_banned", "needs_auth"], "description": "found=至少提交过一个漏洞；no_vuln=确认无漏洞；ip_banned=确认 IP 被 WAF 封禁（需先用代理交叉验证）；needs_auth=目标有攻击面但需要用户提供凭证/完成注册才能继续深入"},
                     "summary": {"type": "string", "description": "本次挖掘总结：测了哪些面、为什么是这个结论"},
                     "deepen_lead": {
                         "type": "string",
@@ -245,6 +245,19 @@ TOOL_SCHEMAS = [
                             "具体方向（如：用拿到的 token 调 /api/admin/users 验证越权；用泄露的 ak/sk 调 OSS 列桶）。"
                             "没有可深挖的明确线索就留空。这会触发系统自动再派一轮定向深挖。"
                         ),
+                    },
+                    "auth_assessment": {
+                        "type": "object",
+                        "description": "verdict=needs_auth 时必填。注册可行性评估，基于你实际尝试注册/登录的 HTTP 证据填写。",
+                        "properties": {
+                            "reg_status": {"type": "string", "enum": ["registrable_verification_needed", "not_registrable", "registrable_no_blocker"], "description": "registrable_verification_needed=可注册但仅差手机短信验证码或邮箱验证码（用户可手动完成） / not_registrable=不可注册（CAS/SSO/邮箱域名限制/邀请制等） / registrable_no_blocker=可注册无阻断"},
+                            "block_reason": {"type": "string", "description": "阻断原因，如'需要手机接收短信验证码完成注册'或'需要邮箱接收验证码完成注册'或'CAS/SSO 仅限校内师生，无公开注册入口'"},
+                            "registration_url": {"type": "string", "description": "注册页面 URL（如有）"},
+                            "evidence_request": {"type": "string", "description": "你实际尝试注册/登录的 HTTP 请求响应摘要，作为判定证据"},
+                            "what_user_needs_to_provide": {"type": "string", "description": "用户需要提供什么：账号密码 / Cookie / 完成注册后的登录态"},
+                            "next_steps": {"type": "string", "description": "拿到登录态后该测哪些接口/功能"},
+                        },
+                        "required": ["reg_status", "block_reason", "evidence_request"],
                     },
                 },
                 "required": ["verdict", "summary"],

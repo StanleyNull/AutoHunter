@@ -16,8 +16,9 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
+import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +40,10 @@ _TARGET_FILTER_HARD_TIMEOUT = float(os.environ.get("TARGET_FILTER_HARD_TIMEOUT",
 # 泄露凭证查询走外部 logs API，并发要小、节奏要慢，避免把对方打挂或被限流。
 _LEAK_CONCURRENCY = int(os.environ.get("LEAK_QUERY_CONCURRENCY", "2"))
 _LEAK_QUERY_DELAY = float(os.environ.get("LEAK_QUERY_DELAY", "0.6"))
+# 证书透明度日志搜集配置
+_CT_QUERY_CONCURRENCY = int(os.environ.get("CT_QUERY_CONCURRENCY", "3"))
+_CT_QUERY_TIMEOUT = float(os.environ.get("CT_QUERY_TIMEOUT", "45.0"))
+_CT_MAX_CANDIDATES = int(os.environ.get("CT_MAX_CANDIDATES", "500"))
 ProgressCallback = Callable[[str, str, dict], Awaitable[None]]
 ProgressReporter = Callable[..., Awaitable[None]]
 
@@ -900,3 +905,335 @@ def _is_edu(host: str, org: str) -> bool | None:
     if any(k in (org or "") for k in ("大学", "学院", "教育", "学校", "Education", "University", "College")):
         return True
     return None  # 不确定，交后续判断
+
+
+# ===== 补充资产搜集（非 FOFA 途径）=====
+
+
+async def _extract_root_domains(session: AsyncSession, task: Task) -> list[str]:
+    """从已有 Target 和 FOFA 语法中提取根域名，供非 FOFA 搜集使用。"""
+    domains: set[str] = set()
+
+    # 1. 从已有 Target 的 host 提取根域名
+    rows = await session.execute(
+        select(Target.host).where(Target.task_id == task.id)
+    )
+    for (host,) in rows.all():
+        root = target_cluster.root_domain(host or "")
+        if root and "." in root and not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?", root):
+            domains.add(root)
+
+    # 2. 从 FOFA 语法中提取域名锚点
+    raw_query = (task.fofa_query or "").strip()
+    if is_enterprise_src(task.src_type):
+        for d in _extract_enterprise_domains(raw_query):
+            domains.add(d)
+    else:
+        anchors = _extract_scope_anchors(raw_query)
+        for d in anchors.get("domains", []):
+            domains.add(d)
+
+    return sorted(domains)
+
+
+async def _query_crt_sh(domain: str, timeout: float = _CT_QUERY_TIMEOUT) -> set[str]:
+    """查询 crt.sh 证书透明度日志，返回域名下所有子域名（含自身）。
+
+    crt.sh 免费且无需 API key，但可能较慢或不稳定（502）。
+    失败时返回空集，不阻断主流程。
+    """
+    # % 是 crt.sh 的 SQL LIKE 通配符，%.{domain} 匹配所有子域名
+    url = f"https://crt.sh/?q={quote(f'%.{domain}')}&output=json"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                return set()
+            data = resp.json()
+    except Exception:
+        return set()
+
+    if not isinstance(data, list):
+        return set()
+
+    subdomains: set[str] = set()
+    for entry in data:
+        name_value = ""
+        if isinstance(entry, dict):
+            name_value = entry.get("name_value", "")
+        elif isinstance(entry, str):
+            name_value = entry
+        # name_value 可能含多行（SAN 证书有多个域名）
+        for name in name_value.split("\n"):
+            name = name.strip().lower()
+            # 排除通配符域名（*.example.com）和空值
+            if name and not name.startswith("*"):
+                subdomains.add(name)
+    return subdomains
+
+
+async def _query_certspotter(domain: str, timeout: float = 30.0) -> set[str]:
+    """查询 certspotter 免费 API 获取子域名（无需 key，限 100 条/次）。
+
+    certspotter 比 crt.sh 更稳定，但免费额度返回上限 100 条。
+    失败时返回空集，不阻断主流程。
+    """
+    url = (
+        f"https://api.certspotter.com/v1/issuances"
+        f"?domain={domain}&include_subdomains=true&expand=dns_names"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return set()
+            data = resp.json()
+    except Exception:
+        return set()
+
+    if not isinstance(data, list):
+        return set()
+
+    subdomains: set[str] = set()
+    for entry in data:
+        dns_names = entry.get("dns_names") if isinstance(entry, dict) else None
+        if isinstance(dns_names, list):
+            for name in dns_names:
+                name = name.strip().lower() if isinstance(name, str) else ""
+                if name and not name.startswith("*"):
+                    subdomains.add(name)
+    return subdomains
+
+
+async def collect_supplementary(
+    session: AsyncSession,
+    task: Task,
+    methods: list[str] | None = None,
+    progress_cb: ProgressCallback | None = None,
+) -> dict:
+    """手动触发补充资产搜集（非 FOFA 途径）。
+
+    从已有 Target 和 FOFA 语法中提取根域名，通过证书透明度日志 (crt.sh)
+    发现子域名，经过预筛/评分/去重后入库。
+    新发现的 Target source 标记为 "ct"。
+
+    methods: 搜集方法列表，默认 ["ct"]
+    返回: {"added": int, "candidates": int, "root_domains": [...], ...}
+    """
+    methods = methods or ["ct"]
+
+    async def progress(phase: str, text: str, **payload) -> None:
+        cfg = dict(task.fofa_config or {})
+        cfg.update(
+            collector_phase=phase,
+            collector_phase_text=text,
+            collector_phase_payload=payload,
+        )
+        task.fofa_config = cfg
+        if progress_cb:
+            await progress_cb(phase, text, payload)
+
+    seen = await _existing_hosts(session, task.id)
+    cluster_state = await _existing_cluster_state(session, task.id)
+
+    # 提取根域名
+    root_domains = await _extract_root_domains(session, task)
+    if not root_domains:
+        await progress("ct_no_domains", "无法从现有目标或 FOFA 语法中提取根域名")
+        return {"added": 0, "candidates": 0, "root_domains": [], "reason": "no_root_domains"}
+
+    domain_list = root_domains[:20]  # 限制并发查询的域名数量
+    await progress(
+        "ct_start",
+        f"开始证书透明度日志搜集，共 {len(domain_list)} 个根域名: "
+        f"{', '.join(domain_list[:5])}{'...' if len(domain_list) > 5 else ''}",
+        root_domains=len(domain_list),
+    )
+
+    # 并发查询 crt.sh
+    sem = asyncio.Semaphore(max(1, _CT_QUERY_CONCURRENCY))
+
+    async def query_one(domain: str) -> tuple[str, set[str]]:
+        async with sem:
+            await progress("ct_query", f"正在查询证书透明度日志: {domain}", domain=domain)
+            # 并行查询 crt.sh + certspotter，合并结果提高覆盖率
+            crt_task = _query_crt_sh(domain)
+            cs_task = _query_certspotter(domain)
+            crt_result, cs_result = await asyncio.gather(crt_task, cs_task)
+            all_subs = crt_result | cs_result
+            # 只保留属于该根域名的子域名（CT 日志可能返回无关域名）
+            new = {
+                s for s in all_subs
+                if s not in seen and s != domain
+                and target_cluster.root_domain(s) == domain
+            }
+            return domain, new
+
+    results = await asyncio.gather(*[query_one(d) for d in domain_list])
+
+    all_new_hosts: set[str] = set()
+    for _, hosts in results:
+        all_new_hosts.update(hosts)
+
+    # 再次过滤已存在的（并发查询期间可能有变化）
+    all_new_hosts -= seen
+
+    # 限制候选数量，避免大量子域名拖慢预筛
+    max_total = _CT_MAX_CANDIDATES * len(domain_list)
+    if len(all_new_hosts) > max_total:
+        # 短域名优先（通常是主要系统）
+        sorted_hosts = sorted(all_new_hosts, key=len)
+        all_new_hosts = set(sorted_hosts[:max_total])
+
+    if not all_new_hosts:
+        await progress("ct_done", "证书透明度日志搜集完成：未发现新资产")
+        return {"added": 0, "candidates": 0, "root_domains": root_domains, "reason": "no_new_hosts"}
+
+    # 构建候选列表
+    candidates: list[dict] = []
+    for host in all_new_hosts:
+        if host in seen:
+            continue
+        seen.add(host)
+        candidates.append({
+            "host": host,
+            "url": _ensure_url(host),
+            "ip": "",
+            "org": "",
+            "title": "",
+        })
+
+    await progress(
+        "ct_prefilter",
+        f"发现 {len(candidates)} 个新子域名，正在预筛",
+        candidates=len(candidates),
+    )
+
+    # 走与 FOFA 相同的处理管线：预筛 → 归属标注 → 评分 → 过滤 → 凭证补充
+    survivors = await _prefilter(candidates)
+
+    llm = _llm_for_task(task)
+    await _annotate_assets(survivors, llm, task.src_type)
+    await _score_targets(survivors, task.src_type)
+    await _analyze_target_filters(survivors)
+    await _enrich_leaked_creds(survivors)
+
+    await progress(
+        "ct_enqueue",
+        f"预筛后存活 {len(survivors)} 个，正在评分入库",
+        survivors=len(survivors),
+    )
+
+    # 入库（复用与 _fofa_collect 相同的逻辑）
+    added = 0
+    skipped_low = 0
+    skipped_cluster = 0
+    skipped_filter = 0
+    cluster_limit_on = target_cluster.cluster_limit_enabled(task.src_type)
+    skip_thr = resolve_skip_score_threshold()
+
+    for c in survivors:
+        score = c.get("priority_score", 0.0)
+        reason = c.get("priority_reason", "")
+        filter_decision = target_filter.evaluate_target(
+            url=c.get("url", ""),
+            host=c.get("host", ""),
+            title=c.get("title", ""),
+            body=(c.get("_probe") or {}).get("body_snippet", ""),
+            priority_score=score,
+            priority_reason=reason,
+            source="ct",
+            leaked_creds=c.get("leaked_creds") or [],
+            profile=c.get("_site_profile"),
+        )
+        if filter_decision.score_bonus:
+            score += filter_decision.score_bonus
+            sign = "+" if filter_decision.score_bonus > 0 else ""
+            reason = f"{reason} · {sign}{filter_decision.score_bonus:g} {filter_decision.bonus_reason}"
+            c["priority_score"], c["priority_reason"] = score, reason
+        cluster_key = target_cluster.target_cluster_key(c["host"], c.get("title", ""), c.get("org", ""))
+        cluster_item = cluster_state.setdefault(cluster_key, {"deadish": 0, "pending": 0, "sample": ""}) if cluster_key else None
+        if cluster_limit_on and cluster_item and target_cluster.should_cooldown_cluster(cluster_item):
+            session.add(Target(
+                task_id=task.id, url=c["url"], host=c["host"],
+                ip=c["ip"], org=c["org"], title=c["title"],
+                source="ct", status="skipped", is_edu=c.get("is_edu"),
+                school=c.get("school", ""),
+                priority_score=score, priority_reason=reason,
+                verdict="skip_cluster_cooldown",
+                dead_reason=target_cluster.cooldown_reason(cluster_item, cluster_item.get("sample", "")),
+            ))
+            skipped_cluster += 1
+            continue
+        if cluster_limit_on and cluster_item and cluster_item.get("pending", 0) >= target_cluster.CLUSTER_PENDING_LIMIT:
+            session.add(Target(
+                task_id=task.id, url=c["url"], host=c["host"],
+                ip=c["ip"], org=c["org"], title=c["title"],
+                source="ct", status="skipped", is_edu=c.get("is_edu"),
+                school=c.get("school", ""),
+                priority_score=score, priority_reason=reason,
+                verdict="skip_cluster_pending",
+                dead_reason=target_cluster.pending_limit_reason(cluster_item),
+            ))
+            skipped_cluster += 1
+            continue
+        if filter_decision.skip:
+            session.add(Target(
+                task_id=task.id, url=c["url"], host=c["host"],
+                ip=c["ip"], org=c["org"], title=c["title"],
+                source="ct", status="skipped", is_edu=c.get("is_edu"),
+                school=c.get("school", ""),
+                priority_score=score, priority_reason=reason,
+                verdict="skip_target_filter",
+                dead_reason=filter_decision.reason[:300],
+            ))
+            skipped_filter += 1
+            continue
+        if score < skip_thr:
+            session.add(Target(
+                task_id=task.id, url=c["url"], host=c["host"],
+                ip=c["ip"], org=c["org"], title=c["title"],
+                source="ct", status="skipped", is_edu=c.get("is_edu"),
+                school=c.get("school", ""),
+                priority_score=score, priority_reason=reason,
+                verdict="skip_low_score",
+                dead_reason=f"评分 {score:.0f} < {skip_thr:.0f}，垃圾资产不打",
+            ))
+            skipped_low += 1
+            continue
+        session.add(Target(
+            task_id=task.id, url=c["url"], host=c["host"],
+            ip=c["ip"], org=c["org"], title=c["title"],
+            source="ct", status="queued", is_edu=c.get("is_edu"),
+            school=c.get("school", ""),
+            priority_score=score, priority_reason=reason,
+            leaked_creds=c.get("leaked_creds") or None,
+        ))
+        if cluster_item:
+            cluster_item["pending"] += 1
+        added += 1
+
+    await session.commit()
+
+    msg = f"证书透明度搜集完成：入队 {added} 个"
+    if skipped_low:
+        msg += f"，低分跳过 {skipped_low} 个"
+    if skipped_cluster:
+        msg += f"，同款冷却 {skipped_cluster} 个"
+    if skipped_filter:
+        msg += f"，过滤 {skipped_filter} 个"
+    await progress(
+        "ct_done", msg,
+        added=added, candidates=len(candidates),
+        skipped_low=skipped_low, skipped_cluster=skipped_cluster,
+        skipped_filter=skipped_filter,
+    )
+
+    return {
+        "added": added,
+        "candidates": len(candidates),
+        "root_domains": root_domains,
+        "skipped_low": skipped_low,
+        "skipped_cluster": skipped_cluster,
+        "skipped_filter": skipped_filter,
+    }

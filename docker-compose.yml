@@ -18,10 +18,7 @@ services:
       - DB_PATH=/app/data/autohunter.db
       - WORKER_WORK_ROOT=/work
     volumes:
-      - ah_data:/app/data        # SQLite + 证据持久化（重启恢复依赖，勿删）
-      - ah_work:/work            # worker 临时工作区
+      - ./data:/app/data       # SQLite + 证据持久化（bind mount，数据在项目 data/ 目录）
+      - ./work:/work            # worker 临时工作区
+      - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro   # SSH 代理免密私钥（WAF IP 封禁复测用，只读）
     restart: unless-stopped      # 崩溃自动重启，从 DB 恢复任务状态
-
-volumes:
-  ah_data:
-  ah_work:

@@ -16,6 +16,7 @@ const userSeverity = ref("");
 const userNotes = ref("");
 const deepenOpen = ref(false);
 const deepenText = ref("");
+const deepenCapHit = ref(false);  // 深挖次数达上限时展示强制入口
 const assistantText = ref("");
 const assistantBusy = ref(false);
 const assistantMessages = ref([]);
@@ -41,6 +42,7 @@ watch(() => props.findingId, async (id) => {
   editing.value = false;
   deepenOpen.value = false;
   deepenText.value = "";
+  deepenCapHit.value = false;
   assistantText.value = "";
   assistantBusy.value = false;
   const saved = f.value.assistant_messages;
@@ -91,16 +93,24 @@ async function decide(status) {
   emit("close");
 }
 
-async function submitDeepen() {
+async function submitDeepen(force = false) {
   const d = deepenText.value.trim();
   if (!d) { emit("toast", "请先写一句深挖指令"); return; }
   try {
-    const r = await api.deepen(f.value.id, d);
+    const r = await api.deepen(f.value.id, d, force);
+    deepenCapHit.value = false;
     emit("toast", r.message || "已打回深挖，目标重新入队");
     emit("updated");
     emit("close");
   } catch (e) {
-    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+    const msg = String(e.message || e).replace(/^\d+\s*/, "");
+    // 409 + 次数上限：展示强制深挖入口，不关闭深挖框
+    if (msg.includes("次数已达上限") || msg.includes("上限")) {
+      deepenCapHit.value = true;
+      emit("toast", "深挖次数已达上限，可点击下方「强制深挖」绕过限制");
+    } else {
+      emit("toast", msg);
+    }
   }
 }
 
@@ -313,9 +323,13 @@ async function askAssistant(preset = "") {
           <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
           <textarea v-model="deepenText" rows="2"
             placeholder="例：用 config.js 里的 SECRET 对 /ashx 接口做 sha1 签名，越权调用取出他人数据并贴出响应"></textarea>
+          <div v-if="deepenCapHit" class="deepen-cap-warn">
+            ⚠ 深挖次数已达上限（自动化防护），人工确认后可强制继续，不受次数限制
+          </div>
           <div class="deepen-actions">
-            <button class="ghost" @click="deepenOpen = false">取消</button>
-            <button class="go" @click="submitDeepen">↻ 打回深挖并重新入队</button>
+            <button class="ghost" @click="deepenOpen = false; deepenCapHit = false">取消</button>
+            <button v-if="deepenCapHit" class="go force" @click="submitDeepen(true)">⚡ 强制深挖（绕过次数限制）</button>
+            <button v-else class="go" @click="submitDeepen()">↻ 打回深挖并重新入队</button>
           </div>
         </div>
         <div class="review-bar">
@@ -344,9 +358,13 @@ async function askAssistant(preset = "") {
           <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
           <textarea v-model="deepenText" rows="2"
             placeholder="例：用泄露的初始密码 123456 实际登录某个真实账号，证明能进系统拿到数据"></textarea>
+          <div v-if="deepenCapHit" class="deepen-cap-warn">
+            ⚠ 深挖次数已达上限（自动化防护），人工确认后可强制继续，不受次数限制
+          </div>
           <div class="deepen-actions">
-            <button class="ghost" @click="deepenOpen = false">取消</button>
-            <button class="go" @click="submitDeepen">↻ 打回深挖并重新入队</button>
+            <button class="ghost" @click="deepenOpen = false; deepenCapHit = false">取消</button>
+            <button v-if="deepenCapHit" class="go force" @click="submitDeepen(true)">⚡ 强制深挖（绕过次数限制）</button>
+            <button v-else class="go" @click="submitDeepen()">↻ 打回深挖并重新入队</button>
           </div>
         </div>
         <div class="review-bar">
@@ -363,9 +381,13 @@ async function askAssistant(preset = "") {
           <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
           <textarea v-model="deepenText" rows="2"
             placeholder="例：用泄露的初始密码 123456 实际登录某个真实账号，证明能进系统拿到数据"></textarea>
+          <div v-if="deepenCapHit" class="deepen-cap-warn">
+            ⚠ 深挖次数已达上限（自动化防护），人工确认后可强制继续，不受次数限制
+          </div>
           <div class="deepen-actions">
-            <button class="ghost" @click="deepenOpen = false">取消</button>
-            <button class="go" @click="submitDeepen">↻ 打回深挖并重新入队</button>
+            <button class="ghost" @click="deepenOpen = false; deepenCapHit = false">取消</button>
+            <button v-if="deepenCapHit" class="go force" @click="submitDeepen(true)">⚡ 强制深挖（绕过次数限制）</button>
+            <button v-else class="go" @click="submitDeepen()">↻ 打回深挖并重新入队</button>
           </div>
         </div>
         <div class="review-bar">

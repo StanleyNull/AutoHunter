@@ -83,6 +83,7 @@ class TaskStats(BaseModel):
     done: int = 0
     dead: int = 0
     skipped: int = 0
+    pending_input: int = 0   # 需要用户提供凭证/完成注册的目标
     findings_total: int = 0
     pending_review: int = 0
     accepted: int = 0
@@ -115,6 +116,8 @@ class TaskResponse(BaseModel):
     updated_at: str
     stats: Optional[TaskStats] = None
     pending_user_review: int = 0
+    # AI 未采纳归档数（ignored/deepen 且用户未处理）——任务卡片绿点用，列表接口轻量填充
+    pending_archived: int = 0
 
 
 class LLMSettingsDTO(BaseModel):
@@ -145,8 +148,14 @@ class DefaultsSettingsDTO(BaseModel):
     engine: Optional[str] = None
 
 
+class ProxySettingsDTO(BaseModel):
+    ssh_servers: Optional[str] = None
+    ssh_key_path: Optional[str] = None
+
+
 class SettingsUpdateRequest(BaseModel):
     llm: Optional[LLMSettingsDTO] = None
     fofa: Optional[FofaSettingsDTO] = None
     engines: Optional[dict[str, EngineSettingsDTO]] = None   # 按引擎名索引
     defaults: Optional[DefaultsSettingsDTO] = None
+    proxy: Optional[ProxySettingsDTO] = None

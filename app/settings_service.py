@@ -7,15 +7,15 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import LLMConfig, llm_config
+from app.config import LLMConfig, ProxyConfig, llm_config
 from app.agents.prompts import normalize_worker_prompt_version
-from app.db.models import SystemSettings, Task
+from app.db.models import SystemSettings, Task, to_cst_iso
 from app.db.session import SessionLocal
 from app.engines import get_engine, list_engines, get_default_engine
 
 SETTINGS_ID = "global"
 
-_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}}
+_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}, "proxy": {}}
 
 
 # 统一脱敏占位：不再泄露密钥首尾字符，避免降低离线爆破成本。
@@ -90,6 +90,13 @@ def _env_defaults() -> dict[str, Any]:
     }
 
 
+def _env_proxy() -> dict[str, Any]:
+    return {
+        "ssh_servers": os.environ.get("PROXY_SSH_SERVERS", ""),
+        "ssh_key_path": os.environ.get("PROXY_SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
+    }
+
+
 def _merge_section(stored: dict, env: dict) -> dict[str, Any]:
     out = dict(env)
     for k, v in (stored or {}).items():
@@ -105,6 +112,7 @@ def effective_settings() -> dict[str, Any]:
         "fofa": _merge_section(_cache.get("fofa"), _env_fofa()),
         "engines": _merge_section(_cache.get("engines"), _env_engines()),
         "defaults": _merge_section(_cache.get("defaults"), _env_defaults()),
+        "proxy": _merge_section(_cache.get("proxy"), _env_proxy()),
     }
 
 
@@ -202,6 +210,19 @@ def resolve_worker_prompt_version(task: Task | None = None) -> str:
     return normalize_worker_prompt_version(effective_settings()["defaults"].get("worker_prompt_version"))
 
 
+def resolve_proxy_config() -> ProxyConfig:
+    """返回合并 env + DB 缓存后的 SSH 代理配置（供 worker/orchestrator 读取）。
+
+    接口与 config.ProxyConfig 一致（.available / .server_list / .ssh_key_path），
+    调用方无需改动读取方式；数据源从纯 env 升级为「DB 热配置优先，env 兜底」。
+    """
+    eff = effective_settings()["proxy"]
+    return ProxyConfig(
+        ssh_servers=str(eff.get("ssh_servers") or ""),
+        ssh_key_path=str(eff.get("ssh_key_path") or "/root/.ssh/id_ed25519"),
+    )
+
+
 def public_settings_view() -> dict[str, Any]:
     """API 返回：密钥脱敏。"""
     eff = effective_settings()
@@ -245,6 +266,10 @@ def public_settings_view() -> dict[str, Any]:
             "worker_prompt_version": normalize_worker_prompt_version(defaults.get("worker_prompt_version")),
             "engine": defaults.get("engine", get_default_engine()),
         },
+        "proxy": {
+            "ssh_servers": eff.get("proxy", {}).get("ssh_servers") or "",
+            "ssh_key_path": eff.get("proxy", {}).get("ssh_key_path") or "/root/.ssh/id_ed25519",
+        },
         "available_engines": list_engines(),
         "updated_at": _cache.get("updated_at"),
     }
@@ -263,7 +288,8 @@ async def refresh_cache(session: AsyncSession) -> SystemSettings:
         "fofa": dict(row.fofa or {}),
         "engines": dict(row.engines or {}),
         "defaults": dict(row.defaults or {}),
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "proxy": dict(row.proxy or {}),
+        "updated_at": to_cst_iso(row.updated_at),
     }
     return row
 
@@ -322,6 +348,13 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
             if v is not None:
                 defaults[k] = v
         row.defaults = defaults
+
+    if "proxy" in payload and payload["proxy"]:
+        proxy = dict(row.proxy or {})
+        for k, v in payload["proxy"].items():
+            if v is not None:
+                proxy[k] = v
+        row.proxy = proxy
 
     await session.commit()
     await session.refresh(row)

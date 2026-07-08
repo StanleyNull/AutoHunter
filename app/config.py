@@ -82,5 +82,24 @@ class WorkerConfig(BaseModel):
         return min(value, cap) if cap > 0 else value
 
 
+class ProxyConfig(BaseModel):
+    """SSH 代理服务器配置（WAF IP 封禁时交叉检测 + 代理复测）。"""
+    # 格式: user@host:port（多台逗号分隔，简单轮询）
+    ssh_servers: str = os.environ.get("PROXY_SSH_SERVERS", "")
+    # SSH 私钥路径（容器内路径；私钥由 docker-compose.yml 挂载进来）
+    ssh_key_path: str = os.environ.get("PROXY_SSH_KEY_PATH", "/root/.ssh/id_ed25519")
+
+    @property
+    def available(self) -> bool:
+        return bool(self.ssh_servers.strip())
+
+    @property
+    def server_list(self) -> list[str]:
+        """返回 ['user@host:port', ...] 列表。支持逗号或换行分隔（多行文本框输入）。"""
+        raw = self.ssh_servers.replace("\n", ",").replace("\r", ",")
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+
 llm_config = LLMConfig()
 worker_config = WorkerConfig()
+proxy_config = ProxyConfig()

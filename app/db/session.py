@@ -65,6 +65,10 @@ _MIGRATIONS = [
     ("findings", "kill_chain", "JSON"),
     ("findings", "assistant_messages", "JSON DEFAULT '[]'"),
     ("killsweeps", "affected_table", "JSON DEFAULT '[]'"),
+    ("targets", "ip_ban_confirmed", "BOOLEAN DEFAULT 0"),
+    ("targets", "auth_assessment", "JSON"),
+    ("targets", "user_credentials", "JSON"),
+    ("system_settings", "proxy", "JSON DEFAULT '{}'"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。
