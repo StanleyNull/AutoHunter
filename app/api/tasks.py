@@ -20,6 +20,7 @@ from app.api.findings import (
     _sanitize_assistant_messages,
 )
 from app.agents import collector, site_collab
+from app.agents.deepen import DEEPEN_CAP
 from app.agents.prompts import normalize_src_type
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
@@ -989,9 +990,15 @@ async def reset_failed_targets(task_id: str, request: Request,
     )).scalars().all()
 
     reset_count = 0
+    skipped_deepcapped = 0
     for tgt in dead_targets:
         reason = (tgt.dead_reason or "")
         if not any(p in reason for p in _FAILED_DEAD_PATTERNS):
+            continue
+        # 已达深挖上限的目标不重置：深挖 2 次仍无果说明攻击面已穷尽，
+        # 重置只是浪费 token。
+        if (tgt.deepen_count or 0) >= DEEPEN_CAP:
+            skipped_deepcapped += 1
             continue
         tgt.status = "queued"
         tgt.verdict = ""
@@ -1010,16 +1017,23 @@ async def reset_failed_targets(task_id: str, request: Request,
         session.add(TaskEvent(
             task_id=task_id, agent="orchestrator", kind="task_reset_failed",
             level="info",
-            message=f"重置 {reset_count} 个失败目标入队（探活失败/系统自动收敛）",
-            payload={"reset_targets": reset_count},
+            message=f"重置 {reset_count} 个失败目标入队（探活失败/系统自动收敛），"
+                    f"跳过 {skipped_deepcapped} 个已达深挖上限的目标",
+            payload={"reset_targets": reset_count, "skipped_deepcapped": skipped_deepcapped},
         ))
         await session.commit()
+
+    msg = f"已重置 {reset_count} 个失败目标入队"
+    if not reset_count:
+        msg = "没有匹配的失败目标"
+    if skipped_deepcapped:
+        msg += f"（跳过 {skipped_deepcapped} 个已达深挖上限的目标）"
 
     return {
         "ok": True,
         "reset_targets": reset_count,
-        "message": f"已重置 {reset_count} 个失败目标入队" if reset_count
-                   else "没有匹配的失败目标",
+        "skipped_deepcapped": skipped_deepcapped,
+        "message": msg,
     }
 
 
