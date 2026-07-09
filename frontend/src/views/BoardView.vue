@@ -1021,26 +1021,55 @@ const runState = computed(() => {
   const hint = s === "running" ? "24×7 自动补队列" : s === "idle" ? "等待新目标或人工动作" : "调度已收敛";
   return { label, hint };
 });
-const retestBadge = computed(() => {
+const retestCard = computed(() => {
   const rs = retestSummary.value;
   if (!rs) return null;
-  const phaseLabels = {
-    phase1: "重测 Phase 1（本机探活）",
-    phase2: "重测 Phase 2（服务器测试）",
-    phase3_sleep: "重测休眠中",
-    noproxy_round: `重测第${(rs.phase === 'noproxy_round' ? (retestSummary.value?.sleep_round || 0) + 1 : 0)}轮`,
-    noproxy_sleep: "重测休眠中",
-    done: "重测完成",
-  };
-  const label = phaseLabels[rs.phase] || rs.phase;
-  let detail = "";
-  if (rs.sleep_until) {
-    const d = new Date(rs.sleep_until);
-    detail = `预计 ${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  } else if (rs.remaining > 0) {
-    detail = `${rs.remaining} 个目标待处理`;
+  const isSleep = rs.phase === "phase3_sleep" || rs.phase === "noproxy_sleep";
+  const isProxy = rs.mode === "proxy";
+
+  // 阶段标题
+  let phaseTitle = "";
+  if (rs.phase === "phase1") phaseTitle = "Phase 1 · 本机探活";
+  else if (rs.phase === "phase2") phaseTitle = "Phase 2 · 服务器测试";
+  else if (rs.phase === "phase3_sleep") phaseTitle = `Phase 3 · 休眠中（第${rs.sleep_round + 1}轮）`;
+  else if (rs.phase === "noproxy_round") phaseTitle = `第${rs.sleep_round + 1}轮 · 本机探活`;
+  else if (rs.phase === "noproxy_sleep") phaseTitle = `第${rs.sleep_round + 1}轮休眠中`;
+  else if (rs.phase === "done") phaseTitle = "重测完成";
+
+  // 当前动作
+  let action = "";
+  if (isSleep) {
+    if (rs.sleep_until) {
+      const d = new Date(rs.sleep_until);
+      action = `预计 ${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} 唤醒`;
+    }
+  } else if (rs.current_target) {
+    const stepLabels = { probing: "正在探活", testing: "正在测试", idle: "等待中" };
+    action = `${stepLabels[rs.current_step] || rs.current_step}: ${rs.current_target.host}`;
   }
-  return { label, detail };
+
+  // 进度
+  const total = rs.total || 0;
+  const completed = rs.completed || 0;
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  // 统计行
+  const stats = [];
+  if (total > 0) stats.push(`已完成 ${completed}/${total}`);
+  if (rs.remaining > 0) stats.push(`待处理 ${rs.remaining}`);
+  if (rs.unreachable_count > 0) stats.push(`不可达 ${rs.unreachable_count}`);
+
+  // 休眠时的额外信息
+  let sleepInfo = "";
+  if (isSleep && rs.remaining > 0) {
+    sleepInfo = `${rs.remaining} 个目标等待复测`;
+  }
+
+  return {
+    phaseTitle, action, pct, completed, total,
+    isSleep, isProxy, stats: stats.join(" · "),
+    sleepInfo,
+  };
 });
 const modelName = computed(() =>
   task.value?.model_config_data?.model || task.value?.llm_usage?.model || "未配置模型"
@@ -1195,9 +1224,21 @@ function fmtTime(iso) {
           <span>并发 {{ task.concurrency }}</span>
           <span>{{ runState.hint }}</span>
         </div>
-        <div v-if="retestBadge" class="retest-badge">
-          <span class="retest-badge-label">{{ retestBadge.label }}</span>
-          <span v-if="retestBadge.detail" class="retest-badge-detail">{{ retestBadge.detail }}</span>
+        <div v-if="retestCard" class="retest-card">
+          <div class="retest-card-header">
+            <span class="retest-card-title">失败目标重测</span>
+            <span class="retest-card-mode">{{ retestCard.isProxy ? "有代理" : "无代理" }}</span>
+            <span class="retest-card-phase">{{ retestCard.phaseTitle }}</span>
+            <span v-if="!retestCard.isSleep && retestCard.total > 0" class="retest-card-pct">{{ retestCard.pct }}%</span>
+          </div>
+          <div v-if="!retestCard.isSleep && retestCard.total > 0" class="retest-card-bar">
+            <i :style="{ width: retestCard.pct + '%' }"></i>
+          </div>
+          <div class="retest-card-body">
+            <span v-if="retestCard.action" class="retest-card-action">{{ retestCard.action }}</span>
+            <span v-if="retestCard.sleepInfo" class="retest-card-sleep">{{ retestCard.sleepInfo }}</span>
+            <span v-if="retestCard.stats" class="retest-card-stats">{{ retestCard.stats }}</span>
+          </div>
         </div>
         <div class="mission-runtime">
           <span class="runtime-chip">

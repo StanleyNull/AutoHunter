@@ -1104,15 +1104,38 @@ main {
   color: var(--accent);
   font-weight: 600;
 }
-.retest-badge {
-  display: inline-flex; align-items: center; gap: 8px;
-  margin-top: 8px; padding: 5px 12px;
-  background: color-mix(in oklch, var(--warn, #f59e0b) 12%, var(--bg));
-  border: 1px solid color-mix(in oklch, var(--warn, #f59e0b) 40%, var(--border-soft));
-  border-radius: 8px; font-size: 13px;
+.retest-card {
+  margin-top: 10px; padding: 10px 14px;
+  background: color-mix(in oklch, var(--warn, #f59e0b) 8%, var(--bg));
+  border: 1px solid color-mix(in oklch, var(--warn, #f59e0b) 30%, var(--border-soft));
+  border-radius: 10px;
 }
-.retest-badge-label { font-weight: 600; color: var(--warn, #f59e0b); }
-.retest-badge-detail { color: var(--muted); font-size: 12px; }
+.retest-card-header {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.retest-card-title { font-weight: 700; font-size: 13px; color: var(--warn, #f59e0b); }
+.retest-card-mode {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: var(--bg); border: 1px solid var(--border-soft); color: var(--muted);
+}
+.retest-card-phase { font-size: 13px; font-weight: 600; color: var(--text); }
+.retest-card-pct { margin-left: auto; font-size: 13px; font-weight: 700; color: var(--warn, #f59e0b); }
+.retest-card-bar {
+  height: 4px; margin: 8px 0; border-radius: 2px;
+  background: color-mix(in oklch, var(--warn, #f59e0b) 15%, var(--bg));
+  overflow: hidden;
+}
+.retest-card-bar i {
+  display: block; height: 100%; border-radius: 2px;
+  background: var(--warn, #f59e0b);
+  transition: width 0.3s ease;
+}
+.retest-card-body {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px;
+}
+.retest-card-action { color: var(--text); font-weight: 500; }
+.retest-card-sleep { color: var(--warn, #f59e0b); }
+.retest-card-stats { color: var(--muted); }
 .mission-runtime {
   display: flex; flex-wrap: wrap; gap: 8px;
   margin-top: 10px;

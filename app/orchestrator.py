@@ -678,6 +678,7 @@ class TaskRunner:
             "mode": mode,
             "phase": phase,
             "remaining_ids": eligible,
+            "total": len(eligible),
             "unreachable_ids": [],  # noproxy 模式专用
             "current_id": None,
             "current_step": "idle",

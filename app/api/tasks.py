@@ -584,11 +584,27 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
     retest_summary = None
     if task.retest_state:
         rs = task.retest_state
+        remaining = len(rs.get("remaining_ids", []))
+        total = rs.get("total", 0) or remaining
+        unreachable_count = len(rs.get("unreachable_ids", []))
+        # 当有 current_id 时查目标 host
+        current_target = None
+        cid = rs.get("current_id")
+        if cid:
+            ct = await session.get(Target, cid)
+            if ct:
+                current_target = {"host": ct.host, "url": ct.url}
         retest_summary = {
             "phase": rs.get("phase"),
             "mode": rs.get("mode"),
-            "remaining": len(rs.get("remaining_ids", [])),
+            "current_step": rs.get("current_step"),
+            "current_target": current_target,
+            "total": total,
+            "remaining": remaining,
+            "completed": max(0, total - remaining - unreachable_count),
+            "unreachable_count": unreachable_count,
             "sleep_until": rs.get("sleep_until"),
+            "sleep_round": rs.get("sleep_round", 0),
         }
 
     return {
