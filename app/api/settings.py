@@ -92,15 +92,16 @@ async def test_fofa(session: AsyncSession = Depends(get_session)):
 
 @router.post("/test/ssh")
 async def test_ssh(session: AsyncSession = Depends(get_session)):
-    """测试 SSH 代理连通性：对每台配置的服务器执行 echo ok。"""
+    """测试 SSH 代理连通性：对每台配置的服务器（测试服务器 + 专用探活服务器）执行 echo ok。"""
     await refresh_cache(session)
     pc = resolve_proxy_config()
-    if not pc.available:
+    test_servers = pc.server_list
+    probe_servers = pc.probe_server_list
+    if not test_servers and not probe_servers:
         return {"ok": False, "message": "未配置代理服务器"}
 
-    results = []
-    all_ok = True
-    for srv in pc.server_list:
+    async def _test_one(srv: str, srv_type: str) -> dict:
+        """测试单台 SSH 服务器连通性。"""
         # 解析 user@host:port
         if ":" in srv.split("@")[-1]:
             user_host, port = srv.rsplit(":", 1)
@@ -124,16 +125,31 @@ async def test_ssh(session: AsyncSession = Depends(get_session)):
             out = stdout.decode("utf-8", "replace").strip()
             err = stderr.decode("utf-8", "replace").strip()
             if proc.returncode == 0 and "ok" in out:
-                results.append({"server": srv, "ok": True, "message": "连通正常"})
+                return {"server": srv, "type": srv_type, "ok": True, "message": "连通正常"}
             else:
-                all_ok = False
-                results.append({"server": srv, "ok": False, "message": err[:200] or out[:200] or f"exit={proc.returncode}"})
+                return {"server": srv, "type": srv_type, "ok": False,
+                        "message": err[:200] or out[:200] or f"exit={proc.returncode}"}
         except asyncio.TimeoutError:
-            all_ok = False
-            results.append({"server": srv, "ok": False, "message": "超时（15s）"})
+            return {"server": srv, "type": srv_type, "ok": False, "message": "超时（15s）"}
         except Exception as e:
-            all_ok = False
-            results.append({"server": srv, "ok": False, "message": f"{type(e).__name__}: {e}"})
+            return {"server": srv, "type": srv_type, "ok": False,
+                    "message": f"{type(e).__name__}: {e}"}
 
-    summary = "; ".join(f"{r['server']}: {'OK' if r['ok'] else r['message']}" for r in results)
+    results = []
+    all_ok = True
+    # 先测测试服务器，再测探活服务器
+    for srv in test_servers:
+        r = await _test_one(srv, "测试服务器")
+        results.append(r)
+        if not r["ok"]:
+            all_ok = False
+    for srv in probe_servers:
+        r = await _test_one(srv, "探活服务器")
+        results.append(r)
+        if not r["ok"]:
+            all_ok = False
+
+    summary = "; ".join(
+        f"[{r['type']}] {r['server']}: {'OK' if r['ok'] else r['message']}" for r in results
+    )
     return {"ok": all_ok, "message": summary, "details": results}
