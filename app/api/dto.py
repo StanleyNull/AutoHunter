@@ -151,6 +151,7 @@ class DefaultsSettingsDTO(BaseModel):
 class ProxySettingsDTO(BaseModel):
     ssh_servers: Optional[str] = None
     ssh_key_path: Optional[str] = None
+    probe_servers: Optional[str] = None
 
 
 class SettingsUpdateRequest(BaseModel):

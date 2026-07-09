@@ -58,6 +58,8 @@ class Task(Base):
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
+    # 失败目标自动重测状态机（idle 时触发，串行探活+测试+休眠），null=无重测
+    retest_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 

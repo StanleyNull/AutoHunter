@@ -43,6 +43,8 @@ _STREAM_IMPORTANT_KINDS = frozenset({
     "review_done", "review_deferred", "review_cancelled",
     "reclaim", "recover", "workers_cancelled", "quota_stop",
     "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
+    "retest_start", "retest_phase2", "retest_sleep", "retest_wake", "retest_done",
+    "retest_sleep_log", "retest_ip_banned", "retest_dead", "retest_recover",
 })
 
 
@@ -578,6 +580,17 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
     if task.target_source == "site":
         site_overview = await _compute_site_collab(session, task_id)
 
+    # 重测状态摘要（供前端展示）
+    retest_summary = None
+    if task.retest_state:
+        rs = task.retest_state
+        retest_summary = {
+            "phase": rs.get("phase"),
+            "mode": rs.get("mode"),
+            "remaining": len(rs.get("remaining_ids", [])),
+            "sleep_until": rs.get("sleep_until"),
+        }
+
     return {
         "task_status": task.status,
         "live_workers": live,
@@ -587,6 +600,7 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
         "llm_usage": {} if observer else usage_snapshot(task.id, resolve_llm_config(task).model),
         "events": events,
         "site_collab": site_overview,
+        "retest_summary": retest_summary,
     }
 
 

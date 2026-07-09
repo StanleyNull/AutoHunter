@@ -88,6 +88,8 @@ class ProxyConfig(BaseModel):
     ssh_servers: str = os.environ.get("PROXY_SSH_SERVERS", "")
     # SSH 私钥路径（容器内路径；私钥由 docker-compose.yml 挂载进来）
     ssh_key_path: str = os.environ.get("PROXY_SSH_KEY_PATH", "/root/.ssh/id_ed25519")
+    # 专用探活服务器（不参与测试，仅用于探活交叉验证，避免 IP 被封）
+    probe_servers: str = os.environ.get("PROXY_PROBE_SERVERS", "")
 
     @property
     def available(self) -> bool:
@@ -97,6 +99,12 @@ class ProxyConfig(BaseModel):
     def server_list(self) -> list[str]:
         """返回 ['user@host:port', ...] 列表。支持逗号或换行分隔（多行文本框输入）。"""
         raw = self.ssh_servers.replace("\n", ",").replace("\r", ",")
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+    @property
+    def probe_server_list(self) -> list[str]:
+        """专用探活服务器列表，格式同 server_list。"""
+        raw = self.probe_servers.replace("\n", ",").replace("\r", ",")
         return [s.strip() for s in raw.split(",") if s.strip()]
 
 

@@ -1104,6 +1104,15 @@ main {
   color: var(--accent);
   font-weight: 600;
 }
+.retest-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin-top: 8px; padding: 5px 12px;
+  background: color-mix(in oklch, var(--warn, #f59e0b) 12%, var(--bg));
+  border: 1px solid color-mix(in oklch, var(--warn, #f59e0b) 40%, var(--border-soft));
+  border-radius: 8px; font-size: 13px;
+}
+.retest-badge-label { font-weight: 600; color: var(--warn, #f59e0b); }
+.retest-badge-detail { color: var(--muted); font-size: 12px; }
 .mission-runtime {
   display: flex; flex-wrap: wrap; gap: 8px;
   margin-top: 10px;

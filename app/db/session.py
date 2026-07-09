@@ -72,6 +72,7 @@ _MIGRATIONS = [
     ("tasks", "engine", "VARCHAR(20) DEFAULT ''"),
     ("system_settings", "engines", "JSON DEFAULT '{}'"),
     ("system_settings", "proxy", "JSON DEFAULT '{}'"),
+    ("tasks", "retest_state", "JSON"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。

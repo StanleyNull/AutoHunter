@@ -94,6 +94,7 @@ def _env_proxy() -> dict[str, Any]:
     return {
         "ssh_servers": os.environ.get("PROXY_SSH_SERVERS", ""),
         "ssh_key_path": os.environ.get("PROXY_SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
+        "probe_servers": os.environ.get("PROXY_PROBE_SERVERS", ""),
     }
 
 
@@ -220,6 +221,7 @@ def resolve_proxy_config() -> ProxyConfig:
     return ProxyConfig(
         ssh_servers=str(eff.get("ssh_servers") or ""),
         ssh_key_path=str(eff.get("ssh_key_path") or "/root/.ssh/id_ed25519"),
+        probe_servers=str(eff.get("probe_servers") or ""),
     )
 
 
@@ -269,6 +271,7 @@ def public_settings_view() -> dict[str, Any]:
         "proxy": {
             "ssh_servers": eff.get("proxy", {}).get("ssh_servers") or "",
             "ssh_key_path": eff.get("proxy", {}).get("ssh_key_path") or "/root/.ssh/id_ed25519",
+            "probe_servers": eff.get("proxy", {}).get("probe_servers") or "",
         },
         "available_engines": list_engines(),
         "updated_at": _cache.get("updated_at"),

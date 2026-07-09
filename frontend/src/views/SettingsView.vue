@@ -42,6 +42,7 @@ const form = reactive({
   worker_prompt_version: "legacy",
   proxy_ssh_servers: "",
   proxy_ssh_key_path: "",
+  proxy_probe_servers: "",
 });
 
 function toast(m) {
@@ -70,6 +71,7 @@ async function load() {
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
     form.proxy_ssh_servers = s.proxy?.ssh_servers || "";
     form.proxy_ssh_key_path = s.proxy?.ssh_key_path || "";
+    form.proxy_probe_servers = s.proxy?.probe_servers || "";
   } finally {
     loading.value = false;
   }
@@ -98,6 +100,7 @@ async function save() {
       proxy: {
         ssh_servers: form.proxy_ssh_servers,
         ssh_key_path: form.proxy_ssh_key_path,
+        probe_servers: form.proxy_probe_servers,
       },
     };
     if (form.api_key.trim()) body.llm.api_key = form.api_key.trim();
@@ -257,14 +260,19 @@ onMounted(load);
         <fieldset class="settings-block">
           <legend>
             <span>SSH 代理池</span>
-            <small>WAF 封 IP 时交叉检测 + 首轮结束后代理复测</small>
+            <small>WAF 封 IP 时交叉检测 + 失败目标重测</small>
           </legend>
           <div class="settings-grid">
-            <label class="full">代理服务器（一行一个）
+            <label class="full">测试服务器（一行一个）
               <textarea v-model="form.proxy_ssh_servers" rows="3"
                 placeholder="root@1.2.3.4:22&#10;root@5.6.7.8:22"></textarea>
             </label>
-            <p class="field-hint full">免密 SSH 服务器，格式 <code>user@host:port</code>，一行一个。留空则关闭代理复测。保存后立即生效，无需重启。</p>
+            <p class="field-hint full">用于代理测试的免密 SSH 服务器，格式 <code>user@host:port</code>，一行一个。留空则关闭代理功能。</p>
+            <label class="full">专用探活服务器（一行一个）
+              <textarea v-model="form.proxy_probe_servers" rows="3"
+                placeholder="root@9.10.11.12:22&#10;root@13.14.15.16:22"></textarea>
+            </label>
+            <p class="field-hint full">仅用于失败目标重测时探活交叉验证，不参与测试，避免 IP 被封。留空则回退到测试服务器探活。</p>
             <label class="full">SSH 私钥路径（容器内）
               <input v-model="form.proxy_ssh_key_path" placeholder="/root/.ssh/id_ed25519" />
             </label>

@@ -73,6 +73,7 @@ const resetFailedWorking = ref(false);
 const collectWorking = ref(false);
 const showResetConfirm = ref(false);
 const showResetFailedConfirm = ref(false);
+const retestSummary = ref(null);
 // 凭证提交表单状态
 const credType = ref("password");
 const credUsername = ref("");
@@ -300,6 +301,8 @@ const IMPORTANT_KINDS = new Set([
   "killsweep_invalid", "killsweep_cancelled",
   "llm_error", "quota_stop", "reclaim", "recover", "workers_cancelled",
   "tool_exception",
+  "retest_start", "retest_phase2", "retest_sleep", "retest_wake", "retest_done",
+  "retest_sleep_log", "retest_ip_banned", "retest_dead", "retest_recover",
 ]);
 const NOISE_KINDS = new Set([
   "ping",
@@ -372,6 +375,7 @@ async function loadBoard() {
   if (id !== props.id) return;
   liveWorkers.value = b.live_workers || [];
   siteCollab.value = b.site_collab || null;
+  retestSummary.value = b.retest_summary || null;
   if (task.value) {
     if (b.task_status) task.value.status = b.task_status;
     if (b.stats) task.value.stats = b.stats;
@@ -411,7 +415,8 @@ function connectWs() {
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
         || k.includes("target_needs") || k.includes("submit")
-        || k.includes("killsweep") || k.includes("worker")) {
+        || k.includes("killsweep") || k.includes("worker")
+        || k.includes("retest")) {
       scheduleEventRefresh(ev);
     }
   };
@@ -1016,6 +1021,27 @@ const runState = computed(() => {
   const hint = s === "running" ? "24×7 自动补队列" : s === "idle" ? "等待新目标或人工动作" : "调度已收敛";
   return { label, hint };
 });
+const retestBadge = computed(() => {
+  const rs = retestSummary.value;
+  if (!rs) return null;
+  const phaseLabels = {
+    phase1: "重测 Phase 1（本机探活）",
+    phase2: "重测 Phase 2（服务器测试）",
+    phase3_sleep: "重测休眠中",
+    noproxy_round: `重测第${(rs.phase === 'noproxy_round' ? (retestSummary.value?.sleep_round || 0) + 1 : 0)}轮`,
+    noproxy_sleep: "重测休眠中",
+    done: "重测完成",
+  };
+  const label = phaseLabels[rs.phase] || rs.phase;
+  let detail = "";
+  if (rs.sleep_until) {
+    const d = new Date(rs.sleep_until);
+    detail = `预计 ${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  } else if (rs.remaining > 0) {
+    detail = `${rs.remaining} 个目标待处理`;
+  }
+  return { label, detail };
+});
 const modelName = computed(() =>
   task.value?.model_config_data?.model || task.value?.llm_usage?.model || "未配置模型"
 );
@@ -1168,6 +1194,10 @@ function fmtTime(iso) {
           <span>{{ missionScopeText }}</span>
           <span>并发 {{ task.concurrency }}</span>
           <span>{{ runState.hint }}</span>
+        </div>
+        <div v-if="retestBadge" class="retest-badge">
+          <span class="retest-badge-label">{{ retestBadge.label }}</span>
+          <span v-if="retestBadge.detail" class="retest-badge-detail">{{ retestBadge.detail }}</span>
         </div>
         <div class="mission-runtime">
           <span class="runtime-chip">
