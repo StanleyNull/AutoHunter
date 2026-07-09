@@ -13,3 +13,5 @@ data/
 !app/data_static/edu_ip.db
 .DS_Store
 web/dist/
+AGENTS.md
+frontend/node_modules/

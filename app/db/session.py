@@ -68,6 +68,9 @@ _MIGRATIONS = [
     ("targets", "ip_ban_confirmed", "BOOLEAN DEFAULT 0"),
     ("targets", "auth_assessment", "JSON"),
     ("targets", "user_credentials", "JSON"),
+    ("targets", "assistant_messages", "JSON DEFAULT '[]'"),
+    ("tasks", "engine", "VARCHAR(20) DEFAULT ''"),
+    ("system_settings", "engines", "JSON DEFAULT '{}'"),
     ("system_settings", "proxy", "JSON DEFAULT '{}'"),
 ]
 

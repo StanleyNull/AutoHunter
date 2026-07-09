@@ -105,6 +105,8 @@ class Target(Base):
     auth_assessment: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 用户提交的凭证（账号密码或 Cookie/Token），由前端凭证表单提交
     user_credentials: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 注册助手对话历史：[{role:'user'|'assistant', content:'...'}]，按 target 持久化
+    assistant_messages: Mapped[list] = mapped_column(JSON, default=list)
     assigned_worker: Mapped[str] = mapped_column(String(64), default="")
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

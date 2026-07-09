@@ -1,12 +1,24 @@
 """任务相关 API：创建 / 列表 / 详情 / 启停。"""
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import threading
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
 from app.api.dto import CreateTaskRequest, TaskResponse, TaskStats, UpdateTaskRequest
-from app.api.findings import _finding_dict
+from app.api.findings import (
+    _clip_json, _clip_text, _consume_future_exception,
+    _finding_dict, _run_report_assistant_loop, REPORT_ASSISTANT_TOOLS,
+    _sanitize_assistant_messages,
+)
 from app.agents import collector, site_collab
 from app.agents.prompts import normalize_src_type
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
@@ -14,7 +26,8 @@ from app.db.session import get_session
 from app.llm.usage import usage_snapshot
 from app.orchestrator import manager
 from app.security import resolve_role, token_from_headers
-from app.settings_service import resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version
+from app.settings_service import llm_client_for_task, resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version
+from app.tools.executor import ToolExecutor
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -24,7 +37,7 @@ _STREAM_NOISE_KINDS = frozenset({"refill", "cluster_cooldown_skip", "skip", "pin
 _STREAM_IMPORTANT_KINDS = frozenset({
     "collector_phase",
     "target_done", "target_requeued", "timeout", "auto_deepen", "salvage",
-    "manual_redig", "task_reset", "target_needs_auth", "manual_skip",
+    "manual_redig", "task_reset", "task_reset_failed", "target_needs_auth", "manual_skip",
     "coverage_reported", "site_followups_spawned",
     "review_done", "review_deferred", "review_cancelled",
     "reclaim", "recover", "workers_cancelled", "quota_stop",
@@ -665,6 +678,7 @@ async def target_detail(task_id: str, target_id: str, request: Request,
             "ip_ban_confirmed": tgt.ip_ban_confirmed,
             "auth_assessment": "" if observer else (tgt.auth_assessment or None),
             "user_credentials": None if observer else (tgt.user_credentials or None),
+            "assistant_messages": [] if observer else _sanitize_assistant_messages(tgt.assistant_messages),
             "existing_findings": finding_count or 0,
             "created_at": to_cst_iso(tgt.created_at),
         },
@@ -942,6 +956,73 @@ async def reset_task_progress(task_id: str, request: Request,
     }
 
 
+# ===== 重置失败目标（探活失败 / 系统自动收敛）=====
+_FAILED_DEAD_PATTERNS = (
+    "探活失败", "死链", "连接超时", "系统自动收敛", "连续",
+)
+
+
+@router.post("/{task_id}/reset-failed")
+async def reset_failed_targets(task_id: str, request: Request,
+                               session: AsyncSession = Depends(get_session)):
+    """重置失败目标：仅重置 dead 状态中因探活失败或系统自动收敛的目标。
+
+    匹配 dead_reason 包含以下关键词的目标：
+    - 探活失败 / 死链 / 连接超时（派发前探活不通）
+    - 系统自动收敛 / 连续...（Worker 连续网络超时/工具失败后自动收敛）
+
+    与全量重置不同，此接口允许任务运行中调用（只触碰 dead 目标，不影响活跃 worker）。
+    保留 findings 作为 dedup 屏障。
+    """
+    if _is_observer(request):
+        raise HTTPException(403, "观察者模式无写入权限")
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    # 查询所有 dead 目标，在 Python 侧做关键词匹配（SQLite LIKE 不便做多 OR 模式）
+    dead_targets = (await session.execute(
+        select(Target).where(
+            Target.task_id == task_id,
+            Target.status == "dead",
+        )
+    )).scalars().all()
+
+    reset_count = 0
+    for tgt in dead_targets:
+        reason = (tgt.dead_reason or "")
+        if not any(p in reason for p in _FAILED_DEAD_PATTERNS):
+            continue
+        tgt.status = "queued"
+        tgt.verdict = ""
+        tgt.assigned_worker = ""
+        tgt.heartbeat_at = None
+        tgt.dead_reason = ""
+        tgt.last_error = ""
+        tgt.retry_count = 0
+        tgt.ip_ban_confirmed = False
+        tgt.deepen_context = None
+        tgt.priority_score = (tgt.priority_score or 0) + 50.0
+        tgt.priority_reason = "[失败重置] 探活失败/系统收敛目标，重新入队探活"
+        reset_count += 1
+
+    if reset_count:
+        session.add(TaskEvent(
+            task_id=task_id, agent="orchestrator", kind="task_reset_failed",
+            level="info",
+            message=f"重置 {reset_count} 个失败目标入队（探活失败/系统自动收敛）",
+            payload={"reset_targets": reset_count},
+        ))
+        await session.commit()
+
+    return {
+        "ok": True,
+        "reset_targets": reset_count,
+        "message": f"已重置 {reset_count} 个失败目标入队" if reset_count
+                   else "没有匹配的失败目标",
+    }
+
+
 @router.post("/batch/pause")
 async def batch_pause_tasks(session: AsyncSession = Depends(get_session)):
     """一键暂停所有运行中/空闲的任务。"""
@@ -1020,3 +1101,216 @@ async def stop_task(task_id: str, session: AsyncSession = Depends(get_session)):
     await manager.stop(task_id)
     await session.refresh(task)
     return _task_to_dto(task)
+
+
+# ===== Target 注册助手 =====
+
+_TARGET_ASSISTANT_WELCOME = (
+    "我可以回答这个目标的注册条件、阻断原因、注册流程等问题。"
+    "你也可以让我再访问注册页或发请求做补充验证。"
+)
+_TARGET_ASSISTANT_WALL_TIMEOUT = float(os.environ.get("TARGET_ASSISTANT_WALL_TIMEOUT", "300"))
+_TARGET_ASSISTANT_HISTORY_TURNS = int(os.environ.get("TARGET_ASSISTANT_HISTORY_TURNS", "6"))
+_TARGET_ASSISTANT_HISTORY_CHARS = int(os.environ.get("TARGET_ASSISTANT_HISTORY_CHARS", "1000"))
+_TARGET_ASSISTANT_STATIC_PREFIX = (
+    "下一条消息是当前“待注册”目标的裁剪上下文。包含 Worker 的注册可行性评估、尝试证据和目标事件历史；"
+    "先基于上下文回答，只有用户明确要求复测时才调用工具。"
+)
+_TARGET_ASSISTANT_SYSTEM_PROMPT = (
+    "你是 AutoHunter 注册助手，只服务当前“待注册”目标。基于 Worker 的注册可行性评估上下文，"
+    "回答注册条件、阻断原因、注册流程、需要提供什么凭证等问题。"
+    "上下文已包含 Worker 实际尝试注册/登录的 HTTP 证据和评估结论，先基于上下文回答，别轻易说信息不足。"
+    "仅当用户明确要求再发请求/curl/实测/看注册页面时，才用 http_request/run_shell 做少量定向验证；"
+    "禁止扫描、批量攻击、改密、改数据、破坏现场。工具后必须用中文说明状态码、关键响应、结论影响；"
+    "不能沉默或只说已完成。结论先行，简洁专业。"
+)
+
+
+class TargetAssistantRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+
+
+def _target_assistant_context(tgt: Target, events: list) -> str:
+    assessment = tgt.auth_assessment or {}
+    return f"""# 当前“待注册”目标完整上下文（你只围绕这一个目标工作）
+- 目标 URL：{tgt.url}
+- Host：{tgt.host}
+- 标题：{tgt.title or '（无）'}
+- 归属单位：{tgt.school or tgt.org or '（无）'}
+
+## Worker 注册可行性评估
+- 注册状态：{assessment.get('reg_status', '-')}
+- 阻断原因：{assessment.get('block_reason', '-')}
+- 注册地址：{assessment.get('registration_url', '-')}
+- 需要提供：{assessment.get('what_user_needs_to_provide', '-')}
+- 下一步建议：{assessment.get('next_steps', '-')}
+
+## Worker 尝试证据
+{_clip_text(assessment.get('evidence_request') or '（无）', 2000)}
+
+## 目标事件历史
+{_clip_json(events, 2000)}
+"""
+
+
+def _build_target_assistant_messages(tgt: Target, events: list, req: TargetAssistantRequest) -> list[dict]:
+    messages: list[dict] = [
+        {"role": "system", "content": _TARGET_ASSISTANT_SYSTEM_PROMPT},
+        {"role": "user", "content": _TARGET_ASSISTANT_STATIC_PREFIX},
+        {"role": "user", "content": _target_assistant_context(tgt, events)},
+    ]
+    for h in (req.history or [])[-_TARGET_ASSISTANT_HISTORY_TURNS:]:
+        role = h.get("role")
+        content = _clip_text(h.get("content") or "", _TARGET_ASSISTANT_HISTORY_CHARS)
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": req.message})
+    return messages
+
+
+def _run_target_assistant(
+    tgt: Target,
+    events: list,
+    task: Task,
+    req: TargetAssistantRequest,
+    cancel_event: threading.Event,
+    emit=None,
+) -> dict:
+    """运行注册助手；复用报告助手的 function-calling 循环。"""
+    llm = llm_client_for_task(task)
+    executor = ToolExecutor(f"target_assistant_{tgt.host or tgt.id}", cancel_event=cancel_event)
+    messages = _build_target_assistant_messages(tgt, events, req)
+    tool_logs: list[dict] = []
+
+    def _emit(ev: dict) -> None:
+        if emit:
+            try:
+                emit(ev)
+            except Exception:
+                pass
+
+    try:
+        return _run_report_assistant_loop(llm, executor, messages, tool_logs, cancel_event, _emit)
+    finally:
+        executor.kill_processes()
+
+
+def _tss(event: dict) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+@router.post("/{task_id}/targets/{target_id}/assistant/stream")
+async def target_assistant_stream(task_id: str, target_id: str, req: TargetAssistantRequest,
+                                  session: AsyncSession = Depends(get_session)):
+    """流式版注册助手：用 SSE 实时推送分析/工具调用/最终答复。"""
+    msg = (req.message or "").strip()
+    if not msg:
+        raise HTTPException(400, "请输入问题或操作指令")
+    tgt = await session.get(Target, target_id)
+    if not tgt or tgt.task_id != task_id:
+        raise HTTPException(404, "目标不存在")
+    if tgt.status != "pending_input":
+        raise HTTPException(409, "目标当前状态非待注册，无法使用注册助手")
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    # 获取目标事件历史作为上下文
+    ev_rows = (await session.execute(
+        select(TaskEvent).where(TaskEvent.task_id == task_id)
+        .order_by(TaskEvent.id.desc()).limit(50)
+    )).scalars().all()
+    events = []
+    for e in ev_rows:
+        payload = e.payload or {}
+        if payload.get("target_id") == target_id:
+            events.append({
+                "agent": e.agent, "kind": e.kind, "level": e.level,
+                "message": e.message, "ts": to_cst_iso(e.ts),
+            })
+            if len(events) >= 15:
+                break
+
+    persisted = _sanitize_assistant_messages(tgt.assistant_messages)
+    llm_req = TargetAssistantRequest(message=msg, history=persisted[-_TARGET_ASSISTANT_HISTORY_TURNS:])
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    cancel_event = threading.Event()
+
+    def _emit(ev: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, ev)
+
+    async def _gen():
+        assistant_sem = agent_semaphore("assistant")
+        await assistant_sem.acquire()
+        try:
+            future = loop.run_in_executor(
+                AGENT_EXECUTOR,
+                lambda: _run_target_assistant(tgt, events, task, llm_req, cancel_event, emit=_emit),
+            )
+        except BaseException:
+            assistant_sem.release()
+            raise
+
+        def _release_assistant(fut) -> None:
+            assistant_sem.release()
+            _consume_future_exception(fut)
+            loop.call_soon_threadsafe(queue.put_nowait, {"type": "__done__"})
+
+        future.add_done_callback(_release_assistant)
+
+        final_answer = ""
+        tool_count = 0
+        timed_out = False
+        try:
+            yield _tss({"type": "start"})
+            while True:
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=_TARGET_ASSISTANT_WALL_TIMEOUT)
+                except asyncio.TimeoutError:
+                    cancel_event.set()
+                    timed_out = True
+                    break
+                if ev.get("type") == "__done__":
+                    break
+                if ev.get("type") == "final":
+                    final_answer = ev.get("text") or final_answer
+                if ev.get("type") == "tool_call":
+                    tool_count += 1
+                yield _tss(ev)
+        finally:
+            try:
+                result = await asyncio.wait_for(asyncio.shield(future), timeout=5)
+                final_answer = result.get("answer") or final_answer
+                tool_count = len(result.get("tool_logs") or []) or tool_count
+            except Exception:
+                pass
+            if timed_out and not final_answer:
+                final_answer = f"注册助手执行超时（>{int(_TARGET_ASSISTANT_WALL_TIMEOUT)}s），已触发底层工具清理。"
+            if not final_answer:
+                final_answer = "已完成。"
+            suffix = f"\n\n（已执行 {tool_count} 个辅助动作）" if tool_count else ""
+            stored = final_answer + suffix
+            try:
+                tgt.assistant_messages = _sanitize_assistant_messages(
+                    persisted + [
+                        {"role": "user", "content": msg},
+                        {"role": "assistant", "content": stored},
+                    ],
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+            yield _tss({"type": "done", "answer": stored, "tool_count": tool_count})
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

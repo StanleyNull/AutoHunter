@@ -2926,3 +2926,80 @@ main {
   font-size: 13px; cursor: pointer; background: var(--surface); color: var(--ink); }
 .tp-cred-actions button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .tp-cred-actions button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ---------- 注册助手（Target Assistant） ---------- */
+.tp-ta-section { margin-top: 12px; }
+.tp-ta-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.tp-ta-head span { display: block; font-weight: 700; color: var(--ink); font-size: 13px; }
+.tp-ta-head small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.tp-ta-actions { display: flex; gap: 6px; flex: none; }
+.tp-ta-actions button {
+  padding: 4px 10px; border: 1px solid var(--border-soft); border-radius: 7px;
+  font-size: 12px; cursor: pointer; background: var(--surface); color: var(--ink-2);
+}
+.tp-ta-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.tp-ta-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+.tp-ta-log {
+  display: grid; gap: 8px; max-height: 300px; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border-soft); border-radius: 10px; padding: 10px;
+}
+.tp-ta-msg { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; align-items: start; }
+.tp-ta-msg > span {
+  color: var(--faint); font-family: "IBM Plex Mono", monospace; font-size: 11px; padding-top: 7px;
+}
+.tp-ta-body { min-width: 0; display: grid; gap: 6px; }
+.tp-ta-steps {
+  margin: 0; padding: 7px 9px; list-style: none; display: grid; gap: 4px;
+  background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 9px;
+}
+.tp-ta-step {
+  display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 6px; align-items: start;
+  font-size: 11.5px; color: var(--muted);
+}
+.tp-ta-step-ico {
+  font-family: "IBM Plex Mono", monospace; color: var(--faint); text-align: center; line-height: 1.5;
+}
+.tp-ta-step.tool_call .tp-ta-step-ico { color: var(--accent); }
+.tp-ta-step-txt { min-width: 0; line-height: 1.5; word-break: break-all; }
+.tp-ta-step.tool_call .tp-ta-step-txt { color: var(--ink-2); font-family: "IBM Plex Mono", monospace; font-size: 11px; }
+.tp-ta-step-res {
+  display: block; margin-top: 2px; color: var(--accent-ink); font-style: normal;
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px;
+}
+.tp-ta-partial { opacity: .8; }
+.tp-ta-pending p { color: var(--faint); margin: 0; }
+.tp-ta-cursor {
+  color: var(--accent); font-weight: 700; animation: tp-ta-blink 1s steps(2) infinite; padding-top: 0 !important;
+}
+@keyframes tp-ta-blink { 50% { opacity: 0; } }
+.tp-ta-md {
+  min-width: 0; color: var(--ink-2);
+  background: var(--surface); border: 1px solid var(--border-soft); border-radius: 10px;
+  padding: 8px 10px; line-height: 1.55; font-size: 12.5px;
+}
+.tp-ta-msg.user .tp-ta-md { background: var(--accent-bg); color: var(--ink); border-color: color-mix(in oklch, var(--accent) 28%, transparent); }
+.tp-ta-md > :first-child { margin-top: 0; }
+.tp-ta-md > :last-child { margin-bottom: 0; }
+.tp-ta-md p { margin: 0 0 6px; white-space: pre-wrap; }
+.tp-ta-md ul, .tp-ta-md ol { margin: 4px 0 6px; padding-left: 18px; }
+.tp-ta-md li { margin: 2px 0; }
+.tp-ta-md code {
+  background: var(--surface-2); color: var(--accent-ink); border-radius: 4px;
+  padding: 1px 4px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px;
+}
+.tp-ta-md pre {
+  margin: 6px 0; max-height: 180px; overflow: auto; background: var(--bg);
+  border: 1px solid var(--border-soft); border-radius: 8px; padding: 8px;
+}
+.tp-ta-md pre code { background: none; padding: 0; color: var(--ink-2); }
+.tp-ta-md blockquote {
+  margin: 6px 0; padding: 6px 8px; color: var(--muted);
+  background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 7px;
+}
+.tp-ta-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 8px; align-items: end; }
+.tp-ta-input textarea { resize: vertical; font-family: "IBM Plex Sans", sans-serif; min-height: 52px; }
+.tp-ta-input button.primary {
+  padding: 8px 16px; border: 1px solid var(--accent); border-radius: 8px;
+  font-size: 13px; cursor: pointer; background: var(--accent); color: var(--accent-ink);
+}
+.tp-ta-input button.primary:disabled { opacity: 0.55; cursor: not-allowed; }

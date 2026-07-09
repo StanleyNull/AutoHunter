@@ -1,5 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
@@ -67,14 +69,21 @@ const targetDetailData = ref(null);
 const targetDetailLoading = ref(false);
 const redigWorking = ref(false);
 const resetWorking = ref(false);
+const resetFailedWorking = ref(false);
 const collectWorking = ref(false);
 const showResetConfirm = ref(false);
+const showResetFailedConfirm = ref(false);
 // 凭证提交表单状态
 const credType = ref("password");
 const credUsername = ref("");
 const credPassword = ref("");
 const credCookie = ref("");
 const credWorking = ref(false);
+// 注册助手状态
+const targetAssistantText = ref("");
+const targetAssistantBusy = ref(false);
+const targetAssistantMessages = ref([]);
+const TARGET_ASSISTANT_WELCOME = "我可以回答这个目标的注册条件、阻断原因、注册流程等问题。你也可以让我再访问注册页或发请求做补充验证。";
 
 function toast(m) { toastMsg.value = m; setTimeout(() => (toastMsg.value = ""), 2200); }
 
@@ -532,8 +541,16 @@ async function loadTargetList() {
 async function openTargetDetail(tid) {
   targetDetailLoading.value = true;
   targetDetailData.value = null;
+  // 重置注册助手状态
+  targetAssistantText.value = "";
+  targetAssistantBusy.value = false;
   try {
     targetDetailData.value = await api.targetDetail(props.id, tid);
+    // 从后端恢复助手历史
+    const saved = targetDetailData.value?.target?.assistant_messages;
+    targetAssistantMessages.value = (saved?.length)
+      ? saved
+      : [{ role: "assistant", content: TARGET_ASSISTANT_WELCOME }];
   } catch (e) {
     toast("加载目标详情失败");
   } finally {
@@ -575,6 +592,22 @@ async function resetProgress() {
     toast(e.message || "重置失败");
   } finally {
     resetWorking.value = false;
+  }
+}
+
+async function resetFailedTargets() {
+  if (resetFailedWorking.value) return;
+  resetFailedWorking.value = true;
+  try {
+    const res = await api.resetFailedTargets(props.id);
+    toast(res.message || "操作完成");
+    showResetFailedConfirm.value = false;
+    await Promise.all([loadTask(), loadBoard()]);
+    if (targetPanelOpen.value) await loadTargetList();
+  } catch (e) {
+    toast(e.message || "重置失败");
+  } finally {
+    resetFailedWorking.value = false;
   }
 }
 
@@ -622,6 +655,76 @@ async function skipTarget(tid) {
     toast(e.message || "跳过失败");
   } finally {
     credWorking.value = false;
+  }
+}
+
+function renderTargetAssistantMd(text) {
+  return DOMPurify.sanitize(marked.parse(text || ""));
+}
+
+const TA_TOOL_LABEL = { http_request: "HTTP 请求", run_shell: "执行命令" };
+
+function taStepLabel(ev) {
+  if (ev.type === "thinking") return ev.text || "分析中…";
+  if (ev.type === "tool_call") return `${TA_TOOL_LABEL[ev.tool] || ev.tool}：${ev.summary || ""}`;
+  if (ev.type === "tool_result") return `↳ ${ev.summary || "完成"}`;
+  return ev.text || "";
+}
+
+async function askTargetAssistant(preset = "") {
+  const text = (preset || targetAssistantText.value).trim();
+  if (!text || targetAssistantBusy.value || !targetDetailData.value?.target) return;
+  const tid = targetDetailData.value.target.id;
+  targetAssistantText.value = "";
+  targetAssistantMessages.value.push({ role: "user", content: text });
+  targetAssistantBusy.value = true;
+
+  const liveMsg = { role: "assistant", content: "", steps: [], streaming: true };
+  targetAssistantMessages.value.push(liveMsg);
+  const idx = targetAssistantMessages.value.length - 1;
+
+  const update = (patch) => {
+    targetAssistantMessages.value[idx] = { ...targetAssistantMessages.value[idx], ...patch };
+  };
+  const pushStep = (ev) => {
+    const cur = targetAssistantMessages.value[idx];
+    const steps = [...(cur.steps || [])];
+    if (ev.type === "tool_result" && steps.length && steps[steps.length - 1].type === "tool_call") {
+      steps[steps.length - 1] = { ...steps[steps.length - 1], result: taStepLabel(ev) };
+    } else {
+      steps.push({ type: ev.type, label: taStepLabel(ev), tool: ev.tool });
+    }
+    update({ steps });
+  };
+
+  try {
+    await api.targetAssistantStream(props.id, tid, text, (ev) => {
+      switch (ev.type) {
+        case "thinking":
+        case "tool_call":
+        case "tool_result":
+          pushStep(ev);
+          break;
+        case "assistant_partial":
+          update({ partial: ev.text });
+          break;
+        case "final":
+          update({ content: ev.text || "", partial: "" });
+          break;
+        case "done":
+          update({ content: ev.answer || targetAssistantMessages.value[idx].content || "已完成。", streaming: false, partial: "" });
+          break;
+        default:
+          break;
+      }
+    });
+    if (targetAssistantMessages.value[idx].streaming) {
+      update({ streaming: false });
+    }
+  } catch (e) {
+    update({ content: `注册助手异常：${String(e.message || e)}`, streaming: false });
+  } finally {
+    targetAssistantBusy.value = false;
   }
 }
 
@@ -1088,6 +1191,7 @@ function fmtTime(iso) {
           <button @click="ctl('stop')">停止</button>
           <button @click="collectTargets" :disabled="collectWorking">{{ collectWorking ? "搜索中..." : "搜索新Target" }}</button>
           <button class="danger" @click="showResetConfirm = true" :disabled="task.status === 'running'">重置进度</button>
+          <button @click="showResetFailedConfirm = true">重置失败目标</button>
         </div>
         <div v-else class="mission-actions readonly-hint">{{ authRoleRef === 'readonly' ? "只读模式" : "未认证" }}</div>
       </div>
@@ -1452,6 +1556,23 @@ function fmtTime(iso) {
       </div>
     </div>
 
+    <!-- 重置失败目标确认弹窗 -->
+    <div v-if="showResetFailedConfirm" class="modal-overlay" @click.self="showResetFailedConfirm = false">
+      <div class="modal-card reset-confirm">
+        <h3>重置失败目标</h3>
+        <p>仅重置因以下原因变为「硬骨头」的目标，重新入队探活：<br/>
+        • 派发前探活失败（死链/连接超时/无响应）<br/>
+        • Worker 连续网络超时/工具失败后系统自动收敛</p>
+        <p>任务运行中也可操作，不影响正在挖掘的目标。已发现的漏洞将作为去重屏障保留。</p>
+        <div class="modal-actions">
+          <button @click="showResetFailedConfirm = false">取消</button>
+          <button class="danger" @click="resetFailedTargets" :disabled="resetFailedWorking">
+            {{ resetFailedWorking ? "重置中..." : "确认重置" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Target 面板 -->
     <div v-if="targetPanelOpen" class="modal-overlay target-panel-overlay" @click.self="closeTargetPanel">
       <div class="modal-card target-panel">
@@ -1567,6 +1688,46 @@ function fmtTime(iso) {
                 <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.next_steps">
                   <span class="tp-label">下一步建议</span>
                   <span>{{ targetDetailData.target.auth_assessment.next_steps }}</span>
+                </div>
+              </div>
+
+              <!-- AI 问答：进一步询问注册条件 -->
+              <div class="tp-ta-section">
+                <div class="tp-ta-head">
+                  <div>
+                    <span>注册助手</span>
+                    <small>{{ readonly ? "未认证，请先换令牌" : "问注册条件、问阻断原因、问流程；也可让它访问注册页验证" }}</small>
+                  </div>
+                  <div v-if="!readonly" class="tp-ta-actions">
+                    <button @click="askTargetAssistant('这个目标需要什么条件才能注册？帮我总结一下。')" :disabled="targetAssistantBusy">注册条件</button>
+                    <button @click="askTargetAssistant('帮我看一下注册页面是否可以正常访问，注册流程是什么。')" :disabled="targetAssistantBusy">查看注册页</button>
+                  </div>
+                </div>
+                <div class="tp-ta-log">
+                  <div v-for="(m, i) in targetAssistantMessages" :key="i" class="tp-ta-msg" :class="m.role">
+                    <span>{{ m.role === "user" ? "你" : "助手" }}</span>
+                    <div class="tp-ta-body">
+                      <ul v-if="m.steps && m.steps.length" class="tp-ta-steps">
+                        <li v-for="(s, si) in m.steps" :key="si" class="tp-ta-step" :class="s.type">
+                          <span class="tp-ta-step-ico">{{ s.type === "tool_call" ? "⚙" : s.type === "thinking" ? "…" : "•" }}</span>
+                          <span class="tp-ta-step-txt">
+                            {{ s.label }}
+                            <em v-if="s.result" class="tp-ta-step-res">{{ s.result }}</em>
+                          </span>
+                        </li>
+                      </ul>
+                      <div v-if="m.streaming && m.partial && !m.content" class="tp-ta-md tp-ta-partial" v-html="renderTargetAssistantMd(m.partial)"></div>
+                      <div v-if="m.content" class="tp-ta-md" v-html="renderTargetAssistantMd(m.content)"></div>
+                      <div v-if="m.streaming && !m.content && !m.partial && !(m.steps && m.steps.length)" class="tp-ta-md tp-ta-pending"><p>正在分析…</p></div>
+                      <span v-if="m.streaming" class="tp-ta-cursor">▍</span>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="!readonly" class="tp-ta-input">
+                  <textarea v-model="targetAssistantText" rows="2"
+                    placeholder="例：这个网站注册需要什么条件？有没有邀请码？"
+                    @keydown.enter.exact.prevent="askTargetAssistant()"></textarea>
+                  <button class="primary" @click="askTargetAssistant()" :disabled="targetAssistantBusy || !targetAssistantText.trim()">发送</button>
                 </div>
               </div>
 
