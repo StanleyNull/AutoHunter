@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -620,6 +621,12 @@ class TaskRunner:
     # 有代理模式递增休眠时长（小时）
     _RETEST_SLEEP_HOURS = [4, 8, 24]
 
+    @staticmethod
+    async def _retest_save(session: AsyncSession, task: Task) -> None:
+        """标记 retest_state 为脏并提交。SQLAlchemy 不自动检测 JSON 字段的原地修改。"""
+        flag_modified(task, "retest_state")
+        await session.commit()
+
     async def _retest_tick(self, session: AsyncSession, task: Task) -> int:
         """重测生命周期入口。返回 >0 表示重测进行中（不进 idle），0 表示无需重测。"""
         state = task.retest_state
@@ -633,7 +640,7 @@ class TaskRunner:
         # 已完成 → 清理
         if phase == "done":
             task.retest_state = None
-            await session.commit()
+            await self._retest_save(session, task)
             return 0
 
         # 休眠中 → 检查唤醒 + 30 分钟日志
@@ -691,7 +698,7 @@ class TaskRunner:
             f"开始重测 {len(eligible)} 个失败目标（{'有' if proxy_available else '无'}代理模式）",
             level="info", phase=phase, target_count=len(eligible),
         )
-        await session.commit()
+        await self._retest_save(session, task)
         return 1
 
     async def _retest_step(self, session: AsyncSession, task: Task, state: dict) -> int:
@@ -715,7 +722,7 @@ class TaskRunner:
                 if not tgt or tgt.status != "ip_banned":
                     state["remaining_ids"].remove(current_id)
                     state["current_id"] = None
-                    await session.commit()
+                    await self._retest_save(session, task)
                     return 1
                 tgt.status = "queued"
                 tgt.verdict = ""
@@ -727,15 +734,15 @@ class TaskRunner:
                 }
                 tgt.last_error = "IP 封禁复测：切换代理模式"
                 tgt.dead_reason = ""
-                await session.commit()
+                await self._retest_save(session, task)
                 self._spawn_worker(task, tgt)
                 state["current_step"] = "testing"
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             # Phase 1 / noproxy_round: 需要探活
             state["current_step"] = "probing"
-            await session.commit()
+            await self._retest_save(session, task)
             return 1
 
         # --- probing: 探活 ---
@@ -746,7 +753,7 @@ class TaskRunner:
                     state["remaining_ids"].remove(current_id)
                 state["current_id"] = None
                 state["current_step"] = "idle"
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             loop = asyncio.get_running_loop()
@@ -772,10 +779,10 @@ class TaskRunner:
                 tgt.deepen_context = None
                 tgt.priority_score = (tgt.priority_score or 0) + 50.0
                 tgt.priority_reason = "[重测] 探活成功，重新入队测试"
-                await session.commit()
+                await self._retest_save(session, task)
                 self._spawn_worker(task, tgt)
                 state["current_step"] = "testing"
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             # 本机不可达
@@ -785,7 +792,7 @@ class TaskRunner:
                 state["remaining_ids"].remove(current_id)
                 state["current_id"] = None
                 state["current_step"] = "idle"
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             # 有代理模式：依次尝试探活服务器 → 测试服务器
@@ -834,7 +841,7 @@ class TaskRunner:
                 state["remaining_ids"].remove(current_id)
             state["current_id"] = None
             state["current_step"] = "idle"
-            await session.commit()
+            await self._retest_save(session, task)
             return 1
 
         # --- testing: 等待 worker 完成 ---
@@ -847,7 +854,7 @@ class TaskRunner:
             # 从 remaining 移除（已处理完）
             if current_id and current_id in state.get("remaining_ids", []):
                 state["remaining_ids"].remove(current_id)
-            await session.commit()
+            await self._retest_save(session, task)
             return 1
 
         return 1
@@ -866,7 +873,7 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "retest_done",
                                 "无代理重测完成，所有失败目标已处理",
                                 level="info")
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             # 有不可达目标 → 检查轮次
@@ -884,7 +891,7 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "retest_done",
                                 f"无代理重测3轮结束，{len(unreachable)} 个目标标记 dead",
                                 level="warn", dead_count=len(unreachable))
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             # 进入休眠
@@ -896,7 +903,7 @@ class TaskRunner:
                             f"第{sleep_round + 1}轮重测完成，{len(unreachable)} 个不可达目标，"
                             f"休眠4h，预计第{sleep_round + 2}轮将在 {self._retest_fmt(wake_at)} 开始",
                             level="info", sleep_until=state["sleep_until"])
-            await session.commit()
+            await self._retest_save(session, task)
             return 1
 
         # 有代理模式
@@ -917,14 +924,14 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "retest_phase2",
                                 f"Phase 1 完成，{len(banned)} 个 IP 封禁目标进入 Phase 2 服务器测试",
                                 level="info")
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
             else:
                 state["phase"] = "done"
                 await self._log(session, "orchestrator", "retest_done",
                                 "有代理重测完成，无 IP 封禁目标",
                                 level="info")
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
         if phase == "phase2":
@@ -941,7 +948,7 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "retest_done",
                                 "有代理重测完成，所有 IP 封禁目标已测完",
                                 level="info")
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             # 有残留 ip_banned → 用探活服务器交叉验证
@@ -976,7 +983,7 @@ class TaskRunner:
                     await self._log(session, "orchestrator", "retest_done",
                                     f"Phase 2 后探活服务器也不可达，{len(still_banned)} 个目标标记 dead",
                                     level="warn", dead_count=len(still_banned))
-                    await session.commit()
+                    await self._retest_save(session, task)
                     return 1
 
             # 探活服务器可达 → 进入 Phase 3 休眠
@@ -992,7 +999,7 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "retest_done",
                                 f"休眠轮次耗尽，{len(still_banned)} 个目标标记 dead",
                                 level="warn", dead_count=len(still_banned))
-                await session.commit()
+                await self._retest_save(session, task)
                 return 1
 
             sleep_hours = self._RETEST_SLEEP_HOURS[sleep_round]
@@ -1005,11 +1012,11 @@ class TaskRunner:
                             f"Phase 2 后 {len(still_banned)} 个目标仍 IP 封禁，"
                             f"进入休眠 {sleep_hours}h，预计 {self._retest_fmt(wake_at)} 重新探活",
                             level="info", sleep_until=state["sleep_until"])
-            await session.commit()
+            await self._retest_save(session, task)
             return 1
 
         state["phase"] = "done"
-        await session.commit()
+        await self._retest_save(session, task)
         return 1
 
     async def _retest_sleep(self, session: AsyncSession, task: Task, state: dict) -> int:
@@ -1017,7 +1024,7 @@ class TaskRunner:
         sleep_until_str = state.get("sleep_until")
         if not sleep_until_str:
             state["phase"] = "done"
-            await session.commit()
+            await self._retest_save(session, task)
             return 1
 
         sleep_until = datetime.fromisoformat(sleep_until_str)
@@ -1041,7 +1048,7 @@ class TaskRunner:
                     msg = (f"IP封禁队列休眠中，预计启动时间 {self._retest_fmt(sleep_until)}")
                 await self._log(session, "orchestrator", "retest_sleep_log", msg, level="info")
                 state["last_log_at"] = now.isoformat()
-                await session.commit()
+                await self._retest_save(session, task)
             return 1
 
         # 休眠时间到 → 唤醒
@@ -1061,7 +1068,7 @@ class TaskRunner:
             await self._log(session, "orchestrator", "retest_wake",
                             f"休眠结束，开始第{sleep_round + 2}轮重测，{len(state['remaining_ids'])} 个目标",
                             level="info")
-            await session.commit()
+            await self._retest_save(session, task)
             return 1
 
         # 有代理模式唤醒 → 从 Phase 1 重新开始
@@ -1074,7 +1081,7 @@ class TaskRunner:
         await self._log(session, "orchestrator", "retest_wake",
                         f"休眠结束，重新开始 Phase 1 探活，{len(remaining)} 个目标",
                         level="info")
-        await session.commit()
+        await self._retest_save(session, task)
         return 1
 
     @staticmethod

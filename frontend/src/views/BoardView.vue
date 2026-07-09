@@ -982,8 +982,10 @@ const progressPct = computed(() =>
 );
 const collectorCfg = computed(() => task.value?.fofa_config || {});
 const collectorVisible = computed(() => {
-  // 过滤/入队完成后（phase=dispatch）自动隐藏，不再占位。
-  if (collectorCfg.value.collector_phase === "dispatch") return false;
+  // 搜集终态自动隐藏进度条，不再占位：
+  // FOFA 入队完成（dispatch）、证书透明度搜集完成（ct_done）/ 无根域名（ct_no_domains）。
+  const phase = collectorCfg.value.collector_phase;
+  if (phase === "dispatch" || phase === "ct_done" || phase === "ct_no_domains") return false;
   return !!(collectorCfg.value.collector_phase || collectorCfg.value.collector_phase_text);
 });
 const collectorText = computed(() =>
@@ -1004,6 +1006,12 @@ const collectorPct = computed(() => {
   if (phase === "target_filter") return 62;
   if (phase === "enrich") return total > 0 ? Math.max(72, Math.min(88, Math.round((done / total) * 100))) : 78;
   if (phase === "dispatch") return 100;
+  // 证书透明度搜集（手动"搜索新Target"）阶段进度
+  if (phase === "ct_start") return 8;
+  if (phase === "ct_query") return 28;
+  if (phase === "ct_prefilter") return 50;
+  if (phase === "ct_enqueue") return 80;
+  if (phase === "ct_done") return 100;
   return 25;
 });
 function phaseLabel(phase) {
@@ -1013,6 +1021,12 @@ function phaseLabel(phase) {
     target_filter: "正在跑过滤器阶段",
     enrich: "补充情报",
     dispatch: "入队完成",
+    ct_start: "CT 日志查询中",
+    ct_query: "CT 日志查询中",
+    ct_prefilter: "子域名预筛",
+    ct_enqueue: "评分入库",
+    ct_done: "搜集完成",
+    ct_no_domains: "无根域名",
   }[phase] || phase || "");
 }
 const runState = computed(() => {
