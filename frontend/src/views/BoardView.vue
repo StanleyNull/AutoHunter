@@ -1680,9 +1680,12 @@ function fmtTime(iso) {
                   <span class="tp-label">阻断原因</span>
                   <span>{{ targetDetailData.target.auth_assessment.block_reason }}</span>
                 </div>
-                <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.registration_url">
+                <div class="tp-auth-row">
                   <span class="tp-label">注册地址</span>
-                  <a :href="targetDetailData.target.auth_assessment.registration_url" target="_blank" class="tp-link">{{ targetDetailData.target.auth_assessment.registration_url }}</a>
+                  <a :href="targetDetailData.target.auth_assessment.registration_url || targetDetailData.target.url" target="_blank" class="tp-link">
+                    {{ targetDetailData.target.auth_assessment.registration_url || targetDetailData.target.url }}
+                    <small v-if="!targetDetailData.target.auth_assessment.registration_url" class="tp-link-hint">（目标主页，注册入口需手动寻找）</small>
+                  </a>
                 </div>
                 <div class="tp-auth-row" v-if="targetDetailData.target.auth_assessment.evidence_request">
                   <span class="tp-label">AI 尝试证据</span>
