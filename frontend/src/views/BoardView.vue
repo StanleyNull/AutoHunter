@@ -671,6 +671,13 @@ function taStepLabel(ev) {
   return ev.text || "";
 }
 
+/** 聊天输入框 Enter 发送：跳过 IME 组合期（拼音输入法确认候选词时不触发发送）。 */
+function onChatEnter(e, fn) {
+  if (e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  fn();
+}
+
 async function askTargetAssistant(preset = "") {
   const text = (preset || targetAssistantText.value).trim();
   if (!text || targetAssistantBusy.value || !targetDetailData.value?.target) return;
@@ -1726,7 +1733,7 @@ function fmtTime(iso) {
                 <div v-if="!readonly" class="tp-ta-input">
                   <textarea v-model="targetAssistantText" rows="2"
                     placeholder="例：这个网站注册需要什么条件？有没有邀请码？"
-                    @keydown.enter.exact.prevent="askTargetAssistant()"></textarea>
+                    @keydown.enter.exact="onChatEnter($event, askTargetAssistant)"></textarea>
                   <button class="primary" @click="askTargetAssistant()" :disabled="targetAssistantBusy || !targetAssistantText.trim()">发送</button>
                 </div>
               </div>
