@@ -17,6 +17,12 @@ const searchQuery = ref("");
 const sortBy = ref("created"); // created | pinyin
 const _pinyinCollator = new Intl.Collator("zh-Hans-CN", { sensitivity: "accent" });
 
+// 分页与筛选
+const page = ref(0);                 // 当前页，0-based
+const pageSize = ref(20);            // 每页数量
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const filterBy = ref("all");         // all | bubbled | pending_reg
+
 const filteredTasks = computed(() => {
   let list = tasks.value;
   const q = searchQuery.value.trim().toLowerCase();
@@ -26,6 +32,12 @@ const filteredTasks = computed(() => {
       (t.fofa_query || "").toLowerCase().includes(q)
     );
   }
+  // 筛选：有气泡（待复审红点 / AI未采纳绿点）/ 待注册目标
+  if (filterBy.value === "bubbled") {
+    list = list.filter((t) => (t.pending_user_review > 0) || (t.pending_archived > 0));
+  } else if (filterBy.value === "pending_reg") {
+    list = list.filter((t) => (t.pending_input ?? 0) > 0);
+  }
   const sorted = [...list];
   if (sortBy.value === "pinyin") {
     sorted.sort((a, b) => _pinyinCollator.compare(a.name || "", b.name || ""));
@@ -34,6 +46,16 @@ const filteredTasks = computed(() => {
   }
   return sorted;
 });
+
+const totalFiltered = computed(() => filteredTasks.value.length);
+const totalPages = computed(() => Math.max(1, Math.ceil(totalFiltered.value / pageSize.value)));
+const pagedTasks = computed(() => {
+  const start = page.value * pageSize.value;
+  return filteredTasks.value.slice(start, start + pageSize.value);
+});
+
+function prevPage() { if (page.value > 0) page.value--; }
+function nextPage() { if (page.value < totalPages.value - 1) page.value++; }
 
 const STATUS_LABEL = {
   running: "运行中",
@@ -170,6 +192,10 @@ onMounted(async () => {
 watch(authReadyRef, (ready) => {
   if (ready) load();
 });
+// 搜索/排序/筛选/每页数量变化时回到第一页
+watch([searchQuery, sortBy, filterBy, pageSize], () => { page.value = 0; });
+// 数据增删后当前页可能越界，收敛到末页
+watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
 </script>
 
 <template>
@@ -178,6 +204,11 @@ watch(authReadyRef, (ready) => {
     <header class="page-head">
       <div class="toolbar-row">
         <input v-model="searchQuery" class="task-search" placeholder="搜索任务名/FOFA语法…" />
+        <select v-model="filterBy" class="task-sort">
+          <option value="all">全部任务</option>
+          <option value="bubbled">有气泡（待复审/AI未采纳）</option>
+          <option value="pending_reg">待注册目标</option>
+        </select>
         <select v-model="sortBy" class="task-sort">
           <option value="created">按创建时间</option>
           <option value="pinyin">按拼音排序</option>
@@ -236,8 +267,12 @@ watch(authReadyRef, (ready) => {
       还没有任务
       <span class="hint">点顶栏「新建」创建第一个挖掘任务</span>
     </div>
+    <div v-else-if="!totalFiltered" class="empty">
+      没有匹配的任务
+      <span class="hint">调整搜索词或筛选条件</span>
+    </div>
     <div v-else class="task-list">
-      <div v-for="t in filteredTasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running' }"
+      <div v-for="t in pagedTasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running' }"
         @click="router.push(`/task/${t.id}`)">
         <div class="task-card-main">
           <div class="tc-title">
@@ -263,6 +298,16 @@ watch(authReadyRef, (ready) => {
           <span class="task-chevron" aria-hidden="true">›</span>
         </div>
       </div>
+    </div>
+    <div v-if="!initialLoading && totalFiltered > pageSize" class="hard-pager task-pager">
+      <button type="button" @click="prevPage" :disabled="page <= 0">上一页</button>
+      <span>第 {{ page + 1 }} / {{ totalPages }} 页 · {{ page * pageSize + 1 }}-{{ page * pageSize + pagedTasks.length }} / {{ totalFiltered }}</span>
+      <button type="button" @click="nextPage" :disabled="page >= totalPages - 1">下一页</button>
+      <label class="pager-size">每页
+        <select v-model="pageSize" class="task-sort">
+          <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }}</option>
+        </select>
+      </label>
     </div>
     <TaskEditModal :open="editOpen" :task="editingTask" @close="closeEdit" @saved="onSaved" />
 

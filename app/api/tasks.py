@@ -166,7 +166,7 @@ def _public_fofa_config(task: Task) -> dict:
 
 def _task_to_dto(t: Task, stats: TaskStats | None = None,
                  pending_user_review: int = 0, pending_archived: int = 0,
-                 observer: bool = False) -> TaskResponse:
+                 pending_input: int = 0, observer: bool = False) -> TaskResponse:
     model_config = _public_model_config(t)
     if observer:
         model_config = _observer_model_config()
@@ -182,7 +182,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         llm_usage={} if observer else usage_snapshot(t.id, model_config.get("model", "")),
         created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
         stats=stats, pending_user_review=pending_user_review,
-        pending_archived=pending_archived,
+        pending_archived=pending_archived, pending_input=pending_input,
     )
 
 
@@ -307,9 +307,19 @@ async def list_tasks(request: Request, session: AsyncSession = Depends(get_sessi
     )
     for tid, cnt in ar_rows.all():
         archived_map[tid] = cnt
+    # 待注册(pending_input)目标数：与 pending_map/archived_map 同构，一次聚合避免 N+1
+    pending_input_map: dict[str, int] = {}
+    pi_rows = await session.execute(
+        select(Target.task_id, func.count())
+        .where(Target.status == "pending_input")
+        .group_by(Target.task_id)
+    )
+    for tid, cnt in pi_rows.all():
+        pending_input_map[tid] = cnt
     observer = _is_observer(request)
     return [_task_to_dto(t, pending_user_review=pending_map.get(t.id, 0),
                         pending_archived=archived_map.get(t.id, 0),
+                        pending_input=pending_input_map.get(t.id, 0),
                         observer=observer) for t in tasks]
 
 

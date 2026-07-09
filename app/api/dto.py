@@ -118,6 +118,8 @@ class TaskResponse(BaseModel):
     pending_user_review: int = 0
     # AI 未采纳归档数（ignored/deepen 且用户未处理）——任务卡片绿点用，列表接口轻量填充
     pending_archived: int = 0
+    # 待注册(pending_input)目标数——任务列表"待注册"筛选用，列表接口轻量填充
+    pending_input: int = 0
 
 
 class LLMSettingsDTO(BaseModel):

@@ -804,6 +804,8 @@ main {
 }
 .hard-pager button:disabled { opacity: .45; cursor: not-allowed; }
 .hard-pager button:not(:disabled):hover { border-color: var(--faint); background: var(--surface-2); }
+.pager-size { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
+.pager-size .task-sort { padding: 4px 8px; }
 .hard-list { display: grid; gap: 9px; }
 .hard-row {
   width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
