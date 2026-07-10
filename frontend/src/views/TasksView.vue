@@ -288,6 +288,7 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
           <div class="task-card-meta">
             <span class="badge" :class="t.status">{{ STATUS_LABEL[t.status] || t.status }}</span>
             <span class="meta">{{ taskModeLabel(t) }} · {{ targetSourceLabel(t.target_source) }} · 并发 {{ t.concurrency }}</span>
+            <span v-if="t.llm_cost > 0" class="task-cost-badge">¥{{ t.llm_cost.toFixed(2) }}</span>
           </div>
           <div class="meta task-query">{{ taskScopeText(t) }}</div>
         </div>

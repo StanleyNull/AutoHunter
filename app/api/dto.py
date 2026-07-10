@@ -112,6 +112,7 @@ class TaskResponse(BaseModel):
     fofa_config: dict = Field(default_factory=dict)
     engine_config: dict = Field(default_factory=dict)
     llm_usage: dict = Field(default_factory=dict)
+    llm_cost: float = 0.0
     created_at: str
     updated_at: str
     stats: Optional[TaskStats] = None

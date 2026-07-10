@@ -73,6 +73,7 @@ const resetFailedWorking = ref(false);
 const collectWorking = ref(false);
 const showResetConfirm = ref(false);
 const showResetFailedConfirm = ref(false);
+const showResetFailedBlocked = ref(false);
 const retestSummary = ref(null);
 // 凭证提交表单状态
 const credType = ref("password");
@@ -609,6 +610,14 @@ async function resetProgress() {
   } finally {
     resetWorking.value = false;
   }
+}
+
+function handleResetFailedClick() {
+  if (task.value?.status === "running") {
+    showResetFailedBlocked.value = true;
+    return;
+  }
+  showResetFailedConfirm.value = true;
 }
 
 async function resetFailedTargets() {
@@ -1386,7 +1395,7 @@ function fmtTime(iso) {
           <button @click="ctl('stop')">停止</button>
           <button @click="collectTargets" :disabled="collectWorking">{{ collectWorking ? "搜索中..." : "搜索新Target" }}</button>
           <button class="danger" @click="showResetConfirm = true" :disabled="task.status === 'running'">重置进度</button>
-          <button @click="showResetFailedConfirm = true">重置失败目标</button>
+          <button @click="handleResetFailedClick">重置失败目标</button>
         </div>
         <div v-else class="mission-actions readonly-hint">{{ authRoleRef === 'readonly' ? "只读模式" : "未认证" }}</div>
       </div>
@@ -1768,12 +1777,28 @@ function fmtTime(iso) {
         <p>仅重置因以下原因变为「硬骨头」的目标，重新入队探活：<br/>
         • 派发前探活失败（死链/连接超时/无响应）<br/>
         • Worker 连续网络超时/工具失败后系统自动收敛</p>
-        <p>任务运行中也可操作，不影响正在挖掘的目标。已发现的漏洞将作为去重屏障保留。</p>
+        <p>已发现的漏洞将作为去重屏障保留。请在任务空闲或停止后操作。</p>
         <div class="modal-actions">
           <button @click="showResetFailedConfirm = false">取消</button>
           <button class="danger" @click="resetFailedTargets" :disabled="resetFailedWorking">
             {{ resetFailedWorking ? "重置中..." : "确认重置" }}
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 重置失败目标 - 运行中拦截弹窗 -->
+    <div v-if="showResetFailedBlocked" class="modal-overlay" @click.self="showResetFailedBlocked = false">
+      <div class="modal-card reset-confirm">
+        <h3>任务运行中，暂无法重置</h3>
+        <p>「重置失败目标」需要在任务<strong>空闲</strong>或<strong>已停止</strong>状态时操作。</p>
+        <p>任务运行期间，系统正在执行自动重测流程（探活、IP 封禁检测、休眠轮询等）。
+        此时手动重置会导致：<br/>
+        • 重测状态不同步，可能产生重复测试<br/>
+        • 跳过重测的串行探活逻辑，影响 IP 封禁判定</p>
+        <p>请等待任务自动进入空闲状态（所有目标和重测流程均完成），或先手动停止任务后再重置。</p>
+        <div class="modal-actions">
+          <button @click="showResetFailedBlocked = false">知道了</button>
         </div>
       </div>
     </div>

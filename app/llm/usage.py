@@ -143,9 +143,35 @@ def record_usage(task_id: str | None, model: str, prompt_tokens: int = 0,
 
 
 def usage_snapshot(task_id: str | None, model: str = "") -> dict[str, Any]:
-    """聚合所有模型的用量汇总（向后兼容 BoardView 轮询）。"""
+    """聚合所有模型的用量汇总（从 DB 读取，重启不丢）。"""
     if not task_id:
         return _empty(model)
+    # 优先从 DB 读取（持久化，重启不丢）
+    conn = _get_db_conn()
+    if conn is not None:
+        try:
+            with _DB_LOCK:
+                row = conn.execute(
+                    "SELECT SUM(prompt_tokens), SUM(completion_tokens), "
+                    "SUM(cache_hit_tokens), SUM(cache_miss_tokens), SUM(requests) "
+                    "FROM token_usage_daily WHERE task_id = ?",
+                    (task_id,)
+                ).fetchone()
+            if row and row[0] is not None:
+                pt, ct, cht, cmt, req = row
+                return {
+                    "prompt_tokens": pt or 0,
+                    "completion_tokens": ct or 0,
+                    "total_tokens": (pt or 0) + (ct or 0),
+                    "cache_hit_tokens": cht or 0,
+                    "cache_miss_tokens": cmt or 0,
+                    "requests": req or 0,
+                    "model": model,
+                    "updated_at": time(),
+                }
+        except Exception as e:
+            logger.debug("usage_snapshot DB 读取失败，回退内存: %s", e)
+    # 回退到内存
     with _USAGE_LOCK:
         rows = [dict(v) for k, v in _USAGE.items() if k[0] == task_id]
     if not rows:
@@ -164,16 +190,44 @@ def usage_snapshot(task_id: str | None, model: str = "") -> dict[str, Any]:
         if ts and (latest_ts is None or ts > latest_ts):
             latest_ts = ts
             last_model = r.get("model", "")
-    # 优先用传入的 model（来自任务配置），否则用最近一次调用的 model
     agg["model"] = model or last_model or agg["model"]
     agg["updated_at"] = latest_ts
     return agg
 
 
 def usage_snapshot_by_model(task_id: str | None) -> list[dict[str, Any]]:
-    """返回按模型拆分的用量明细列表。"""
+    """返回按模型拆分的用量明细列表（从 DB 读取，重启不丢）。"""
     if not task_id:
         return []
+    # 优先从 DB 读取
+    conn = _get_db_conn()
+    if conn is not None:
+        try:
+            with _DB_LOCK:
+                rows = conn.execute(
+                    "SELECT model, SUM(prompt_tokens), SUM(completion_tokens), "
+                    "SUM(cache_hit_tokens), SUM(cache_miss_tokens), SUM(requests) "
+                    "FROM token_usage_daily WHERE task_id = ? GROUP BY model",
+                    (task_id,)
+                ).fetchall()
+            if rows:
+                result = []
+                for row in rows:
+                    mdl, pt, ct, cht, cmt, req = row
+                    result.append({
+                        "model": mdl or "",
+                        "prompt_tokens": pt or 0,
+                        "completion_tokens": ct or 0,
+                        "total_tokens": (pt or 0) + (ct or 0),
+                        "cache_hit_tokens": cht or 0,
+                        "cache_miss_tokens": cmt or 0,
+                        "requests": req or 0,
+                        "updated_at": time(),
+                    })
+                return result
+        except Exception as e:
+            logger.debug("usage_snapshot_by_model DB 读取失败，回退内存: %s", e)
+    # 回退到内存
     with _USAGE_LOCK:
         return [dict(v) for k, v in _USAGE.items() if k[0] == task_id]
 

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Finding, Review
+from app.db.models import Finding, Killsweep, Review
 from app.db.session import engine, get_session
 from app.settings_service import resolve_pricing
 
@@ -113,6 +113,25 @@ async def daily_stats(
     )
     submitted_count = (await session.execute(submitted_q)).scalar() or 0
 
+    # 当日通杀列（is_killsweep=True）
+    ks_q = (
+        select(func.count(Killsweep.id))
+        .where(_cst_date_from_utc(Killsweep.created_at) == date)
+        .where(Killsweep.is_killsweep == True)  # noqa: E712
+    )
+    killsweep_count = (await session.execute(ks_q)).scalar() or 0
+
+    # 当日 AI 未采纳（verdict in ignored/deepen + user_status=pending，排除 superseded）
+    archived_q = (
+        select(func.count(Finding.id))
+        .join(Review, Review.finding_id == Finding.id)
+        .where(_cst_date_from_utc(Finding.created_at) == date)
+        .where(Review.verdict.in_(["ignored", "deepen"]))
+        .where(Review.user_status == "pending")
+        .where(Finding.status != "superseded")
+    )
+    archived_count = (await session.execute(archived_q)).scalar() or 0
+
     # 2) Token 成本：从 token_usage_daily 表读取，按模型合并（跨任务聚合）
     token_q = text(
         "SELECT model, SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_hit_tokens), "
@@ -166,6 +185,8 @@ async def daily_stats(
             "rejected": user_status_counts.get("rejected", 0),
             "submitted": submitted_count,
         },
+        "killsweep": killsweep_count,
+        "archived": archived_count,
         "token_usage": {
             "total_cost": round(total_cost, 4),
             "total_prompt_tokens": total_prompt,

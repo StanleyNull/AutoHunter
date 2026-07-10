@@ -72,15 +72,15 @@ const todayStr = _todayStr();
 function maxFindings() {
   let mx = 0;
   for (const d of overview.value.days || []) {
-    if (d.findings_total > mx) mx = d.findings_total;
+    if (d.accepted > mx) mx = d.accepted;
   }
   return mx || 1;
 }
 
 function heatStyle(dateStr) {
   const d = overviewMap.value[dateStr];
-  if (!d || !d.findings_total) return "";
-  const intensity = d.findings_total / maxFindings();
+  if (!d || !d.accepted) return "";
+  const intensity = d.accepted / maxFindings();
   // 用 accent 色 + 透明度做热力
   const opacity = 0.08 + intensity * 0.25;
   return `background: oklch(70% 0.14 235 / ${opacity.toFixed(3)})`;
@@ -195,8 +195,8 @@ onMounted(async () => {
         >
           <span class="dcp-day-num">{{ cell.day }}</span>
           <template v-if="!cell.otherMonth && overviewMap[cell.dateStr]">
-            <span v-if="overviewMap[cell.dateStr].findings_total > 0" class="dcp-cell-badge">
-              {{ overviewMap[cell.dateStr].findings_total }}
+            <span v-if="overviewMap[cell.dateStr].accepted > 0" class="dcp-cell-badge">
+              {{ overviewMap[cell.dateStr].accepted }}
             </span>
             <span v-if="overviewMap[cell.dateStr].cost > 0" class="dcp-cell-cost">
               {{ formatCost(overviewMap[cell.dateStr].cost) }}
@@ -215,22 +215,6 @@ onMounted(async () => {
         </div>
 
         <div class="dcp-stat-grid">
-          <div class="dcp-stat">
-            <span class="dcp-stat-val">{{ detail.findings.total }}</span>
-            <span class="dcp-stat-label">原始发现</span>
-          </div>
-          <div class="dcp-stat">
-            <span class="dcp-stat-val">{{ detail.findings.pending_review }}</span>
-            <span class="dcp-stat-label">待审核</span>
-          </div>
-          <div class="dcp-stat ok">
-            <span class="dcp-stat-val">{{ detail.reviews.accepted }}</span>
-            <span class="dcp-stat-label">AI 采纳</span>
-          </div>
-          <div class="dcp-stat danger">
-            <span class="dcp-stat-val">{{ detail.reviews.ignored }}</span>
-            <span class="dcp-stat-label">AI 驳回</span>
-          </div>
           <div class="dcp-stat warn">
             <span class="dcp-stat-val">{{ detail.user_reviews.pending }}</span>
             <span class="dcp-stat-label">待复审</span>
@@ -239,13 +223,21 @@ onMounted(async () => {
             <span class="dcp-stat-val">{{ detail.user_reviews.passed }}</span>
             <span class="dcp-stat-label">已通过</span>
           </div>
+          <div class="dcp-stat info">
+            <span class="dcp-stat-val">{{ detail.user_reviews.submitted }}</span>
+            <span class="dcp-stat-label">已提交</span>
+          </div>
+          <div class="dcp-stat">
+            <span class="dcp-stat-val">{{ detail.killsweep }}</span>
+            <span class="dcp-stat-label">通杀列</span>
+          </div>
           <div class="dcp-stat danger">
             <span class="dcp-stat-val">{{ detail.user_reviews.rejected }}</span>
             <span class="dcp-stat-label">已驳回</span>
           </div>
-          <div class="dcp-stat info">
-            <span class="dcp-stat-val">{{ detail.user_reviews.submitted }}</span>
-            <span class="dcp-stat-label">已提交</span>
+          <div class="dcp-stat danger">
+            <span class="dcp-stat-val">{{ detail.archived }}</span>
+            <span class="dcp-stat-label">AI未采纳</span>
           </div>
         </div>
 
@@ -439,7 +431,7 @@ onMounted(async () => {
 
 .dcp-stat-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   margin-bottom: 16px;
 }

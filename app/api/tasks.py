@@ -207,6 +207,11 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
     model_config = _public_model_config(t)
     if observer:
         model_config = _observer_model_config()
+    llm_usage = {} if observer else usage_snapshot(t.id, model_config.get("model", ""))
+    llm_cost = 0.0
+    if not observer:
+        for m in _llm_usage_by_model_with_cost(t.id):
+            llm_cost += m.get("cost", 0)
     return TaskResponse(
         id=t.id, name=_observer_task_name(t.name, t.id) if observer else t.name, status=t.status, src_type=t.src_type,
         vuln_types=t.vuln_types or [], target_source=t.target_source,
@@ -216,7 +221,8 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         model_config_data=model_config,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
         engine_config={} if observer else {"engine": t.engine or ""},
-        llm_usage={} if observer else usage_snapshot(t.id, model_config.get("model", "")),
+        llm_usage=llm_usage,
+        llm_cost=round(llm_cost, 4),
         created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
         stats=stats, pending_user_review=pending_user_review,
         pending_archived=pending_archived, pending_input=pending_input,
@@ -1050,7 +1056,7 @@ async def reset_failed_targets(task_id: str, request: Request,
     - 探活失败 / 死链 / 连接超时（派发前探活不通）
     - 系统自动收敛 / 连续...（Worker 连续网络超时/工具失败后自动收敛）
 
-    与全量重置不同，此接口允许任务运行中调用（只触碰 dead 目标，不影响活跃 worker）。
+    要求任务处于 stopped/idle/paused 状态，避免与自动重测流程冲突。
     保留 findings 作为 dedup 屏障。
     """
     if _is_observer(request):
@@ -1058,6 +1064,8 @@ async def reset_failed_targets(task_id: str, request: Request,
     task = await session.get(Task, task_id)
     if not task:
         raise HTTPException(404, "任务不存在")
+    if task.status == "running":
+        raise HTTPException(409, "任务正在运行中，请等待任务空闲或停止后再重置失败目标")
 
     # 查询所有 dead 目标，在 Python 侧做关键词匹配（SQLite LIKE 不便做多 OR 模式）
     dead_targets = (await session.execute(
