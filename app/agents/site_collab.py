@@ -166,7 +166,7 @@ _CRED_SIGNALS: tuple[re.Pattern, ...] = (
     re.compile(r"(?i)\bcookie\s*[:：]\s*\S+"),
     re.compile(r"(?i)\bauthorization\s*[:：]\s*\S+"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{10,}"),
-    re.compile(r"(?i)\b(JSESSIONID|PHPSESSID|SESSION|SESSID|sid|token|access_token)\s*=\s*\S+"),
+    re.compile(r"(?i)\b(JSESSIONID|PHPSESSID|SESSION|SESSID|sid|token|access_token|CASTGC)\s*=\s*\S+"),
     re.compile(r"(?i)(已有|提供|给你|附上|如下).{0,6}(账号|帐号|账户|登录|凭据|凭证|cookie|token|session)"),
 )
 
