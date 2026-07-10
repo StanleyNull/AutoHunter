@@ -2092,6 +2092,7 @@ class TaskRunner:
         src_type = "edusrc"
         fofa_key = ""
         fofa_base_url = ""
+        enable_worker_fofa_lookup = True
         async with SessionLocal() as session:
             tgt = await session.get(Target, target_id)
             task_obj = await session.get(Task, task_id)
@@ -2099,6 +2100,7 @@ class TaskRunner:
                 src_type = task_obj.src_type or "edusrc"
                 fofa_key = resolve_fofa_key(task_obj)
                 fofa_base_url = resolve_fofa_base_url(task_obj)
+                enable_worker_fofa_lookup = getattr(task_obj, 'enable_worker_fofa_lookup', True)
             if tgt:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
@@ -2174,7 +2176,8 @@ class TaskRunner:
                             duplicate_history=duplicate_history,
                             cancel_event=cancel_event, src_type=src_type,
                             fofa_key=fofa_key, fofa_base_url=fofa_base_url,
-                            prompt_version=prompt_version)
+                            prompt_version=prompt_version,
+                            enable_fofa_lookup=enable_worker_fofa_lookup)
             worker_holder["worker"] = worker
             try:
                 return worker.run().model_dump(mode="json")
@@ -3078,6 +3081,7 @@ class TaskRunner:
             fofa_key = resolve_fofa_key(task)
             fofa_base_url = resolve_fofa_base_url(task)
             src_type = (task.src_type if task else "edusrc") or "edusrc"
+            enable_killsweep_fofa_search = getattr(task, 'enable_killsweep_fofa_search', True) if task else True
             finding_dict = {
                 "title": f.title, "vuln_type": f.vuln_type, "target_url": f.target_url,
                 "owner": f.owner, "description": f.description, "poc": f.poc,
@@ -3106,6 +3110,7 @@ class TaskRunner:
                 finding_dict, fofa_key, llm=llm, on_event=emit,
                 src_type=src_type, cancel_event=cancel_event,
                 fofa_base_url=fofa_base_url,
+                enable_fofa_search=enable_killsweep_fofa_search,
             )
             try:
                 return hunter.run().model_dump(mode="json")

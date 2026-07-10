@@ -783,6 +783,9 @@ main {
 }
 .form details summary { cursor: pointer; color: var(--ink); font-weight: 500; }
 .form details label { margin-top: 12px; }
+.checkbox-row { display: flex !important; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500; color: var(--muted); cursor: pointer; }
+.checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+.form .hint { color: var(--faint, #98a2b3); font-size: 11px; margin-top: 4px; }
 
 /* ---------- 全局硬骨头库 ---------- */
 .hard-toolbar {

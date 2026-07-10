@@ -56,6 +56,10 @@ class Task(Base):
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
+    # Worker 挖掘时是否允许调用 fofa_lookup（只读测绘确认归属/探攻击面）
+    enable_worker_fofa_lookup: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 通杀分析时是否允许调用 fofa_search（圈定同款系统+统计规模）
+    enable_killsweep_fofa_search: Mapped[bool] = mapped_column(Boolean, default=True)
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
     # 失败目标自动重测状态机（idle 时触发，串行探活+测试+休眠），null=无重测

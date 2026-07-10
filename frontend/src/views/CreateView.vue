@@ -17,6 +17,7 @@ const form = reactive({
   src_rules: "",
   base_url: "", api_key: "", model: "", prompt_version: "legacy",
   fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3,
+  enable_worker_fofa_lookup: true, enable_killsweep_fofa_search: true,
 });
 const inherited = reactive({
   base_url: "",
@@ -53,6 +54,8 @@ async function submit() {
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
+    enable_worker_fofa_lookup: form.enable_worker_fofa_lookup,
+    enable_killsweep_fofa_search: form.enable_killsweep_fofa_search,
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   };
@@ -151,6 +154,12 @@ onMounted(async () => {
         <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
         <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" /></label>
         <label>worker 并发 <input v-model="form.concurrency" type="number" /></label>
+      </details>
+      <details>
+        <summary>测绘工具开关</summary>
+        <label class="checkbox-row"><input type="checkbox" v-model="form.enable_worker_fofa_lookup" /> Worker 挖掘时 fofa_lookup（确认归属/探攻击面）</label>
+        <label class="checkbox-row"><input type="checkbox" v-model="form.enable_killsweep_fofa_search" /> 通杀分析时 fofa_search（圈定同款系统+统计规模）</label>
+        <p class="hint">关闭后可避免 Worker/通杀 Agent 自主调用 FOFA 消耗点数（手动清单模式尤其有用）</p>
       </details>
       <label>SRC 规则（审核用，可留空，审核 agent 已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'edusrc' }}标准）
         <textarea v-model="form.src_rules" rows="3"></textarea>

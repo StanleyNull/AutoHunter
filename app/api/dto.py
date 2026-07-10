@@ -40,6 +40,8 @@ class CreateTaskRequest(BaseModel):
     fofa_config: FofaConfigDTO = Field(default_factory=FofaConfigDTO)
     engine_config: EngineConfigDTO = Field(default_factory=EngineConfigDTO)  # 引擎 Key/URL
     concurrency: int = 3
+    enable_worker_fofa_lookup: bool = True     # Worker 挖掘时是否允许调用 fofa_lookup
+    enable_killsweep_fofa_search: bool = True   # 通杀分析时是否允许调用 fofa_search
 
 
 class PartialModelConfigDTO(BaseModel):
@@ -75,6 +77,8 @@ class UpdateTaskRequest(BaseModel):
     fofa_config: Optional[PartialFofaConfigDTO] = None
     engine_config: Optional[PartialEngineConfigDTO] = None
     concurrency: Optional[int] = None
+    enable_worker_fofa_lookup: Optional[bool] = None
+    enable_killsweep_fofa_search: Optional[bool] = None
 
 
 class TaskStats(BaseModel):
@@ -111,6 +115,8 @@ class TaskResponse(BaseModel):
     model_config_data: dict = Field(default_factory=dict)
     fofa_config: dict = Field(default_factory=dict)
     engine_config: dict = Field(default_factory=dict)
+    enable_worker_fofa_lookup: bool = True
+    enable_killsweep_fofa_search: bool = True
     llm_usage: dict = Field(default_factory=dict)
     llm_cost: float = 0.0
     created_at: str

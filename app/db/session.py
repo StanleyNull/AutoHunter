@@ -83,6 +83,8 @@ _MIGRATIONS = [
     ("system_settings", "proxy", "JSON DEFAULT '{}'"),
     ("system_settings", "pricing", "JSON DEFAULT '{}'"),
     ("tasks", "retest_state", "JSON"),
+    ("tasks", "enable_worker_fofa_lookup", "BOOLEAN DEFAULT 1"),
+    ("tasks", "enable_killsweep_fofa_search", "BOOLEAN DEFAULT 1"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。

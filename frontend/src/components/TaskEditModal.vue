@@ -55,6 +55,8 @@ const form = reactive({
   max_pages: 20,
   page_size: 100,
   concurrency: 3,
+  enable_worker_fofa_lookup: true,
+  enable_killsweep_fofa_search: true,
 });
 const original = reactive({
   base_url: "",
@@ -89,6 +91,8 @@ function fill(task) {
   form.max_pages = fofaCfg.max_pages ?? 20;
   form.page_size = fofaCfg.page_size ?? 100;
   form.concurrency = task.concurrency || 3;
+  form.enable_worker_fofa_lookup = task.enable_worker_fofa_lookup ?? true;
+  form.enable_killsweep_fofa_search = task.enable_killsweep_fofa_search ?? true;
   original.base_url = form.base_url;
   original.model = form.model;
   original.prompt_version = form.prompt_version;
@@ -136,6 +140,8 @@ async function save() {
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
+    enable_worker_fofa_lookup: form.enable_worker_fofa_lookup,
+    enable_killsweep_fofa_search: form.enable_killsweep_fofa_search,
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   });
@@ -241,6 +247,13 @@ async function save() {
         </div>
       </details>
 
+      <details>
+        <summary>测绘工具开关</summary>
+        <label class="checkbox-row"><input type="checkbox" v-model="form.enable_worker_fofa_lookup" /> Worker 挖掘时 fofa_lookup（确认归属/探攻击面）</label>
+        <label class="checkbox-row"><input type="checkbox" v-model="form.enable_killsweep_fofa_search" /> 通杀分析时 fofa_search（圈定同款系统+统计规模）</label>
+        <p class="hint">关闭后可避免 Worker/通杀 Agent 自主调用 FOFA 消耗点数</p>
+      </details>
+
       <label>SRC 规则
         <textarea v-model="form.src_rules" rows="3"></textarea>
       </label>
@@ -286,5 +299,25 @@ async function save() {
 .model-hint {
   color: var(--muted, #98a2b3);
   font-size: 11px;
+}
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted, #98a2b3);
+  cursor: pointer;
+  margin-top: 12px;
+}
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.hint {
+  color: var(--muted, #98a2b3);
+  font-size: 11px;
+  margin-top: 4px;
 }
 </style>

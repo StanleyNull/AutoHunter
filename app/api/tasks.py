@@ -221,6 +221,8 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         model_config_data=model_config,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
         engine_config={} if observer else {"engine": t.engine or ""},
+        enable_worker_fofa_lookup=t.enable_worker_fofa_lookup if hasattr(t, 'enable_worker_fofa_lookup') else True,
+        enable_killsweep_fofa_search=t.enable_killsweep_fofa_search if hasattr(t, 'enable_killsweep_fofa_search') else True,
         llm_usage=llm_usage,
         llm_cost=round(llm_cost, 4),
         created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
@@ -315,6 +317,8 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         engine=engine_name, fofa_query=req.fofa_query, manual_targets=req.manual_targets,
         model_config_json=req.model_config_data.model_dump(exclude_defaults=True),
         fofa_config=fofa_cfg, concurrency=req.concurrency,
+        enable_worker_fofa_lookup=req.enable_worker_fofa_lookup,
+        enable_killsweep_fofa_search=req.enable_killsweep_fofa_search,
         status="created",
     )
     session.add(task)
@@ -478,6 +482,10 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         task.manual_targets = [t.strip() for t in req.manual_targets if str(t).strip()]
     if req.concurrency is not None:
         task.concurrency = max(1, min(int(req.concurrency), 20))
+    if req.enable_worker_fofa_lookup is not None:
+        task.enable_worker_fofa_lookup = req.enable_worker_fofa_lookup
+    if req.enable_killsweep_fofa_search is not None:
+        task.enable_killsweep_fofa_search = req.enable_killsweep_fofa_search
 
     old_query = task.fofa_query or ""
     if req.fofa_query is not None:

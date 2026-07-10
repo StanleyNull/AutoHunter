@@ -54,6 +54,7 @@ class Worker:
         fofa_key: str = "",
         fofa_base_url: str = "",
         prompt_version: str | None = None,
+        enable_fofa_lookup: bool = True,
     ):
         self.target = target
         self.llm = llm or LLMClient()
@@ -61,6 +62,7 @@ class Worker:
         self.src_type = src_type
         self._enterprise = is_enterprise_src(src_type)
         self.prompt_version = normalize_worker_prompt_version(prompt_version or worker_config.prompt_version)
+        self._enable_fofa_lookup = enable_fofa_lookup
         self.executor = ToolExecutor(
             target, cancel_event=self.cancel_event,
             enterprise=self._enterprise, fofa_key=fofa_key, fofa_base_url=fofa_base_url,
@@ -219,6 +221,9 @@ class Worker:
             try:
                 self._emit("llm_round_start", round=rounds)
                 tools = list(TOOL_SCHEMAS)
+                # fofa_lookup 被任务级开关禁用时从工具列表移除，LLM 不会看到它
+                if not self._enable_fofa_lookup:
+                    tools = [t for t in tools if t.get("function", {}).get("name") != "fofa_lookup"]
                 # 会话保持工具全模式开放：拿到凭证登录后固化登录态再深挖。
                 tools += SESSION_TOOL_SCHEMAS
                 if self._js_tool_enabled:
@@ -517,6 +522,15 @@ class Worker:
             elif user_creds.get("type") == "cookie":
                 cred_lines.append(f"Cookie/Token：{user_creds.get('cookie', '')}")
             cred_lines.append("这是用户授权你使用的入场券，登录后继续实证危害才算出洞。不要修改任何账号密码。")
+            cred_lines.extend([
+                "",
+                "⚠️ 凭据失效处理（铁律）：",
+                "如果你尝试登录后发现用户提供 的凭据已失效/过期/错误（登录返回认证失败、密码错误、账号不存在、Cookie/Token 无效等），",
+                "必须立即 finish(verdict=needs_auth) 并在 auth_assessment 中说明凭据失效原因（如 reg_status=registrable_verification_needed, block_reason 写清'用户提供的凭据无效：密码错误/Cookie 过期'等）。",
+                "绝对不要因为凭据失效就 finish(no_vuln)——凭据失效不代表目标无漏洞，只是当前凭据不可用，需要用户重新提供。",
+                "如果你在凭据失效后仍想尝试无需认证的攻击面，可以继续测，但最终 finish 时仍须用 needs_auth 而非 no_vuln，",
+                "以便目标回到 pending_input 等待用户提交新凭据。",
+            ])
             parts += ["\n".join(cred_lines)]
         return "\n".join(parts)
 
@@ -622,6 +636,9 @@ class Worker:
 
         if name == "fofa_lookup":
             self._mark_tool_used(name, rnd)
+            if not self._enable_fofa_lookup:
+                return {"ok": False, "error": "本任务已禁用 fofa_lookup 测绘工具。",
+                        "guidance": "改用 http_request 验证归属（看证书/页脚/备案），或联系管理员开启该开关。"}
             query = (args.get("query") or "").strip()
             if not query:
                 return self._tool_arg_error(
