@@ -4,7 +4,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, canWrite, isReadonly } from "../api.js";
 import { copyText } from "../clipboard.js";
-import { buildEdusrcToolReport, buildReportMd, effectiveSeverity } from "../report.js";
+import { buildEdusrcToolReport, buildReportMd, buildReportPy, effectiveSeverity, reportSlug } from "../report.js";
 
 const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review
 const emit = defineEmits(["close", "updated", "toast"]);
@@ -151,6 +151,25 @@ function copyEdusrcJson() {
     .catch(() => emit("toast", "复制失败，请使用导出按钮"));
 }
 
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime || "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function downloadMd() {
+  if (!f.value) return;
+  downloadFile(`${reportSlug(f.value)}.md`, buildReportMd(f.value), "text/markdown;charset=utf-8");
+  emit("toast", "已下载 Markdown 报告");
+}
+function downloadPy() {
+  if (!f.value) return;
+  downloadFile(`${reportSlug(f.value)}.py`, buildReportPy(f.value), "text/x-python;charset=utf-8");
+  emit("toast", "已下载 PoC 脚本");
+}
+
 const TOOL_LABEL = { http_request: "HTTP 请求", run_shell: "执行命令" };
 
 function stepLabel(ev) {
@@ -231,6 +250,8 @@ async function askAssistant(preset = "") {
     <div v-if="f" class="drawer-content">
       <div class="md-toolbar">
         <button class="copy" @click="copyMd">复制 Markdown</button>
+        <button class="copy" @click="downloadMd">下载 .md</button>
+        <button class="copy" @click="downloadPy">下载 .py</button>
         <button v-if="!isEnterprise" class="copy" @click="copyEdusrcJson">复制 EduSRC JSON</button>
         <button v-if="mode === 'review' && !readonly" @click="editing = !editing">{{ editing ? "预览" : "编辑内容" }}</button>
         <span class="sev-pill" :class="effSev">{{ effSev }}</span>

@@ -1248,6 +1248,24 @@ main {
 .cost-chip b {
   color: var(--accent);
 }
+/* DB 连接池 chip */
+.pool-chip .pool-bar {
+  display: inline-block;
+  width: 44px; height: 6px;
+  background: color-mix(in oklch, var(--bg) 60%, var(--surface));
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.pool-chip .pool-bar i {
+  display: block; height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.pool-ok .pool-bar i { background: var(--accent, #10b981); }
+.pool-warn .pool-bar i { background: var(--warn, #f59e0b); }
+.pool-danger .pool-bar i { background: var(--danger, #ef4444); }
+.pool-danger b { color: var(--danger, #ef4444); }
 .cost-model-row {
   display: block;
   white-space: nowrap;
@@ -1619,6 +1637,14 @@ main {
 .review-bar .rb-hint { font-size: 12.5px; color: var(--muted); }
 .rr-main { flex: 1; min-width: 0; }
 .rr-title { font-weight: 650; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -.01em; }
+/* 复审队列单项下载按钮 */
+.rr-actions { display: flex; gap: 5px; flex: none; }
+.rr-dl {
+  font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  cursor: pointer; transition: all .15s ease; font-family: "IBM Plex Mono", monospace;
+}
+.rr-dl:hover { background: var(--info-bg); color: var(--info); border-color: var(--info); }
 .score {
   min-width: 42px; text-align: center; color: var(--ink);
   background: var(--surface); border: 1px solid var(--border-soft); border-radius: 9px;
@@ -2360,6 +2386,8 @@ main {
     gap: 8px;
   }
   .submit-toolbar .grow { display: none; }
+  /* 移动端隐藏单项下载按钮，点击列表项进抽屉下载 */
+  .rr-actions { display: none; }
   .submit-toolbar button { flex: 1 1 calc(50% - 4px); min-width: 0; }
 
   .killsweep-card { border-radius: 13px; }

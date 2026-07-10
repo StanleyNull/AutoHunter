@@ -279,6 +279,8 @@ export const api = {
   // 日历统计
   dailyStats: (date) => req("GET", `/api/stats/daily${qs({ date })}`),
   dailyOverview: (month) => req("GET", `/api/stats/daily-overview${qs({ month })}`),
+  // 数据库连接池状态
+  poolStats: () => req("GET", "/api/stats/pool"),
 };
 
 export function wsUrl(taskId) {

@@ -12,7 +12,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Finding, Review
-from app.db.session import get_session
+from app.db.session import engine, get_session
 from app.settings_service import resolve_pricing
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -40,6 +40,21 @@ def _calc_cost(prompt_tokens: int, completion_tokens: int,
         + cache_hit_tokens * price_cache / 1_000_000
     )
     return round(cost, 4)
+
+
+@router.get("/pool")
+async def pool_stats():
+    """数据库连接池实时状态（不需要 DB session，不消耗连接）。"""
+    pool = engine.pool
+    return {
+        "pool_size": pool.size(),          # 基础容量
+        "max_overflow": pool._max_overflow,  # 最大溢出
+        "checkedout": pool.checkedout(),   # 当前在用连接数
+        "checkedin": pool.checkedin(),     # 空闲可用连接数
+        "overflow": pool.overflow(),       # 当前溢出连接数
+        "total_capacity": pool.size() + pool._max_overflow,  # 总上限
+        "timeout": pool._timeout,          # 获取连接超时(秒)
+    }
 
 
 @router.get("/daily")

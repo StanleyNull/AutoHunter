@@ -4,7 +4,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
-import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
+import { effectiveSeverity, buildReportMd, buildReportPy, reportSlug } from "../report.js";
 import ReportDrawer from "../components/ReportDrawer.vue";
 import TaskEditModal from "../components/TaskEditModal.vue";
 
@@ -41,7 +41,7 @@ const ARCHIVED_PAGE_SIZE = 50;
 const bulkWorking = ref(false);
 const SUBMIT_PAGE_SIZE = 120;
 const EXPORT_PAGE_SIZE = 80;
-let ws = null, poll = null, boardPoll = null, searchTimer = null;
+let ws = null, poll = null, boardPoll = null, searchTimer = null, poolPoll = null;
 let wsReconnectTimer = null, wsReconnectAttempt = 0, wsIntentionalClose = false;
 let eventRefreshTimer = null, eventRefreshPending = null;
 const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived"]);
@@ -80,6 +80,8 @@ const credUsername = ref("");
 const credPassword = ref("");
 const credCookie = ref("");
 const credWorking = ref(false);
+// 数据库连接池状态
+const poolStats = ref(null);
 // 注册助手状态
 const targetAssistantText = ref("");
 const targetAssistantBusy = ref(false);
@@ -446,9 +448,13 @@ function updateCollectorStatus(ev) {
   };
 }
 
+async function loadPoolStats() {
+  try { poolStats.value = await api.poolStats(); } catch { /* 静默 */ }
+}
 function syncPollers() {
   clearInterval(poll);
   clearInterval(boardPoll);
+  clearInterval(poolPoll);
   const running = task.value?.status === "running";
   boardPoll = setInterval(loadBoard, running ? 2500 : 12000);
   poll = setInterval(() => refreshAll({
@@ -456,6 +462,9 @@ function syncPollers() {
     includeTask: false,
     includeBoard: false,
   }), running ? 15000 : 30000);
+  // 连接池状态：运行中 5s 刷新，空闲 30s
+  loadPoolStats();
+  poolPoll = setInterval(loadPoolStats, running ? 5000 : 30000);
 }
 
 onMounted(async () => {
@@ -471,6 +480,7 @@ onUnmounted(() => {
   closeWs(true);
   clearInterval(poll);
   clearInterval(boardPoll);
+  clearInterval(poolPoll);
   clearTimeout(searchTimer);
   clearTimeout(wsReconnectTimer);
   clearTimeout(eventRefreshTimer);
@@ -879,6 +889,62 @@ async function fetchAllSubmitReports() {
   return reports;
 }
 
+/** 下载单个文件的通用函数 */
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime || "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/** 复审队列：单项下载 MD */
+function downloadReviewMd(finding) {
+  downloadFile(`${reportSlug(finding)}.md`, buildReportMd(finding), "text/markdown;charset=utf-8");
+  toast(`已下载 ${finding.title?.slice(0, 20) || "报告"}.md`);
+}
+/** 复审队列：单项下载 py 脚本 */
+function downloadReviewPy(finding) {
+  downloadFile(`${reportSlug(finding)}.py`, buildReportPy(finding), "text/x-python;charset=utf-8");
+  toast(`已下载 ${finding.title?.slice(0, 20) || "PoC"}.py`);
+}
+
+/** 复审队列：批量导出全部 MD（合并为一个文件） */
+async function exportReviewAllMd() {
+  if (bulkWorking.value) return;
+  bulkWorking.value = true;
+  try {
+    toast("正在生成复审队列 Markdown...");
+    // 复审队列数据已在内存中，直接使用
+    const reports = queue.value;
+    const md = reports.map((f) => buildReportMd(f)).join("\n\n---\n\n");
+    downloadFile(`autohunter-${props.id.slice(0, 8)}-review.md`, md, "text/markdown;charset=utf-8");
+    toast(`已导出 ${reports.length} 份复审报告`);
+  } finally {
+    bulkWorking.value = false;
+  }
+}
+
+/** 复审队列：批量导出全部 py 脚本（合并为一个文件） */
+async function exportReviewAllPy() {
+  if (bulkWorking.value) return;
+  bulkWorking.value = true;
+  try {
+    toast("正在生成复审队列 PoC 脚本...");
+    const reports = queue.value;
+    const scripts = reports.map((f, i) => {
+      const sep = "# " + "=".repeat(70);
+      const title = (f.review?.user_edits?.title || f.title || "").slice(0, 60);
+      return `${sep}\n# [${i + 1}/${reports.length}] ${title}\n# 目标: ${f.target_url}\n# 类型: ${f.vuln_type}\n${sep}\n\n${buildReportPy(f)}`;
+    }).join("\n\n\n");
+    downloadFile(`autohunter-${props.id.slice(0, 8)}-review-poc.py`, scripts, "text/x-python;charset=utf-8");
+    toast(`已导出 ${reports.length} 份 PoC 脚本`);
+  } finally {
+    bulkWorking.value = false;
+  }
+}
+
 async function copyAll() {
   if (bulkWorking.value) return;
   bulkWorking.value = true;
@@ -1094,6 +1160,18 @@ const llmUsageByModel = computed(() => task.value?.llm_usage_by_model || []);
 const totalCost = computed(() =>
   llmUsageByModel.value.reduce((sum, m) => sum + (m.cost || 0), 0)
 );
+// 连接池使用率与状态色
+const poolPct = computed(() => {
+  const p = poolStats.value;
+  if (!p || !p.total_capacity) return 0;
+  return Math.round((p.checkedout / p.total_capacity) * 100);
+});
+const poolStatus = computed(() => {
+  const pct = poolPct.value;
+  if (pct >= 80) return "danger";
+  if (pct >= 50) return "warn";
+  return "ok";
+});
 function formatCost(c) {
   const v = Number(c || 0);
   if (v >= 100) return `¥${v.toFixed(0)}`;
@@ -1287,6 +1365,12 @@ function fmtTime(iso) {
             <small v-for="m in llmUsageByModel" :key="m.model" class="cost-model-row">
               {{ m.model }}: {{ formatTokenCount(m.prompt_tokens) }}入/{{ formatTokenCount(m.completion_tokens) }}出 → {{ formatCost(m.cost) }}
             </small>
+          </span>
+          <span v-if="poolStats" class="runtime-chip pool-chip" :class="`pool-${poolStatus}`" :title="`基础${poolStats.pool_size} + 溢出${poolStats.max_overflow} = 上限${poolStats.total_capacity} | 超时${poolStats.timeout}s`">
+            <i>DB池</i>
+            <b>{{ poolStats.checkedout }}/{{ poolStats.total_capacity }}</b>
+            <span class="pool-bar"><i :style="{ width: poolPct + '%' }"></i></span>
+            <small v-if="poolStats.overflow > 0">+{{ poolStats.overflow }}溢出</small>
           </span>
         </div>
       </div>
@@ -1489,6 +1573,12 @@ function fmtTime(iso) {
     <!-- 复审队列 -->
     <div v-show="tab === 'review'" class="list-panel">
       <div class="list-head"><span>复审队列</span><small>AI 采纳后等待人工裁决</small></div>
+      <div v-if="queue.length" class="submit-toolbar">
+        <small class="muted">{{ queue.length }} 条待复审</small>
+        <span class="grow"></span>
+        <button @click="exportReviewAllMd" :disabled="!queue.length || bulkWorking">导出全部 .md</button>
+        <button @click="exportReviewAllPy" :disabled="!queue.length || bulkWorking">导出全部 .py</button>
+      </div>
       <div v-if="!queue.length" class="empty">没有待复审的漏洞（AI 采纳后会进这里）</div>
       <div v-else-if="!filteredQueue.length" class="empty">没有匹配当前关键词的复审漏洞</div>
       <div v-for="f in filteredQueue" :key="f.id" class="result-row" @click="openReview(f.id)">
@@ -1496,6 +1586,10 @@ function fmtTime(iso) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }} · {{ fmtTime(f.created_at) }}</div>
+        </div>
+        <div class="rr-actions" @click.stop>
+          <button class="rr-dl" title="下载 Markdown" @click="downloadReviewMd(f)">MD</button>
+          <button class="rr-dl" title="下载 PoC 脚本" @click="downloadReviewPy(f)">PY</button>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
