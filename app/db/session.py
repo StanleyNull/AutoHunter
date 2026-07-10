@@ -15,7 +15,16 @@ Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+engine = create_async_engine(
+    DATABASE_URL, echo=False, future=True,
+    # 默认 QueuePool 只有 pool_size=5 + max_overflow=10 = 15 条连接。
+    # orchestrator 高并发时（12 worker × 心跳/落库/情报 + 4 reviewer +
+    # 3 killsweep + 2 escalate + API/WebSocket），同时存活的 session 远超 15，
+    # 导致连接获取超时。SQLite 是文件级 DB，连接创建开销极低，可以放心调大。
+    pool_size=20,
+    max_overflow=40,
+    pool_timeout=60,
+)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 # 每条物理连接建立时统一设置 PRAGMA（init_db 的一次性 PRAGMA 只作用于建库那条连接，
