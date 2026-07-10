@@ -15,4 +15,5 @@ data/
 web/dist/
 AGENTS.md
 frontend/node_modules/
+node_modules/
 .qoder/

@@ -55,7 +55,7 @@ logger = logging.getLogger("autohunter.orchestrator")
 
 
 def _now_iso() -> str:
-    """当前时刻的东八区（北京时间）ISO 字符串（带 +08:00 偏移），供实时事件统一携带时区。"""
+    """当前时刻的 CST ISO 字符串（带 +08:00 偏移），供实时事件统一携带时区。"""
     return datetime.now(CST).isoformat()
 
 

@@ -1058,7 +1058,8 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
     tgt = await session.get(Target, f.target_id)
     ok, suffix = apply_deepen(session, f, tgt, directive, source="user", force=req.force)
     if not ok:
-        # 深挖未生效（次数上限 / 无目标 / 无指令）：不改 user_status，避免归档列表丢条目
+        # 深挖失败：回滚一切改动，绝不把 user_status 污染成 deepening，
+        # 否则该漏洞会从复审/驳回列表消失又进不了深挖，变成查不到的“幽灵数据”。
         await session.rollback()
         raise HTTPException(409, f"无法深挖：{suffix.strip(' →')}")
     if r:
