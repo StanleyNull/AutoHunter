@@ -35,7 +35,7 @@ from app.agent_runtime import (
     AGENT_EXECUTOR, COLLECTOR_IO_EXECUTOR, WORKER_MAX_CONCURRENCY,
     agent_semaphore, shutdown_agent_executor,
 )
-from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
+from app.db.models import CST, Finding, Killsweep, Review, Target, Task, TaskEvent
 from app.db.session import SessionLocal
 from app.events import bus
 from app.llm.client import LLMClient
@@ -52,8 +52,8 @@ logger = logging.getLogger("autohunter.orchestrator")
 
 
 def _now_iso() -> str:
-    """当前时刻的 UTC ISO 字符串（带 +00:00 偏移），供实时事件统一携带时区。"""
-    return datetime.now(timezone.utc).isoformat()
+    """当前时刻的 CST ISO 字符串（带 +08:00 偏移），供实时事件统一携带时区。"""
+    return datetime.now(CST).isoformat()
 
 
 # 等级排序：用于「扩大危害」显著性判定（升级是否真的更严重）。
@@ -1384,8 +1384,8 @@ class TaskRunner:
         self._live[target_id] = {
             "target_id": target_id, "host": host, "url": url,
             "round": 0, "action": "启动中…", "findings": 0,
-            "started_at": _now().isoformat(),
-            "last_activity_at": _now().isoformat(),
+            "started_at": _now_iso(),
+            "last_activity_at": _now_iso(),
         }
 
         def _update_live(kind: str, data: dict):
@@ -1393,7 +1393,7 @@ class TaskRunner:
             if not st:
                 return
             self._worker_last_activity[target_id] = loop.time()
-            st["last_activity_at"] = _now().isoformat()
+            st["last_activity_at"] = _now_iso()
             if "round" in data:
                 st["round"] = data["round"]
             if kind == "tool_http":
@@ -1671,7 +1671,7 @@ class TaskRunner:
         final_result.setdefault("_runtime", {})
         final_result["_runtime"].update({
             "started_at": live_snapshot.get("started_at"),
-            "finished_at": _now().isoformat(),
+            "finished_at": _now_iso(),
             "duration_seconds": max(0.0, loop.time() - started_monotonic),
         })
         await self._persist_worker_result(task_id, target_id, final_result)

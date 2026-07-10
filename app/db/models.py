@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text,
@@ -19,6 +19,22 @@ def _uuid() -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+CST = timezone(timedelta(hours=8))  # 东八区（北京时间）
+
+
+def to_cst_iso(dt: datetime | None) -> str | None:
+    """数据库存 UTC naive 时间（列无时区信息），输出统一转东八区 ISO 字符串。
+
+    前端用 slice(0,19) 截取时直接得到东八区时间值；用 new Date 解析时按
+    +08:00 偏移正确换算本地时区。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(CST).isoformat()
 
 
 class Base(DeclarativeBase):

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dto import CreateTaskRequest, TaskResponse, TaskStats, UpdateTaskRequest
 from app.agents import site_collab
 from app.agents.prompts import normalize_src_type
-from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
+from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 from app.llm.usage import usage_snapshot
 from app.orchestrator import manager
@@ -18,17 +18,6 @@ from app.security import resolve_role, token_from_headers
 from app.settings_service import resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
-
-
-def _iso_utc(dt: datetime | None) -> str | None:
-    """DB 里的时间是 UTC naive（存的是 _now()=UTC，但列无时区信息）。
-    输出时补上 UTC 时区标识（…+00:00），前端 new Date 才能正确换算本地时区。
-    """
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
 
 
 # Activity Stream 历史回放：过滤高频低价值事件（与前端 BoardView 规则对齐）。
@@ -174,7 +163,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
         engine_config={} if observer else {"engine": t.engine or ""},
         llm_usage={} if observer else usage_snapshot(t.id, model_config.get("model", "")),
-        created_at=t.created_at.isoformat(), updated_at=t.updated_at.isoformat(),
+        created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
         stats=stats, pending_user_review=pending_user_review,
     )
 
@@ -355,8 +344,8 @@ async def global_hard_targets(
             "priority_reason": "" if observer else t.priority_reason,
             "dead_reason": "" if observer else t.dead_reason,
             "last_error": "" if observer else t.last_error,
-            "created_at": t.created_at.isoformat(),
-            "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+            "created_at": to_cst_iso(t.created_at),
+            "updated_at": to_cst_iso(t.updated_at),
         })
     return {
         "items": out,
@@ -545,7 +534,7 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
         events.append({
             "agent": e.agent, "kind": e.kind, "level": e.level,
             "message": "" if observer else e.message,
-            "ts": _iso_utc(e.ts),
+            "ts": to_cst_iso(e.ts),
         })
         if len(events) >= 60:
             break
@@ -592,7 +581,7 @@ async def list_targets(task_id: str, request: Request, status: str | None = None
         "priority_reason": "" if observer else t.priority_reason, "retry_count": t.retry_count,
         "deepen_count": t.deepen_count, "dead_reason": "" if observer else t.dead_reason,
         "last_error": "" if observer else t.last_error,
-        "created_at": t.created_at.isoformat(),
+        "created_at": to_cst_iso(t.created_at),
     } for t in rows]
 
 @router.post("/{task_id}/start", response_model=TaskResponse)

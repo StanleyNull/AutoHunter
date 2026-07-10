@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Task, TaskEvent
+from app.db.models import Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 
 router = APIRouter(prefix="/api/runtime-logs", tags=["runtime-logs"])
@@ -65,7 +65,7 @@ def _event_to_dict(ev: TaskEvent, task: Task | None = None) -> dict:
         "kind": ev.kind,
         "message": _mask_text(ev.message, 1600),
         "payload": _mask_payload(ev.payload or {}),
-        "ts": ev.ts.isoformat() if ev.ts else None,
+        "ts": to_cst_iso(ev.ts),
     }
 
 

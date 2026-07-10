@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.intel_curator import curate_intel
-from app.db.models import Intel
+from app.db.models import Intel, to_cst_iso
 from app.db.session import get_session
 
 router = APIRouter(prefix="/api/intel", tags=["intel"])
@@ -29,8 +29,8 @@ def _intel_to_dict(it: Intel) -> dict:
         "source_task_id": it.source_task_id or "",
         "confidence": it.confidence or "likely",
         "hit_count": it.hit_count or 1,
-        "first_seen": it.first_seen.isoformat() if it.first_seen else None,
-        "last_seen": it.last_seen.isoformat() if it.last_seen else None,
+        "first_seen": to_cst_iso(it.first_seen),
+        "last_seen": to_cst_iso(it.last_seen),
     }
 
 

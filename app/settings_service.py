@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import LLMConfig, llm_config
 from app.agents.prompts import normalize_worker_prompt_version
-from app.db.models import SystemSettings, Task
+from app.db.models import SystemSettings, Task, to_cst_iso
 from app.db.session import SessionLocal
 from app.engines import get_engine, list_engines, get_default_engine
 
@@ -263,7 +263,7 @@ async def refresh_cache(session: AsyncSession) -> SystemSettings:
         "fofa": dict(row.fofa or {}),
         "engines": dict(row.engines or {}),
         "defaults": dict(row.defaults or {}),
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "updated_at": to_cst_iso(row.updated_at),
     }
     return row
 

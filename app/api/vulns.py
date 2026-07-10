@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Finding, Review, Task
+from app.db.models import Finding, Review, Task, to_cst_iso
 from app.db.session import get_session
 
 router = APIRouter(prefix="/api/vulns", tags=["vulns"])
@@ -48,12 +48,12 @@ def _vuln_dict(f: Finding, r: Review, task_name: str = "") -> dict:
             for s in (f.kill_chain or [])
             if isinstance(s, dict) and s.get("method")
         ],
-        "created_at": f.created_at.isoformat() if f.created_at else None,
+        "created_at": to_cst_iso(f.created_at),
         "confidence": r.confidence,
         "score": r.score,
         "effective_severity": r.user_severity or r.severity_final,
         "submitted": r.submitted,
-        "user_reviewed_at": r.user_reviewed_at.isoformat() if r.user_reviewed_at else None,
+        "user_reviewed_at": to_cst_iso(r.user_reviewed_at),
     }
 
 

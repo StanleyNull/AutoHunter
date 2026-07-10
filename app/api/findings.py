@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
 from app.agents.deepen import apply_deepen
 from app.settings_service import llm_client_for_task
-from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent
+from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 from app.events import bus
 from app.llm.client import LLMClient, LLMError
@@ -100,7 +100,7 @@ def _finding_dict(f: Finding, r: Review | None, *, compact: bool = False) -> dic
         "target_url": f.target_url,
         "owner": f.owner,
         "status": f.status,
-        "created_at": f.created_at.isoformat(),
+        "created_at": to_cst_iso(f.created_at),
         "review": None if not r else {
             "verdict": r.verdict,
             "confidence": r.confidence,
@@ -400,7 +400,7 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
             "affected_table": k.affected_table or [],
             "notes": k.notes,
             "status": k.status,
-            "created_at": k.created_at.isoformat(),
+            "created_at": to_cst_iso(k.created_at),
         }
         if _matches_query(item, search):
             out.append(item)
@@ -1055,6 +1055,11 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
     r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
     tgt = await session.get(Target, f.target_id)
     ok, suffix = apply_deepen(session, f, tgt, directive, source="user")
+    if not ok:
+        # 深挖失败：回滚一切改动，绝不把 user_status 污染成 deepening，
+        # 否则该漏洞会从复审/驳回列表消失又进不了深挖，变成查不到的"幽灵数据"。
+        await session.rollback()
+        raise HTTPException(409, f"无法深挖：{suffix.strip(' →')}")
     if r:
         # 把这次人工动作记到审核记录上：复审备注 + 标记非通过非驳回（已回炉，从复审/驳回列表移走）
         r.deepen_directive = directive
@@ -1062,6 +1067,4 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
         r.user_status = "deepening"
         r.user_reviewed_at = _now()
     await session.commit()
-    if not ok:
-        raise HTTPException(409, f"无法深挖：{suffix.strip(' →')}")
     return {"ok": True, "message": suffix.strip(" →")}
