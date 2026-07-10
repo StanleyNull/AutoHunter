@@ -525,7 +525,7 @@ class Worker:
             cred_lines.extend([
                 "",
                 "⚠️ 凭据失效处理（铁律）：",
-                "如果你尝试登录后发现用户提供 的凭据已失效/过期/错误（登录返回认证失败、密码错误、账号不存在、Cookie/Token 无效等），",
+                "如果你尝试登录后发现用户提供的凭据已失效/过期/错误（登录返回认证失败、密码错误、账号不存在、Cookie/Token 无效等），",
                 "必须立即 finish(verdict=needs_auth) 并在 auth_assessment 中说明凭据失效原因（如 reg_status=registrable_verification_needed, block_reason 写清'用户提供的凭据无效：密码错误/Cookie 过期'等）。",
                 "绝对不要因为凭据失效就 finish(no_vuln)——凭据失效不代表目标无漏洞，只是当前凭据不可用，需要用户重新提供。",
                 "如果你在凭据失效后仍想尝试无需认证的攻击面，可以继续测，但最终 finish 时仍须用 needs_auth 而非 no_vuln，",
