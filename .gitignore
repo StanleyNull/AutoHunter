@@ -12,3 +12,5 @@ work/
 !app/data_static/edu_ip.db
 .DS_Store
 web/dist/
+frontend/node_modules/
+node_modules/
