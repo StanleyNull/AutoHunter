@@ -382,6 +382,7 @@ async function loadBoard() {
     if (b.fofa_config) task.value.fofa_config = b.fofa_config;
     if (b.model_config_data) task.value.model_config_data = b.model_config_data;
     if (b.llm_usage) task.value.llm_usage = b.llm_usage;
+        if (b.llm_usage_by_model) task.value.llm_usage_by_model = b.llm_usage_by_model;
   }
   if (!events.value.length && b.events?.length) {
     events.value = b.events
@@ -1089,6 +1090,17 @@ const modelName = computed(() =>
   task.value?.model_config_data?.model || task.value?.llm_usage?.model || "未配置模型"
 );
 const tokenUsage = computed(() => task.value?.llm_usage || {});
+const llmUsageByModel = computed(() => task.value?.llm_usage_by_model || []);
+const totalCost = computed(() =>
+  llmUsageByModel.value.reduce((sum, m) => sum + (m.cost || 0), 0)
+);
+function formatCost(c) {
+  const v = Number(c || 0);
+  if (v >= 100) return `¥${v.toFixed(0)}`;
+  if (v >= 1) return `¥${v.toFixed(2)}`;
+  if (v > 0) return `¥${v.toFixed(4)}`;
+  return "—";
+}
 const cacheHitRate = computed(() => {
   const u = tokenUsage.value || {};
   const hit = Number(u.cache_hit_tokens || 0);
@@ -1268,6 +1280,13 @@ function fmtTime(iso) {
           <span class="runtime-chip">
             <i>请求</i>
             <b>{{ tokenUsage.requests || 0 }}</b>
+          </span>
+          <span v-if="llmUsageByModel.length" class="runtime-chip cost-chip">
+            <i>成本</i>
+            <b>{{ formatCost(totalCost) }}</b>
+            <small v-for="m in llmUsageByModel" :key="m.model" class="cost-model-row">
+              {{ m.model }}: {{ formatTokenCount(m.prompt_tokens) }}入/{{ formatTokenCount(m.completion_tokens) }}出 → {{ formatCost(m.cost) }}
+            </small>
           </span>
         </div>
       </div>

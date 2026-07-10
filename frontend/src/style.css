@@ -1008,6 +1008,55 @@ main {
   padding: 1px 5px;
   border-radius: 4px;
 }
+.pricing-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.pricing-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 28px;
+  gap: 6px;
+  align-items: center;
+}
+.pricing-header {
+  font-size: 11px;
+  color: var(--faint);
+  padding: 0 4px;
+}
+.pricing-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-size: 13px;
+  padding: 5px 8px;
+  width: 100%;
+  font-family: inherit;
+}
+.pricing-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.pricing-del {
+  background: none;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s;
+}
+.pricing-del:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
 .settings-updated {
   display: block;
   margin-top: 6px;
@@ -1162,6 +1211,21 @@ main {
 }
 .runtime-chip small {
   color: var(--faint); font-size: 11.5px; white-space: nowrap;
+}
+.cost-chip {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.cost-chip b {
+  color: var(--accent);
+}
+.cost-model-row {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 340px;
 }
 .mission-side { display: grid; grid-template-columns: auto auto; gap: 16px; align-items: center; }
 .progress-ring {

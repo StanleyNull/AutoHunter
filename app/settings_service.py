@@ -15,7 +15,7 @@ from app.engines import get_engine, list_engines, get_default_engine
 
 SETTINGS_ID = "global"
 
-_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}, "proxy": {}}
+_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}, "proxy": {}, "pricing": {}}
 
 
 # 统一脱敏占位：不再泄露密钥首尾字符，避免降低离线爆破成本。
@@ -114,6 +114,7 @@ def effective_settings() -> dict[str, Any]:
         "engines": _merge_section(_cache.get("engines"), _env_engines()),
         "defaults": _merge_section(_cache.get("defaults"), _env_defaults()),
         "proxy": _merge_section(_cache.get("proxy"), _env_proxy()),
+        "pricing": dict(_cache.get("pricing") or {}),
     }
 
 
@@ -204,6 +205,11 @@ def resolve_skip_score_threshold() -> float:
     return float(effective_settings()["defaults"].get("skip_score_threshold", -10))
 
 
+def resolve_pricing() -> dict[str, dict[str, float]]:
+    """返回模型计价配置 {model_name: {input, output, cache_hit}}。"""
+    return dict(effective_settings().get("pricing") or {})
+
+
 def resolve_worker_prompt_version(task: Task | None = None) -> str:
     mc = (task.model_config_json or {}) if task else {}
     if mc.get("prompt_version"):
@@ -273,6 +279,7 @@ def public_settings_view() -> dict[str, Any]:
             "ssh_key_path": eff.get("proxy", {}).get("ssh_key_path") or "/root/.ssh/id_ed25519",
             "probe_servers": eff.get("proxy", {}).get("probe_servers") or "",
         },
+        "pricing": dict(eff.get("pricing") or {}),
         "available_engines": list_engines(),
         "updated_at": _cache.get("updated_at"),
     }
@@ -292,6 +299,7 @@ async def refresh_cache(session: AsyncSession) -> SystemSettings:
         "engines": dict(row.engines or {}),
         "defaults": dict(row.defaults or {}),
         "proxy": dict(row.proxy or {}),
+        "pricing": dict(row.pricing or {}),
         "updated_at": to_cst_iso(row.updated_at),
     }
     return row
@@ -358,6 +366,19 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
             if v is not None:
                 proxy[k] = v
         row.proxy = proxy
+
+    if "pricing" in payload and payload["pricing"]:
+        pricing = dict(row.pricing or {})
+        for model_name, price_cfg in payload["pricing"].items():
+            if not isinstance(price_cfg, dict):
+                continue
+            current = dict(pricing.get(model_name, {}))
+            for k, v in price_cfg.items():
+                if v is not None:
+                    current[k] = float(v)
+            if current:
+                pricing[model_name] = current
+        row.pricing = pricing
 
     await session.commit()
     await session.refresh(row)

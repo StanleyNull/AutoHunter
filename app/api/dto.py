@@ -156,9 +156,17 @@ class ProxySettingsDTO(BaseModel):
     probe_servers: Optional[str] = None
 
 
+class ModelPricingDTO(BaseModel):
+    """单个模型的计价（单位：元/百万Token）。"""
+    input: Optional[float] = None
+    output: Optional[float] = None
+    cache_hit: Optional[float] = None
+
+
 class SettingsUpdateRequest(BaseModel):
     llm: Optional[LLMSettingsDTO] = None
     fofa: Optional[FofaSettingsDTO] = None
     engines: Optional[dict[str, EngineSettingsDTO]] = None   # 按引擎名索引
     defaults: Optional[DefaultsSettingsDTO] = None
     proxy: Optional[ProxySettingsDTO] = None
+    pricing: Optional[dict[str, ModelPricingDTO]] = None     # {model_name: {input, output, cache_hit}}

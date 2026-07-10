@@ -275,6 +275,9 @@ export const api = {
   runtimeLogStats: () => req("GET", "/api/runtime-logs/stats"),
   runtimeLogs: (level, agent, q, opts = {}) =>
     req("GET", `/api/runtime-logs${qs({ level, agent, q, ...opts })}`),
+  // 日历统计
+  dailyStats: (date) => req("GET", `/api/stats/daily${qs({ date })}`),
+  dailyOverview: (month) => req("GET", `/api/stats/daily-overview${qs({ month })}`),
 };
 
 export function wsUrl(taskId) {

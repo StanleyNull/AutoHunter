@@ -286,4 +286,28 @@ class SystemSettings(Base):
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
     proxy: Mapped[dict] = mapped_column(JSON, default=dict)     # ssh_servers/ssh_key_path（WAF IP 封禁代理复测）
+    pricing: Mapped[dict] = mapped_column(JSON, default=dict)   # {model_name: {input, output, cache_hit}} 单位:元/百万Token
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class TokenUsageDaily(Base):
+    """按天聚合的 Token 用量持久化表（CST 日期 + 任务 + 模型维度）。
+
+    每次 LLM 调用后增量 upsert，进程重启不丢数据。
+    成本在查询时按 pricing 配置实时计算，不预存——用户改单价后历史成本自动重算。
+    """
+    __tablename__ = "token_usage_daily"
+    __table_args__ = (
+        Index("ux_token_usage_daily", "date", "task_id", "model", unique=True),
+        Index("ix_token_usage_daily_date", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[str] = mapped_column(String(10))              # YYYY-MM-DD（CST）
+    task_id: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(100), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_hit_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_miss_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    requests: Mapped[int] = mapped_column(Integer, default=0)

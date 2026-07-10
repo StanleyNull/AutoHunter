@@ -3,6 +3,7 @@ import { ref, onMounted, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyToken } from "../api.js";
 import TaskEditModal from "../components/TaskEditModal.vue";
+import DailyCalendar from "../components/DailyCalendar.vue";
 
 const tasks = ref([]);
 const initialLoading = ref(true);
@@ -241,6 +242,7 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
         </button>
       </div>
     </header>
+    <DailyCalendar />
     <div v-if="initialLoading" class="task-list">
       <div v-for="n in 4" :key="n" class="task-card skeleton-task" aria-hidden="true">
         <div class="task-card-main">

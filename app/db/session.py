@@ -72,6 +72,7 @@ _MIGRATIONS = [
     ("tasks", "engine", "VARCHAR(20) DEFAULT ''"),
     ("system_settings", "engines", "JSON DEFAULT '{}'"),
     ("system_settings", "proxy", "JSON DEFAULT '{}'"),
+    ("system_settings", "pricing", "JSON DEFAULT '{}'"),
     ("tasks", "retest_state", "JSON"),
 ]
 

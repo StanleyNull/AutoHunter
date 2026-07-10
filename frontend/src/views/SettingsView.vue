@@ -45,6 +45,9 @@ const form = reactive({
   proxy_probe_servers: "",
 });
 
+// 模型计价配置：[{model, input, output, cache_hit}]
+const pricingEntries = ref([]);
+
 function toast(m) {
   toastMsg.value = m;
   setTimeout(() => (toastMsg.value = ""), 2600);
@@ -72,6 +75,18 @@ async function load() {
     form.proxy_ssh_servers = s.proxy?.ssh_servers || "";
     form.proxy_ssh_key_path = s.proxy?.ssh_key_path || "";
     form.proxy_probe_servers = s.proxy?.probe_servers || "";
+    // 加载模型计价
+    const pricing = s.pricing || {};
+    pricingEntries.value = Object.entries(pricing).map(([model, cfg]) => ({
+      model,
+      input: cfg.input ?? "",
+      output: cfg.output ?? "",
+      cache_hit: cfg.cache_hit ?? "",
+    }));
+    // 如果当前模型不在计价列表中，自动添加一行
+    if (form.model && !pricingEntries.value.some(e => e.model === form.model)) {
+      pricingEntries.value.unshift({ model: form.model, input: "", output: "", cache_hit: "" });
+    }
   } finally {
     loading.value = false;
   }
@@ -105,6 +120,18 @@ async function save() {
     };
     if (form.api_key.trim()) body.llm.api_key = form.api_key.trim();
     if (form.fofa_key.trim()) body.fofa.key = form.fofa_key.trim();
+    // 构建计价配置（过滤掉模型名为空的行）
+    const pricingBody = {};
+    for (const e of pricingEntries.value) {
+      const model = (e.model || "").trim();
+      if (!model) continue;
+      const cfg = {};
+      if (e.input !== "" && e.input !== null) cfg.input = Number(e.input);
+      if (e.output !== "" && e.output !== null) cfg.output = Number(e.output);
+      if (e.cache_hit !== "" && e.cache_hit !== null) cfg.cache_hit = Number(e.cache_hit);
+      if (Object.keys(cfg).length) pricingBody[model] = cfg;
+    }
+    if (Object.keys(pricingBody).length) body.pricing = pricingBody;
     const s = await api.updateSettings(body);
     meta.value = { updated_at: s.updated_at };
     form.api_key = "";
@@ -120,6 +147,13 @@ async function save() {
 }
 
 onMounted(load);
+
+function addPricingRow() {
+  pricingEntries.value.push({ model: "", input: "", output: "", cache_hit: "" });
+}
+function removePricingRow(idx) {
+  pricingEntries.value.splice(idx, 1);
+}
 </script>
 
 <template>
@@ -255,6 +289,31 @@ onMounted(load);
             </label>
             <p class="field-hint full">Collector 评分低于此值的目标直接跳过，避免 worker 消耗在垃圾资产上。</p>
           </div>
+        </fieldset>
+
+        <fieldset class="settings-block">
+          <legend>
+            <span>模型计价</span>
+            <small>按百万 Token 计费（元），用于日历成本统计</small>
+          </legend>
+          <div class="pricing-table">
+            <div class="pricing-row pricing-header">
+              <span>模型名</span>
+              <span>输入 (元/M)</span>
+              <span>输出 (元/M)</span>
+              <span>缓存命中 (元/M)</span>
+              <span></span>
+            </div>
+            <div v-for="(e, idx) in pricingEntries" :key="idx" class="pricing-row">
+              <input v-model="e.model" placeholder="模型名" class="pricing-input" />
+              <input v-model="e.input" type="number" step="0.01" min="0" placeholder="0" class="pricing-input" />
+              <input v-model="e.output" type="number" step="0.01" min="0" placeholder="0" class="pricing-input" />
+              <input v-model="e.cache_hit" type="number" step="0.01" min="0" placeholder="0" class="pricing-input" />
+              <button type="button" class="pricing-del" @click="removePricingRow(idx)" title="删除">×</button>
+            </div>
+          </div>
+          <button type="button" class="test-btn" @click="addPricingRow">+ 添加模型</button>
+          <p class="field-hint full">成本 = (输入Token - 缓存命中) × 输入价 + 输出Token × 输出价 + 缓存命中 × 缓存价，单位均为元/百万Token。留空表示该模型不计费。</p>
         </fieldset>
 
         <fieldset class="settings-block">

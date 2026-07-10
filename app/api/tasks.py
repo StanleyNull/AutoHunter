@@ -24,10 +24,10 @@ from app.agents.deepen import DEEPEN_CAP
 from app.agents.prompts import normalize_src_type
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
-from app.llm.usage import usage_snapshot
+from app.llm.usage import usage_snapshot, usage_snapshot_by_model
 from app.orchestrator import manager
 from app.security import resolve_role, token_from_headers
-from app.settings_service import llm_client_for_task, resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version
+from app.settings_service import llm_client_for_task, resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version, resolve_pricing
 from app.tools.executor import ToolExecutor
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -70,6 +70,43 @@ def _observer_fofa_config() -> dict:
         "key_set": False, "current_query": "", "cursor": 0,
         "collector_phase": "", "collector_phase_text": "",
     }
+
+
+def _llm_usage_by_model_with_cost(task_id: str) -> list[dict]:
+    """返回按模型拆分的 Token 用量 + 实时成本计算（供看板展示）。"""
+    if not task_id:
+        return []
+    models = usage_snapshot_by_model(task_id)
+    if not models:
+        return []
+    pricing_config = resolve_pricing()
+    result = []
+    for m in models:
+        model = m.get("model", "")
+        pt = m.get("prompt_tokens", 0)
+        ct = m.get("completion_tokens", 0)
+        cht = m.get("cache_hit_tokens", 0)
+        pricing = pricing_config.get(model, {}) if model else {}
+        price_in = float(pricing.get("input", 0) or 0)
+        price_out = float(pricing.get("output", 0) or 0)
+        price_cache = float(pricing.get("cache_hit", 0) or 0)
+        non_cache_input = max(0, pt - cht)
+        cost = round(
+            non_cache_input * price_in / 1_000_000
+            + ct * price_out / 1_000_000
+            + cht * price_cache / 1_000_000,
+            4,
+        )
+        result.append({
+            "model": model,
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
+            "cache_hit_tokens": cht,
+            "cache_miss_tokens": m.get("cache_miss_tokens", 0),
+            "requests": m.get("requests", 0),
+            "cost": cost,
+        })
+    return result
 
 
 def _mask_label(label: str) -> str:
@@ -624,6 +661,7 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
         "fofa_config": _observer_fofa_config() if observer else _public_fofa_config(task),
         "model_config_data": _observer_model_config() if observer else _public_model_config(task),
         "llm_usage": {} if observer else usage_snapshot(task.id, resolve_llm_config(task).model),
+        "llm_usage_by_model": [] if observer else _llm_usage_by_model_with_cost(task.id),
         "events": events,
         "site_collab": site_overview,
         "retest_summary": retest_summary,
