@@ -259,6 +259,7 @@ export const api = {
   testLLM: () => req("POST", "/api/settings/test/llm"),
   testFOFA: () => req("POST", "/api/settings/test/fofa"),
   testSSH: () => req("POST", "/api/settings/test/ssh"),
+  testEngine: (engineName) => req("POST", `/api/settings/test/engine/${engineName}`),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit) =>

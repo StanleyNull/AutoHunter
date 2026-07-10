@@ -9,11 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dto import SettingsUpdateRequest
 from app.db.session import get_session
+from app.engines import get_engine, list_engines
+from app.engines.translator import translate_fofa_query
 from app.settings_service import (
     list_available_models,
     public_settings_view,
     refresh_cache,
     resolve_proxy_config,
+    resolve_engine_key,
+    resolve_engine_base_url,
     update_settings,
 )
 
@@ -69,25 +73,39 @@ async def test_llm(session: AsyncSession = Depends(get_session)):
 
 @router.post("/test/fofa")
 async def test_fofa(session: AsyncSession = Depends(get_session)):
-    """测试 FOFA 连通性：发一个最小查询（ip="1.1.1.1", size=1）。"""
-    await refresh_cache(session)
-    from app.fofa import client as fofa_client
-    from app.settings_service import resolve_fofa_key, resolve_fofa_base_url
+    """测试 FOFA 连通性（兼容旧端点，内部走通用引擎测试）。"""
+    return await test_engine("fofa", session)
 
-    key = resolve_fofa_key()
-    base_url = resolve_fofa_base_url()
+
+@router.post("/test/engine/{engine_name}")
+async def test_engine(engine_name: str, session: AsyncSession = Depends(get_session)):
+    """测试任意搜索引擎连通性：用最小查询验证 API Key 有效性。
+
+    对每个引擎发送 ip="1.1.1.1" 查询（自动翻译为目标引擎语法），
+    page=1, page_size=1，只要不报错即视为连通正常。
+    """
+    await refresh_cache(session)
+
+    engine = get_engine(engine_name)
+    if engine is None:
+        available = [e["name"] for e in list_engines()]
+        return {"ok": False, "message": f"未知引擎 '{engine_name}'，可用：{', '.join(available)}"}
+
+    key = resolve_engine_key(engine_name)
+    base_url = resolve_engine_base_url(engine_name)
     if not key:
-        return {"ok": False, "message": "未配置 FOFA key"}
+        return {"ok": False, "message": f"未配置 {engine.display_name} key"}
+
+    # 将 FOFA 语法翻译为目标引擎语法
+    test_query = translate_fofa_query('ip="1.1.1.1"', engine_name)
     try:
-        result = await fofa_client.search(
-            key=key, query='ip="1.1.1.1"', page=1, size=1, base_url=base_url,
+        result = await engine.search(
+            api_key=key, query=test_query, page=1, page_size=1, base_url=base_url,
         )
-        total = result.get("size", 0)
-        return {"ok": True, "message": f"连通正常，FOFA 返回 size={total}"}
-    except fofa_client.FofaError as e:
-        return {"ok": False, "message": str(e)}
+        total = result.size
+        return {"ok": True, "message": f"连通正常，{engine.display_name} 返回 size={total}"}
     except Exception as e:
-        return {"ok": False, "message": f"测试异常: {type(e).__name__}: {e}"}
+        return {"ok": False, "message": f"{engine.display_name} 测试失败: {e}"}
 
 
 @router.post("/test/ssh")

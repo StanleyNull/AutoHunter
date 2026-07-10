@@ -1114,6 +1114,34 @@ main {
 .test-result.fail {
   color: #e05260;
 }
+.engine-config-item {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.engine-config-item:last-child {
+  border-bottom: none;
+}
+.engine-config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.engine-config-name {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--ink);
+}
+.engine-config-head i {
+  font-size: 11px;
+  font-weight: 600;
+  color: #e05260;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.engine-config-head i.on {
+  color: #2d9b50;
+}
 .settings-toast {
   position: fixed;
   left: 50%;

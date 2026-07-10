@@ -8,14 +8,18 @@ const toastMsg = ref("");
 const meta = ref({ updated_at: null });
 
 // 连通性测试状态
-const testing = reactive({ llm: false, fofa: false, ssh: false });
-const testResult = reactive({ llm: null, fofa: null, ssh: null });
+const testing = reactive({ llm: false, ssh: false });
+const testResult = reactive({ llm: null, ssh: null });
+
+// 引擎连通性测试状态
+const engineTesting = reactive({});
+const engineTestResult = reactive({});
 
 async function runTest(type) {
   testing[type] = true;
   testResult[type] = null;
   try {
-    const fn = { llm: api.testLLM, fofa: api.testFOFA, ssh: api.testSSH }[type];
+    const fn = { llm: api.testLLM, ssh: api.testSSH }[type];
     const res = await fn();
     testResult[type] = res;
   } catch (e) {
@@ -25,18 +29,29 @@ async function runTest(type) {
   }
 }
 
+async function runEngineTest(engineName) {
+  engineTesting[engineName] = true;
+  engineTestResult[engineName] = null;
+  try {
+    const res = await api.testEngine(engineName);
+    engineTestResult[engineName] = res;
+  } catch (e) {
+    engineTestResult[engineName] = { ok: false, message: String(e.message || e).replace(/^\d+\s*/, "") };
+  } finally {
+    engineTesting[engineName] = false;
+  }
+}
+
 const form = reactive({
   base_url: "",
   api_key: "",
   model: "",
   temperature: 0.3,
   api_key_set: false,
-  fofa_key: "",
-  fofa_key_set: false,
-  fofa_base_url: "",
   max_pages: 20,
   page_size: 100,
   default_intent_mode: "",
+  default_engine: "",
   concurrency: 3,
   skip_score_threshold: -10,
   worker_prompt_version: "legacy",
@@ -44,6 +59,11 @@ const form = reactive({
   proxy_ssh_key_path: "",
   proxy_probe_servers: "",
 });
+
+// 引擎配置：{ [engineName]: { key: "", base_url: "", key_set: false } }
+const engineForm = reactive({});
+// 后端返回的可用引擎列表
+const availableEngines = ref([]);
 
 // 模型计价配置：[{model, input, output, cache_hit}]
 const pricingEntries = ref([]);
@@ -63,18 +83,29 @@ async function load() {
     form.temperature = s.llm?.temperature ?? 0.3;
     form.api_key = "";
     form.api_key_set = s.llm?.api_key_set;
-    form.fofa_key = "";
-    form.fofa_key_set = s.fofa?.key_set;
-    form.fofa_base_url = s.fofa?.base_url || "";
     form.max_pages = s.fofa?.max_pages ?? 20;
     form.page_size = s.fofa?.page_size ?? 100;
     form.default_intent_mode = s.fofa?.default_intent_mode || "";
+    form.default_engine = s.defaults?.engine || "";
     form.concurrency = s.defaults?.concurrency ?? 3;
     form.skip_score_threshold = s.defaults?.skip_score_threshold ?? -10;
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
     form.proxy_ssh_servers = s.proxy?.ssh_servers || "";
     form.proxy_ssh_key_path = s.proxy?.ssh_key_path || "";
     form.proxy_probe_servers = s.proxy?.probe_servers || "";
+    // 加载引擎配置
+    const engines = s.engines || {};
+    const engineList = s.available_engines || [];
+    availableEngines.value = engineList;
+    for (const eng of engineList) {
+      const name = eng.name;
+      const ecfg = engines[name] || {};
+      engineForm[name] = {
+        key: "",
+        base_url: ecfg.base_url || "",
+        key_set: !!ecfg.key_set,
+      };
+    }
     // 加载模型计价
     const pricing = s.pricing || {};
     pricingEntries.value = Object.entries(pricing).map(([model, cfg]) => ({
@@ -102,7 +133,6 @@ async function save() {
         temperature: Number(form.temperature),
       },
       fofa: {
-        base_url: form.fofa_base_url,
         max_pages: Number(form.max_pages),
         page_size: Number(form.page_size),
         default_intent_mode: form.default_intent_mode,
@@ -111,6 +141,7 @@ async function save() {
         concurrency: Number(form.concurrency),
         skip_score_threshold: Number(form.skip_score_threshold),
         worker_prompt_version: form.worker_prompt_version,
+        engine: form.default_engine,
       },
       proxy: {
         ssh_servers: form.proxy_ssh_servers,
@@ -119,7 +150,18 @@ async function save() {
       },
     };
     if (form.api_key.trim()) body.llm.api_key = form.api_key.trim();
-    if (form.fofa_key.trim()) body.fofa.key = form.fofa_key.trim();
+    // 构建引擎配置
+    const enginesBody = {};
+    for (const eng of availableEngines.value) {
+      const name = eng.name;
+      const ef = engineForm[name];
+      if (!ef) continue;
+      const cfg = {};
+      if (ef.key.trim()) cfg.key = ef.key.trim();
+      if (ef.base_url.trim()) cfg.base_url = ef.base_url.trim();
+      if (Object.keys(cfg).length) enginesBody[name] = cfg;
+    }
+    if (Object.keys(enginesBody).length) body.engines = enginesBody;
     // 构建计价配置（过滤掉模型名为空的行）
     const pricingBody = {};
     for (const e of pricingEntries.value) {
@@ -135,9 +177,19 @@ async function save() {
     const s = await api.updateSettings(body);
     meta.value = { updated_at: s.updated_at };
     form.api_key = "";
-    form.fofa_key = "";
     form.api_key_set = s.llm?.api_key_set;
-    form.fofa_key_set = s.fofa?.key_set;
+    // 更新引擎 key_set 状态
+    const engines = s.engines || {};
+    for (const eng of availableEngines.value) {
+      const name = eng.name;
+      if (engineForm[name]) {
+        engineForm[name].key = "";
+        engineForm[name].key_set = !!(engines[name]?.key_set);
+        if (engines[name]?.base_url !== undefined) {
+          engineForm[name].base_url = engines[name].base_url || "";
+        }
+      }
+    }
     toast("系统配置已保存");
   } catch (e) {
     toast(String(e.message || e).replace(/^\d+\s*/, ""));
@@ -161,7 +213,7 @@ function removePricingRow(idx) {
     <header class="page-head">
       <h2>系统配置</h2>
       <p class="page-sub">
-        全局默认 LLM / FOFA / 调度参数。新建任务留空时会使用此处配置；任务内填写可单独覆盖。
+        全局默认 LLM / 搜索引擎 / 调度参数。新建任务留空时会使用此处配置；任务内填写可单独覆盖。
         <span v-if="meta.updated_at" class="settings-updated">上次保存 {{ meta.updated_at?.slice(0, 19).replace("T", " ") }}</span>
       </p>
     </header>
@@ -180,12 +232,12 @@ function removePricingRow(idx) {
           </div>
           <i :class="{ on: form.api_key_set }">{{ form.api_key_set ? "key set" : "no key" }}</i>
         </div>
-        <div class="settings-health">
+        <div v-for="eng in availableEngines" :key="eng.name" class="settings-health">
           <div>
-            <span>FOFA</span>
-            <b>{{ form.max_pages }} 页 · {{ form.page_size }} / 页</b>
+            <span>{{ eng.display_name }}</span>
+            <b>{{ form.default_engine === eng.name ? "默认" : "" }}</b>
           </div>
-          <i :class="{ on: form.fofa_key_set }">{{ form.fofa_key_set ? "key set" : "no key" }}</i>
+          <i :class="{ on: engineForm[eng.name]?.key_set }">{{ engineForm[eng.name]?.key_set ? "key set" : "no key" }}</i>
         </div>
         <dl class="settings-facts">
           <div>
@@ -238,18 +290,51 @@ function removePricingRow(idx) {
 
         <fieldset class="settings-block">
           <legend>
-            <span>FOFA</span>
-            <small>Collector 默认资产搜集参数</small>
+            <span>搜索引擎</span>
+            <small>Collector 使用的测绘引擎 API 密钥</small>
+          </legend>
+          <div v-for="eng in availableEngines" :key="eng.name" class="engine-config-item">
+            <div class="engine-config-head">
+              <span class="engine-config-name">{{ eng.display_name }}</span>
+              <i :class="{ on: engineForm[eng.name]?.key_set }">{{ engineForm[eng.name]?.key_set ? "key set" : "no key" }}</i>
+            </div>
+            <div class="settings-grid">
+              <label class="full">API Key
+                <input v-model="engineForm[eng.name].key" type="password"
+                  :placeholder="engineForm[eng.name]?.key_set ? '已配置，留空不修改' : `${eng.display_name} Key`" />
+              </label>
+              <label class="full">API 端点
+                <input v-model="engineForm[eng.name].base_url"
+                  :placeholder="`留空使用默认地址`" />
+              </label>
+            </div>
+            <div class="settings-test">
+              <button type="button" class="test-btn" :disabled="engineTesting[eng.name]"
+                @click="runEngineTest(eng.name)">
+                {{ engineTesting[eng.name] ? "测试中…" : "测试连通" }}
+              </button>
+              <span v-if="engineTestResult[eng.name]" class="test-result"
+                :class="engineTestResult[eng.name].ok ? 'ok' : 'fail'">
+                {{ engineTestResult[eng.name].ok ? "✓" : "✗" }} {{ engineTestResult[eng.name].message }}
+              </span>
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-block">
+          <legend>
+            <span>Collector 默认参数</span>
+            <small>资产搜集的分页与默认引擎</small>
           </legend>
           <div class="settings-grid">
-            <label class="full">FOFA key
-              <input v-model="form.fofa_key" type="password"
-                :placeholder="form.fofa_key_set ? '已配置，留空不修改' : 'FOFA API Key'" />
+            <label>默认搜索引擎
+              <select v-model="form.default_engine">
+                <option value="">自动（FOFA）</option>
+                <option v-for="eng in availableEngines" :key="eng.name" :value="eng.name">
+                  {{ eng.display_name }}
+                </option>
+              </select>
             </label>
-            <label class="full">API 端点
-              <input v-model="form.fofa_base_url" placeholder="https://fofa.info" />
-            </label>
-            <p class="field-hint full">自定义 FOFA 兼容端点（私有部署/镜像/代理网关），留空用官方地址。</p>
             <label>默认最大页数 <input v-model="form.max_pages" type="number" min="1" /></label>
             <label>每页条数 <input v-model="form.page_size" type="number" min="1" /></label>
             <label class="full">默认搜集方式
@@ -260,14 +345,7 @@ function removePricingRow(idx) {
               </select>
             </label>
           </div>
-          <div class="settings-test">
-            <button type="button" class="test-btn" :disabled="testing.fofa" @click="runTest('fofa')">
-              {{ testing.fofa ? "测试中…" : "测试连通" }}
-            </button>
-            <span v-if="testResult.fofa" class="test-result" :class="testResult.fofa.ok ? 'ok' : 'fail'">
-              {{ testResult.fofa.ok ? "✓" : "✗" }} {{ testResult.fofa.message }}
-            </span>
-          </div>
+          <p class="field-hint full">新建任务时默认使用的搜索引擎和分页参数，可在任务高级配置中单独覆盖。</p>
         </fieldset>
 
         <fieldset class="settings-block">
