@@ -127,6 +127,10 @@ class TaskResponse(BaseModel):
     pending_archived: int = 0
     # 待注册(pending_input)目标数——任务列表"待注册"筛选用，列表接口轻量填充
     pending_input: int = 0
+    # 失败目标重测是否进行中——任务列表卡片黄色边框用
+    retest_active: bool = False
+    # 处置进度（已完成目标数/总目标数*100，四舍五入）——任务列表卡片进度条用
+    progress_pct: int = 0
 
 
 class LLMSettingsDTO(BaseModel):

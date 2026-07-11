@@ -23,6 +23,7 @@ from app.schemas import Finding, Verdict, WorkerResult
 from app.tools.executor import ToolExecutor
 from app.tools.schemas import (
     JS_ANALYZER_TOOL_SCHEMAS,
+    KNOWLEDGE_TOOL_SCHEMAS,
     SESSION_TOOL_SCHEMAS,
     TOOL_SCHEMAS,
 )
@@ -55,6 +56,7 @@ class Worker:
         fofa_base_url: str = "",
         prompt_version: str | None = None,
         enable_fofa_lookup: bool = True,
+        deepen_count: int = 0,
     ):
         self.target = target
         self.llm = llm or LLMClient()
@@ -63,6 +65,7 @@ class Worker:
         self._enterprise = is_enterprise_src(src_type)
         self.prompt_version = normalize_worker_prompt_version(prompt_version or worker_config.prompt_version)
         self._enable_fofa_lookup = enable_fofa_lookup
+        self._deepen_count = deepen_count
         self.executor = ToolExecutor(
             target, cancel_event=self.cancel_event,
             enterprise=self._enterprise, fofa_key=fofa_key, fofa_base_url=fofa_base_url,
@@ -228,6 +231,10 @@ class Worker:
                 tools += SESSION_TOOL_SCHEMAS
                 if self._js_tool_enabled:
                     tools += JS_ANALYZER_TOOL_SCHEMAS
+                # 人工知识库工具：仅在第二次深挖且工具轮数超过10轮时解锁
+                # 知识库仅作辅助，AI必须先依赖自身推理能力测试
+                if self._deepen_count >= 2 and rounds > 10:
+                    tools += KNOWLEDGE_TOOL_SCHEMAS
                 send_messages = compact_messages(messages, rounds)
                 msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
             except Exception as e:
@@ -647,6 +654,32 @@ class Worker:
                 )
             self._emit("tool_fofa_lookup", round=rnd, query=query[:120])
             return self.executor.fofa_lookup(query=query, size=args.get("size", 10))
+
+        if name == "knowledge_lookup":
+            self._mark_tool_used(name, rnd)
+            # 双重检查触发约束（即使 schema 被注入也拦截）
+            if self._deepen_count < 2 or rnd <= 10:
+                return {
+                    "ok": False,
+                    "blocked": True,
+                    "error": "知识库工具尚未解锁：需要在第二次深挖且工具轮数超过10轮后才可使用。",
+                    "guidance": "继续用自身推理能力测试；知识库是辅助手段，不是首选工具。",
+                }
+            doc_id = (args.get("doc_id") or "").strip()
+            vuln_found = bool(args.get("vuln_found", False))
+            # 如果已提交 finding 或 deepen_context 有 vuln_type，视为已发现漏洞
+            if not vuln_found and (self.findings or (self.deepen_context or {}).get("vuln_type")):
+                vuln_found = True
+            vuln_type = (args.get("vuln_type") or "").strip()
+            if not vuln_type and self.findings:
+                vuln_type = self.findings[0].vuln_type
+            if not vuln_type and (self.deepen_context or {}).get("vuln_type"):
+                vuln_type = self.deepen_context["vuln_type"]
+            self._emit("tool_knowledge_lookup", round=rnd, doc_id=doc_id[:20],
+                       vuln_found=vuln_found, vuln_type=vuln_type[:40])
+            return self.executor.knowledge_lookup(
+                doc_id=doc_id, vuln_found=vuln_found, vuln_type=vuln_type,
+            )
 
         if name == "session_set":
             self._mark_tool_used(name, rnd)

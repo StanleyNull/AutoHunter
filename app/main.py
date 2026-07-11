@@ -22,7 +22,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.api import findings, intel, runtime_logs, settings, stats, stream, tasks, vulns
+from app.api import findings, intel, knowledge, runtime_logs, settings, stats, stream, tasks, vulns
 from app.db.session import init_db
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
 from app.orchestrator import manager
@@ -174,6 +174,7 @@ app.include_router(tasks.router)
 app.include_router(findings.router)
 app.include_router(stream.router)
 app.include_router(intel.router)
+app.include_router(knowledge.router)
 app.include_router(runtime_logs.router)
 app.include_router(vulns.router)
 app.include_router(stats.router)

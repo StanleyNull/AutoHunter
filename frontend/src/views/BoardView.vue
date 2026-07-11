@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { useRouter } from "vue-router";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
@@ -9,6 +10,7 @@ import ReportDrawer from "../components/ReportDrawer.vue";
 import TaskEditModal from "../components/TaskEditModal.vue";
 
 const props = defineProps({ id: String });
+const router = useRouter();
 const task = ref(null);
 const tab = ref("board");          // board | review | submit | killsweep | rejected
 const boardPanel = ref("workers"); // workers | stream（手机端看板切换）
@@ -1327,6 +1329,7 @@ function fmtTime(iso) {
     <template v-else-if="task">
     <div class="mission-hero">
       <div class="mission-main">
+        <button class="back-to-tasks" @click="router.push('/')">← 返回任务列表</button>
         <div class="eyebrow">{{ missionEyebrow }}</div>
         <h2>{{ task.name }} <span class="badge" :class="task.status">{{ runState.label }}</span></h2>
         <div class="mission-meta">

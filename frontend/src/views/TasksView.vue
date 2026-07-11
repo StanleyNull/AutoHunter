@@ -1,9 +1,10 @@
 <script setup>
-import { ref, onMounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { useRouter } from "vue-router";
 import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyToken } from "../api.js";
 import TaskEditModal from "../components/TaskEditModal.vue";
 import DailyCalendar from "../components/DailyCalendar.vue";
+import { taskListState } from "../taskListState.js";
 
 const tasks = ref([]);
 const initialLoading = ref(true);
@@ -18,9 +19,9 @@ const searchQuery = ref("");
 const sortBy = ref("created"); // created | pinyin
 const _pinyinCollator = new Intl.Collator("zh-Hans-CN", { sensitivity: "accent" });
 
-// 分页与筛选
-const page = ref(0);                 // 当前页，0-based
-const pageSize = ref(20);            // 每页数量
+// 分页与筛选 —— 从位置记忆模块恢复上次位置
+const page = ref(taskListState.hasSavedState ? taskListState.page : 0);                 // 当前页，0-based
+const pageSize = ref(taskListState.hasSavedState ? taskListState.pageSize : 20);            // 每页数量
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const filterBy = ref("all");         // all | bubbled | pending_reg
 
@@ -186,9 +187,34 @@ async function batchStart() {
     setTimeout(() => (batchMsg.value = ""), 3000);
   }
 }
+// 持续追踪滚动位置（passive 监听，性能开销极小）
+// 这样即便 DOM 拆除时 window.scrollY 已失效，保存值仍是最后一次有效位置
+function _saveScrollPos() {
+  taskListState.scrollTop = window.scrollY;
+}
 onMounted(async () => {
+  window.addEventListener("scroll", _saveScrollPos, { passive: true });
   if (!authReadyRef.value) await loadAuthRole();
   await load();
+  // 恢复上次的滚动位置——需等待浏览器完成导航引起的滚动重置 + 组件渲染后再恢复
+  if (taskListState.hasSavedState && taskListState.scrollTop > 0) {
+    const target = taskListState.scrollTop;
+    await nextTick();
+    // 双 rAF 确保 DOM 布局完成，再用 setTimeout 兜底处理异步组件（如 DailyCalendar）渲染后的高度变化
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.scrollTo(0, target);
+      });
+    });
+    setTimeout(() => window.scrollTo(0, target), 150);
+  }
+});
+onUnmounted(() => {
+  window.removeEventListener("scroll", _saveScrollPos);
+  // 保存当前分页位置和滚动位置
+  taskListState.page = page.value;
+  taskListState.pageSize = pageSize.value;
+  taskListState.hasSavedState = true;
 });
 watch(authReadyRef, (ready) => {
   if (ready) load();
@@ -226,6 +252,9 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
         <router-link class="head-action" to="/hard-targets">全局硬骨头库</router-link>
         <router-link v-if="authRoleRef !== 'observer'" class="head-action intel-entry" to="/intel">
           <span class="ie-dot" aria-hidden="true"></span>全局情报库
+        </router-link>
+        <router-link v-if="authRoleRef !== 'observer'" class="head-action" to="/knowledge">
+          人工知识库
         </router-link>
         <router-link v-if="authRoleRef !== 'observer'" class="head-action" to="/runtime-logs">
           运行异常
@@ -274,7 +303,7 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
       <span class="hint">调整搜索词或筛选条件</span>
     </div>
     <div v-else class="task-list">
-      <div v-for="t in pagedTasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running' }"
+      <div v-for="t in pagedTasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running', retest: t.retest_active }"
         @click="router.push(`/task/${t.id}`)">
         <div class="task-card-main">
           <div class="tc-title">
@@ -291,6 +320,10 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
             <span v-if="t.llm_cost > 0" class="task-cost-badge">¥{{ t.llm_cost.toFixed(2) }}</span>
           </div>
           <div class="meta task-query">{{ taskScopeText(t) }}</div>
+          <div v-if="t.progress_pct > 0 || t.status === 'running' || t.status === 'paused' || t.status === 'stopped'" class="task-progress-row">
+            <span class="task-progress-track"><i :style="{ width: (t.progress_pct || 0) + '%' }" :class="{ done: t.progress_pct >= 100 }"></i></span>
+            <span class="task-progress-label">{{ t.progress_pct || 0 }}%</span>
+          </div>
         </div>
         <div class="task-card-side">
           <time class="meta task-time">{{ t.created_at.slice(0, 19).replace("T", " ") }}</time>

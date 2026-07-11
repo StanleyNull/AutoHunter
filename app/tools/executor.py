@@ -10,6 +10,7 @@ import os
 import selectors
 import shlex
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -556,3 +557,118 @@ class ToolExecutor:
             )
         except Exception as e:
             return {"ok": False, "error": f"WAF 建议生成异常: {type(e).__name__}: {e}"}
+
+    # ---- knowledge_lookup（人工知识库查阅，渐进式披露）----
+    def knowledge_lookup(
+        self,
+        doc_id: str = "",
+        vuln_found: bool = False,
+        vuln_type: str = "",
+    ) -> dict[str, Any]:
+        """查阅人工知识库技巧文档。
+
+        两步渐进式披露：
+        - 传 doc_id → 返回该文档完整原文（第二步）
+        - 不传 doc_id → 按是否发现漏洞筛选，返回标题+摘要列表（第一步）
+
+        使用同步 sqlite3 直查（executor 运行在线程池中，WAL 模式并发安全）。
+        """
+        db_path = os.environ.get(
+            "DB_PATH",
+            str(Path(__file__).resolve().parent.parent.parent / "data" / "autohunter.db"),
+        )
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+
+            # 第二步：获取完整原文
+            if doc_id:
+                row = conn.execute(
+                    "SELECT id, title, summary, content, doc_type, tags, hit_count "
+                    "FROM knowledge_docs WHERE id = ? AND enabled = 1",
+                    (doc_id,),
+                ).fetchone()
+                conn.close()
+                if not row:
+                    return {"ok": False, "error": "文档不存在或未启用"}
+                # 增加引用计数（best-effort，失败不影响读取）
+                try:
+                    conn2 = sqlite3.connect(db_path, timeout=5)
+                    conn2.execute(
+                        "UPDATE knowledge_docs SET hit_count = hit_count + 1 WHERE id = ?",
+                        (doc_id,),
+                    )
+                    conn2.commit()
+                    conn2.close()
+                except Exception:
+                    pass
+                import json as _json
+                return {
+                    "ok": True,
+                    "doc_id": row["id"],
+                    "title": row["title"],
+                    "summary": row["summary"],
+                    "content": row["content"][:8000],  # 截断防 context 爆炸
+                    "doc_type": row["doc_type"],
+                    "tags": _json.loads(row["tags"]) if row["tags"] else [],
+                    "hit_count": row["hit_count"],
+                    "guidance": "这是辅助参考技巧，请结合目标实际情况独立判断，不要盲目照搬。",
+                }
+
+            # 第一步：返回筛选后的标题+摘要列表
+            # vuln_found=false → 只返回 pre_vuln 文档
+            # vuln_found=true  → 返回 pre_vuln + post_vuln 文档，按 vuln_type 标签匹配优先排序
+            if vuln_found:
+                query = (
+                    "SELECT id, title, summary, doc_type, tags, hit_count "
+                    "FROM knowledge_docs WHERE enabled = 1 "
+                    "ORDER BY hit_count DESC LIMIT 30"
+                )
+            else:
+                query = (
+                    "SELECT id, title, summary, doc_type, tags, hit_count "
+                    "FROM knowledge_docs WHERE enabled = 1 AND doc_type = 'pre_vuln' "
+                    "ORDER BY hit_count DESC LIMIT 30"
+                )
+            rows = conn.execute(query).fetchall()
+            conn.close()
+
+            import json as _json
+            docs = []
+            for r in rows:
+                tags = _json.loads(r["tags"]) if r["tags"] else []
+                docs.append({
+                    "doc_id": r["id"],
+                    "title": r["title"],
+                    "summary": r["summary"],
+                    "doc_type": r["doc_type"],
+                    "tags": tags,
+                    "hit_count": r["hit_count"],
+                })
+
+            # 如果有 vuln_type，按标签匹配度排序（匹配的排前面）
+            if vuln_type and docs:
+                vt_lower = vuln_type.lower()
+                docs.sort(
+                    key=lambda d: (
+                        0 if any(vt_lower in str(t).lower() for t in d.get("tags", [])) else 1,
+                        -d.get("hit_count", 0),
+                    )
+                )
+
+            # 收集所有可用标签（去重排序），供AI参考
+            all_tags = sorted({str(t) for d in docs for t in d.get("tags", [])})
+
+            return {
+                "ok": True,
+                "total": len(docs),
+                "docs": docs,
+                "available_tags": all_tags,
+                "guidance": (
+                    "以上是知识库中匹配的技巧文档摘要。选择你需要的文档，用 doc_id 参数获取完整原文。"
+                    "available_tags 是当前知识库中所有可用标签，可用于判断文档覆盖范围。"
+                    "知识库仅作辅助参考，请结合目标实际情况独立判断。"
+                ),
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"知识库查询异常: {type(e).__name__}: {e}"}

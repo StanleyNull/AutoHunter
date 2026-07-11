@@ -268,6 +268,22 @@ export const api = {
   applyIntelCurate: (limit) => req("POST", `/api/intel/curate${qs({ limit })}`),
   deleteIntel: (id) => req("DELETE", `/api/intel/${id}`),
   clearIntel: (kind) => req("DELETE", `/api/intel${qs({ kind })}`),
+  // 人工知识库
+  knowledgeStats: () => req("GET", "/api/knowledge/stats"),
+  knowledgeList: (doc_type, enabled, q, limit) =>
+    req("GET", `/api/knowledge${qs({ doc_type, enabled, q, limit })}`),
+  knowledgeGet: (id) => req("GET", `/api/knowledge/${id}`),
+  knowledgeCreate: (data) => req("POST", "/api/knowledge", data),
+  knowledgeBatchCreate: (docs) => req("POST", "/api/knowledge/batch", { docs }),
+  knowledgeUpdate: (id, data) => req("PUT", `/api/knowledge/${id}`, data),
+  knowledgeReprocess: (id) => req("POST", `/api/knowledge/${id}/reprocess`),
+  knowledgeDelete: (id) => req("DELETE", `/api/knowledge/${id}`),
+  knowledgeTags: () => req("GET", "/api/knowledge/tags/list"),
+  knowledgeCreateTag: (name) => req("POST", "/api/knowledge/tags", { name }),
+  knowledgeDeleteTag: (name) => req("DELETE", `/api/knowledge/tags/${encodeURIComponent(name)}`),
+  knowledgePendingTags: () => req("GET", "/api/knowledge/tags/pending"),
+  knowledgeApproveTag: (id) => req("POST", `/api/knowledge/tags/proposals/${id}/approve`),
+  knowledgeRejectTag: (id) => req("POST", `/api/knowledge/tags/proposals/${id}/reject`),
   // 全局漏洞库
   vulnStats: () => req("GET", "/api/vulns/stats"),
   vulns: (submitted, severity, q, opts = {}) =>

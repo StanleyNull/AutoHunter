@@ -21,8 +21,8 @@ engine = create_async_engine(
     # orchestrator 高并发时（12 worker × 心跳/落库/情报 + 4 reviewer +
     # 3 killsweep + 2 escalate + API/WebSocket），同时存活的 session 远超 15，
     # 导致连接获取超时。SQLite 是文件级 DB，连接创建开销极低，可以放心调大。
-    pool_size=20,
-    max_overflow=40,
+    pool_size=30,
+    max_overflow=60,
     pool_timeout=60,
 )
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -153,6 +153,9 @@ _SECONDARY_INDEXES = [
     # 看板历史回放：WHERE task_id=? ORDER BY id DESC LIMIT N。
     ("ix_task_events_task_id_id",
      "CREATE INDEX IF NOT EXISTS ix_task_events_task_id_id ON task_events(task_id, id)"),
+    # 人工知识库：按 enabled+doc_type 过滤 + hit_count 排序
+    ("ix_knowledge_enabled_type",
+     "CREATE INDEX IF NOT EXISTS ix_knowledge_enabled_type ON knowledge_docs(enabled, doc_type)"),
 ]
 
 # 废弃的残留列：老 schema 里是 NOT NULL 无默认值，新代码不再写入会导致 INSERT 失败。

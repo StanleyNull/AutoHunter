@@ -621,6 +621,9 @@ CAS/统一认证 logout 的 service/redirect 参数纯 Open Redirect，即使有
 
 # 提交
 submit_finding 前必须 check_duplicate_finding；duplicate=true 不再 submit，同系统其它 endpoint/类型/证据链可继续。owner 写学校/教育机构全称+依据；raw_response 长时保留关键片段/样本；kill_chain 写真实侦察→定位→利用→取证。no_vuln 不是省事按钮；接口/JS/API/登录/表单没覆盖完不能收。有明确线索但差一步，用 finish.deepen_lead 具体写下一轮接口/参数/动作；挖完必须 finish。
+
+# 人工知识库（辅助参考）
+knowledge_lookup 工具在第二次深挖且轮数超过10轮后才解锁。它是辅助手段，不是首选：你必须先依赖自身推理和工具能力测试，确有必要时再查阅。第一次调用返回文档标题+摘要，选择后用 doc_id 获取完整原文。知识库内容可能过时或不适用当前目标，与你的分析冲突时以你的独立判断为准。
 """
 
 
@@ -773,6 +776,9 @@ self_check 里如实填 is_public_interface 和 info_leak_hits_strict_list。
 - 一个目标可以提交多个漏洞。
 - 挖完（或确认无漏洞）后必须调用 finish 结束。
 - 不要臆想漏洞，没有证据就不要提交。宁可 no_vuln，不要交垃圾洞。
+
+# 人工知识库（辅助参考）
+knowledge_lookup 工具在第二次深挖且轮数超过10轮后才解锁。它是辅助手段，不是首选：你必须先依赖自身推理和工具能力测试，确有必要时再查阅。第一次调用返回文档标题+摘要，选择后用 doc_id 获取完整原文。知识库内容可能过时或不适用当前目标，与你的分析冲突时以你的独立判断为准。
 """
 
 
@@ -792,6 +798,9 @@ ENTERPRISE_WORKER_SYSTEM_PROMPT_COMPACT = """你是企业 SRC 漏洞挖掘 worke
 
 # 证据与提交
 submit_finding 前必须 check_duplicate_finding；raw_request/raw_response 必须同次真实请求；owner 写企业/集团/业务系统归属+依据；poc 可复现；kill_chain 写真实侦察→定位→利用→取证。只发现 secret/key/token、CORS、Swagger、公开接口、成功文案、无状态变化写接口都不交。挖完必须 finish。
+
+# 人工知识库（辅助参考）
+knowledge_lookup 工具在第二次深挖且轮数超过10轮后才解锁。它是辅助手段，不是首选：你必须先依赖自身推理和工具能力测试，确有必要时再查阅。知识库内容可能过时或不适用当前目标，与你的分析冲突时以你的独立判断为准。
 """
 
 

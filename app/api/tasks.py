@@ -203,7 +203,8 @@ def _public_fofa_config(task: Task) -> dict:
 
 def _task_to_dto(t: Task, stats: TaskStats | None = None,
                  pending_user_review: int = 0, pending_archived: int = 0,
-                 pending_input: int = 0, observer: bool = False) -> TaskResponse:
+                 pending_input: int = 0, observer: bool = False,
+                 progress_pct: int = 0) -> TaskResponse:
     model_config = _public_model_config(t)
     if observer:
         model_config = _observer_model_config()
@@ -228,6 +229,8 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
         stats=stats, pending_user_review=pending_user_review,
         pending_archived=pending_archived, pending_input=pending_input,
+        retest_active=bool(t.retest_state),
+        progress_pct=progress_pct,
     )
 
 
@@ -363,11 +366,25 @@ async def list_tasks(request: Request, session: AsyncSession = Depends(get_sessi
     )
     for tid, cnt in pi_rows.all():
         pending_input_map[tid] = cnt
+    # 批量查询每个任务的目标状态计数，计算处置进度（避免 N+1）
+    target_status_map: dict[str, dict[str, int]] = {}
+    ts_rows = await session.execute(
+        select(Target.task_id, Target.status, func.count())
+        .group_by(Target.task_id, Target.status)
+    )
+    for tid, status, cnt in ts_rows.all():
+        target_status_map.setdefault(tid, {})[status] = cnt
+    def _calc_progress(tid: str) -> int:
+        sm = target_status_map.get(tid, {})
+        total = sum(sm.get(s, 0) for s in ("queued", "assigned", "scanning", "done", "dead", "skipped", "pending_input"))
+        resolved = sm.get("done", 0) + sm.get("dead", 0) + sm.get("skipped", 0)
+        return round(resolved / total * 100) if total else 0
     observer = _is_observer(request)
     return [_task_to_dto(t, pending_user_review=pending_map.get(t.id, 0),
                         pending_archived=archived_map.get(t.id, 0),
                         pending_input=pending_input_map.get(t.id, 0),
-                        observer=observer) for t in tasks]
+                        observer=observer,
+                        progress_pct=_calc_progress(t.id)) for t in tasks]
 
 
 @router.get("/hard-targets")

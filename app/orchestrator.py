@@ -2087,6 +2087,7 @@ class TaskRunner:
             loop.call_soon_threadsafe(_do)
 
         deepen_context = None
+        deepen_count = 0
         target_meta: dict = {}
         duplicate_history: list[dict] = []
         src_type = "edusrc"
@@ -2106,6 +2107,7 @@ class TaskRunner:
                 self._live[target_id]["score"] = tgt.priority_score
                 self._live[target_id]["score_reason"] = tgt.priority_reason
                 deepen_context = tgt.deepen_context or None
+                deepen_count = tgt.deepen_count or 0
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
                 target_meta = {
                     "school": tgt.school or "", "org": tgt.org or "",
@@ -2177,7 +2179,8 @@ class TaskRunner:
                             cancel_event=cancel_event, src_type=src_type,
                             fofa_key=fofa_key, fofa_base_url=fofa_base_url,
                             prompt_version=prompt_version,
-                            enable_fofa_lookup=enable_worker_fofa_lookup)
+                            enable_fofa_lookup=enable_worker_fofa_lookup,
+                            deepen_count=deepen_count)
             worker_holder["worker"] = worker
             try:
                 return worker.run().model_dump(mode="json")

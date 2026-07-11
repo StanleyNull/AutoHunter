@@ -597,6 +597,7 @@ main {
 }
 .task-card:hover { border-color: var(--faint); background: var(--surface-2); }
 .task-card.live { border-color: var(--ok); }
+.task-card.retest { border-color: var(--warn); }
 .task-card b { font-size: 14.5px; font-weight: 600; }
 .task-card-main { min-width: 0; flex: 1; }
 .task-card-meta {
@@ -611,6 +612,36 @@ main {
   background: var(--accent-bg);
   padding: 2px 7px;
   border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.task-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.task-progress-track {
+  flex: 1;
+  height: 5px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 60px;
+}
+.task-progress-track i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width .3s ease;
+}
+.task-progress-track i.done { background: var(--ok); }
+.task-progress-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1179,6 +1210,18 @@ main {
   background: var(--accent-bg); opacity: .55; pointer-events: none;
 }
 .mission-main, .mission-side { position: relative; z-index: 1; }
+.back-to-tasks {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; font-weight: 500;
+  color: var(--accent-ink); background: var(--accent-bg);
+  border: 1px solid color-mix(in oklch, var(--accent) 20%, var(--border));
+  border-radius: 6px; padding: 4px 10px; margin-bottom: 10px;
+  cursor: pointer; transition: background .15s, border-color .15s;
+}
+.back-to-tasks:hover {
+  background: color-mix(in oklch, var(--accent-bg) 70%, var(--surface-2));
+  border-color: color-mix(in oklch, var(--accent) 40%, var(--border));
+}
 .eyebrow {
   font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .14em;
   color: var(--accent-ink); margin-bottom: 8px; text-transform: uppercase;

@@ -267,6 +267,40 @@ TOOL_SCHEMAS = [
 ]
 
 
+KNOWLEDGE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_lookup",
+            "description": (
+                "查阅人工知识库中的安全测试技巧文档（渐进式披露）。"
+                "第一次调用：传 vuln_found 和 vuln_type 获取匹配文档的标题+摘要列表。"
+                "第二次调用：传 doc_id 获取某篇文档的完整原文。"
+                "知识库仅作辅助参考，你必须先依赖自身推理能力测试，不可一开始就依赖知识库。"
+                "知识库内容与你的判断冲突时，以你的独立分析为准。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_id": {
+                        "type": "string",
+                        "description": "获取完整原文时传文档ID（从第一次调用返回的列表中选取）",
+                    },
+                    "vuln_found": {
+                        "type": "boolean",
+                        "description": "是否已发现漏洞（已提交finding或确定存在漏洞时为true）",
+                    },
+                    "vuln_type": {
+                        "type": "string",
+                        "description": "当前发现的漏洞类型，如ssrf/sqli/rce/file_upload等，用于匹配相关技巧文档",
+                    },
+                },
+            },
+        },
+    },
+]
+
+
 JS_ANALYZER_TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -603,3 +637,4 @@ KILLSWEEP_TOOL_SCHEMAS = _compact_descriptions(KILLSWEEP_TOOL_SCHEMAS)
 ESCALATE_TOOL_SCHEMAS = _compact_descriptions(ESCALATE_TOOL_SCHEMAS)
 COLLECTOR_QUERY_SCHEMAS = _compact_descriptions(COLLECTOR_QUERY_SCHEMAS)
 COLLECTOR_EDU_SCHEMAS = _compact_descriptions(COLLECTOR_EDU_SCHEMAS)
+KNOWLEDGE_TOOL_SCHEMAS = _compact_descriptions(KNOWLEDGE_TOOL_SCHEMAS)

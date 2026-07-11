@@ -7,6 +7,7 @@ import BoardView from "./views/BoardView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import HardTargetsView from "./views/HardTargetsView.vue";
 import IntelView from "./views/IntelView.vue";
+import KnowledgeView from "./views/KnowledgeView.vue";
 import VulnsView from "./views/VulnsView.vue";
 import RuntimeLogsView from "./views/RuntimeLogsView.vue";
 import { authReadyRef, authRoleRef, loadAuthRole } from "./api.js";
@@ -19,6 +20,7 @@ const router = createRouter({
     { path: "/create", component: CreateView },
     { path: "/hard-targets", component: HardTargetsView },
     { path: "/intel", component: IntelView },
+    { path: "/knowledge", component: KnowledgeView },
     { path: "/vulns", component: VulnsView },
     { path: "/runtime-logs", component: RuntimeLogsView },
     { path: "/settings", component: SettingsView },
@@ -28,7 +30,7 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   if (!authReadyRef.value) await loadAuthRole();
-  if (authRoleRef.value === "observer" && ["/create", "/settings", "/intel", "/vulns", "/runtime-logs"].includes(to.path)) {
+  if (authRoleRef.value === "observer" && ["/create", "/settings", "/intel", "/knowledge", "/vulns", "/runtime-logs"].includes(to.path)) {
     return "/";
   }
   return true;

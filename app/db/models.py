@@ -283,6 +283,63 @@ class Intel(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
 
+class KnowledgeDoc(Base):
+    """人工知识库文档（用户主动添加的安全测试技巧/漏洞利用经验）。
+
+    与 Intel（自动沉淀的结构化情报）互补：KnowledgeDoc 是用户编写的非结构化技巧文档，
+    通过渐进式披露供 Worker 在深挖阶段查阅。
+
+    doc_type:
+      - pre_vuln  (Type A) 漏洞前可读：如识别目标为XX OA系统时查阅已知漏洞
+      - post_vuln (Type B) 漏洞后可读：如确认SSRF后查阅盲转有回显技巧
+    tags: 二级标签（多选），包括漏洞类型(ssrf/sqli/rce等)和目标类型(OA/CMS/框架等)
+    """
+    __tablename__ = "knowledge_docs"
+    __table_args__ = (
+        Index("ix_knowledge_enabled_type", "enabled", "doc_type"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    title: Mapped[str] = mapped_column(String(500), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")             # AI生成的摘要
+    content: Mapped[str] = mapped_column(Text, default="")              # 完整原文
+    doc_type: Mapped[str] = mapped_column(String(20), default="pre_vuln")  # pre_vuln / post_vuln
+    tags: Mapped[list] = mapped_column(JSON, default=list)              # 二级标签
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)          # 被引用次数
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)       # 处理完成后自动启用
+    # pending / processing / ready / failed
+    processing: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class KnowledgeTag(Base):
+    """人工知识库标签池：固定标签制度，AI只能从此池中选择标签。"""
+    __tablename__ = "knowledge_tags"
+    __table_args__ = (
+        Index("ux_knowledge_tags_name", "name", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class KnowledgeTagProposal(Base):
+    """AI建议的新标签，需人工审核后才能加入标签池。"""
+    __tablename__ = "knowledge_tag_proposals"
+    __table_args__ = (
+        Index("ix_knowledge_tag_proposals_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(100))
+    source_doc_id: Mapped[str] = mapped_column(String(32), default="")  # 建议来源文档
+    # pending / approved / rejected
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
 class SystemSettings(Base):
     """全局系统配置（单行 id=global）。任务级配置可覆盖此处默认值。"""
     __tablename__ = "system_settings"
