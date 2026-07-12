@@ -303,7 +303,7 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
       <span class="hint">调整搜索词或筛选条件</span>
     </div>
     <div v-else class="task-list">
-      <div v-for="t in pagedTasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running', retest: t.retest_active }"
+      <div v-for="t in pagedTasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running', retest: t.status === 'running' && t.retest_active }"
         @click="router.push(`/task/${t.id}`)">
         <div class="task-card-main">
           <div class="tc-title">

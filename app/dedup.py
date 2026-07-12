@@ -74,6 +74,11 @@ _VULN_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
     "logic_flaw": (
         "logicflaw", "业务逻辑", "逻辑漏洞", "businesslogic", "支付逻辑", "金额篡改",
     ),
+    "backdoor_compromised": (
+        "backdoorcompromised", "疑似后门", "疑似被黑", "服务器被攻陷", "被攻陷",
+        "被挂马", "挂马", "网页被篡改", "被篡改", "后门", "webshell", "compromised",
+        "hacked", "defaced", "被黑", "植入后门", "web后门", "网页挂马", "暗链",
+    ),
 }
 
 # 反向索引：同义关键词 -> 规范类别（构建一次）。
