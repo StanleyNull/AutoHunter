@@ -2115,6 +2115,7 @@ class TaskRunner:
                     "source": tgt.source or "", "priority_reason": tgt.priority_reason or "",
                     "leaked_creds": tgt.leaked_creds or [],
                     "user_credentials": tgt.user_credentials or None,
+                    "cas_sso_config": (task_obj.cas_sso_config if task_obj else "") or "",
                 }
                 try:
                     plan = playbook_router.route_target(

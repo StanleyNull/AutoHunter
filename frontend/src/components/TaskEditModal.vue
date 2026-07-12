@@ -46,6 +46,7 @@ const form = reactive({
   intent_mode: "",
   manual_targets: "",
   src_rules: "",
+  cas_sso_config: "",
   base_url: "",
   api_key: "",
   model: "",
@@ -82,6 +83,7 @@ function fill(task) {
   form.intent_mode = fofaCfg.intent_mode || "";
   form.manual_targets = (task.manual_targets || []).join("\n");
   form.src_rules = task.src_rules || "";
+  form.cas_sso_config = task.cas_sso_config || "";
   form.base_url = modelCfg.base_url || "";
   form.api_key = "";
   form.model = modelCfg.model || "";
@@ -139,6 +141,7 @@ async function save() {
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
     src_rules: form.src_rules,
+    cas_sso_config: form.cas_sso_config,
     concurrency: parseInt(form.concurrency) || 3,
     enable_worker_fofa_lookup: form.enable_worker_fofa_lookup,
     enable_killsweep_fofa_search: form.enable_killsweep_fofa_search,
@@ -256,6 +259,9 @@ async function save() {
 
       <label>SRC 规则
         <textarea v-model="form.src_rules" rows="3"></textarea>
+      </label>
+      <label>CAS SSO 统一认证凭证（任务级，可留空）
+        <textarea v-model="form.cas_sso_config" rows="4" placeholder="填写后，本任务每个 Worker 在测试前都会收到这些凭证，可用于需要登录的目标。&#10;例：&#10;登录入口：https://cas.xxx.edu.cn/cas/login&#10;账号：2023xxxx&#10;密码：xxxxxx&#10;或 Cookie/Token：CASTGC=TGT-xxxx"></textarea>
       </label>
 
       <footer>

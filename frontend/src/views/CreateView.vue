@@ -15,6 +15,7 @@ const form = reactive({
   intent_mode: "",
   manual_targets: "",
   src_rules: "",
+  cas_sso_config: "",
   base_url: "", api_key: "", model: "", prompt_version: "legacy",
   fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3,
   enable_worker_fofa_lookup: true, enable_killsweep_fofa_search: true,
@@ -53,6 +54,7 @@ async function submit() {
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
     src_rules: form.src_rules,
+    cas_sso_config: form.cas_sso_config,
     concurrency: parseInt(form.concurrency) || 3,
     enable_worker_fofa_lookup: form.enable_worker_fofa_lookup,
     enable_killsweep_fofa_search: form.enable_killsweep_fofa_search,
@@ -163,6 +165,9 @@ onMounted(async () => {
       </details>
       <label>SRC 规则（审核用，可留空，审核 agent 已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'edusrc' }}标准）
         <textarea v-model="form.src_rules" rows="3"></textarea>
+      </label>
+      <label>CAS SSO 统一认证凭证（任务级，可留空）
+        <textarea v-model="form.cas_sso_config" rows="4" placeholder="填写后，本任务每个 Worker 在测试前都会收到这些凭证，可用于需要登录的目标。&#10;例：&#10;登录入口：https://cas.xxx.edu.cn/cas/login&#10;账号：2023xxxx&#10;密码：xxxxxx&#10;或 Cookie/Token：CASTGC=TGT-xxxx"></textarea>
       </label>
       <button type="submit" class="primary">创建任务</button>
     </form>

@@ -174,6 +174,21 @@ class Worker:
         lines.append("纪律：登录成功/CASTGC/session/个人中心本身不算洞；必须继续实证死规矩敏感数据、越权、敏感写操作、注入/上传 getshell 或具体业务系统危害。没实锤就写 deepen_lead；试 2-3 个高价值凭证失败就换攻击面；严禁改密。")
         return "\n".join(lines) + "\n\n"
 
+    def _cas_sso_block(self) -> str:
+        """任务级 CAS SSO 统一认证凭证：用户在任务配置中填写的全任务共享登录账号。"""
+        cfg = (self.target_meta or {}).get("cas_sso_config") or ""
+        if not cfg.strip():
+            return ""
+        lines = [
+            "# CAS SSO 统一认证凭证（任务级，适用本任务所有目标）",
+            "以下是用户授权你使用的统一身份认证账号，可在需要登录的目标上尝试。",
+            "先用 session_set 登记凭证，再登录后深挖；登录成功/CASTGC/session 本身不算洞，必须继续实证危害。",
+            "严禁修改任何账号密码。如果该凭证在当前目标上无法登录（认证失败/过期），跳过即可继续测无需认证的攻击面。",
+            "",
+            cfg.strip(),
+        ]
+        return "\n".join(lines) + "\n\n"
+
     def _duplicate_block(self) -> str:
         if not self.duplicate_history:
             return ""
@@ -192,11 +207,12 @@ class Worker:
 
     def run(self) -> WorkerResult:
         if self.deepen_context:
-            user_content = self._intel_block() + self._duplicate_block() + self._build_proxy_block() + self._deepen_brief()
+            user_content = self._intel_block() + self._cas_sso_block() + self._duplicate_block() + self._build_proxy_block() + self._deepen_brief()
             self._emit("worker_start", target=self.target, mode="deepen", prompt_version=self.prompt_version)
         else:
             user_content = (
                 self._intel_block()
+                + self._cas_sso_block()
                 + self._duplicate_block()
                 + self._build_proxy_block()
                 + f"目标：{self.target}\n\n"

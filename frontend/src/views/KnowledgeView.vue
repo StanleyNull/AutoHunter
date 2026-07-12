@@ -10,6 +10,10 @@ const docType = ref("all");
 const enabledFilter = ref("all");
 const searchDraft = ref("");
 const searchText = ref("");
+const total = ref(0);
+const page = ref(0);
+const pageSize = 100;
+const hasMore = ref(false);
 let searchTimer = null;
 const writable = computed(() => canWrite());
 
@@ -66,7 +70,12 @@ async function loadList() {
   if (!rows.value.length) initialLoading.value = true;
   else refreshing.value = true;
   try {
-    rows.value = await api.knowledgeList(docType.value, enabledFilter.value, searchText.value, 500);
+    const res = await api.knowledgeList(docType.value, enabledFilter.value, searchText.value, pageSize, {
+      offset: page.value * pageSize,
+    });
+    rows.value = Array.isArray(res) ? res : (res.items || []);
+    total.value = Array.isArray(res) ? rows.value.length : (res.total || 0);
+    hasMore.value = !Array.isArray(res) && !!res.has_more;
   } catch {
     rows.value = [];
   } finally {
@@ -81,9 +90,22 @@ async function loadTags() {
 }
 
 async function reload() {
+  page.value = 0;
   await Promise.all([loadStats(), loadList(), loadTags()]);
   // 如果有正在处理的文档，启动轮询
   schedulePoll();
+}
+
+function nextPage() {
+  if (!hasMore.value || refreshing.value) return;
+  page.value += 1;
+  loadList();
+}
+
+function prevPage() {
+  if (page.value <= 0 || refreshing.value) return;
+  page.value -= 1;
+  loadList();
 }
 
 function schedulePoll() {
@@ -102,7 +124,7 @@ onUnmounted(() => clearTimeout(pollTimer));
 watch([docType, enabledFilter], reload);
 watch(searchDraft, (v) => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { searchText.value = v.trim(); loadList(); }, 350);
+  searchTimer = setTimeout(() => { searchText.value = v.trim(); page.value = 0; loadList(); }, 350);
 });
 
 function openCreate() {
@@ -408,6 +430,12 @@ async function viewDetail(doc) {
           </div>
         </div>
       </div>
+    </div>
+
+    <div v-if="!initialLoading && total > pageSize" class="hard-pager">
+      <button type="button" @click="prevPage" :disabled="page <= 0 || refreshing">上一页</button>
+      <span>第 {{ page + 1 }} 页 · {{ page * pageSize + 1 }}-{{ page * pageSize + rows.length }}{{ hasMore ? '+' : '' }}</span>
+      <button type="button" @click="nextPage" :disabled="!hasMore || refreshing">下一页</button>
     </div>
 
     <!-- 批量上传弹窗 -->

@@ -218,6 +218,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         vuln_types=t.vuln_types or [], target_source=t.target_source,
         engine=t.engine or "", fofa_query="" if observer else t.fofa_query, concurrency=t.concurrency,
         src_rules="" if observer else (t.src_rules or ""),
+        cas_sso_config="" if observer else (t.cas_sso_config or ""),
         manual_targets=[] if observer else (t.manual_targets or []),
         model_config_data=model_config,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
@@ -316,7 +317,7 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         fofa_cfg["base_url"] = eng_cfg["base_url"]
     task = Task(
         name=req.name, src_type=normalize_src_type(req.src_type), vuln_types=req.vuln_types,
-        src_rules=req.src_rules, target_source=req.target_source,
+        src_rules=req.src_rules, cas_sso_config=req.cas_sso_config, target_source=req.target_source,
         engine=engine_name, fofa_query=req.fofa_query, manual_targets=req.manual_targets,
         model_config_json=req.model_config_data.model_dump(exclude_defaults=True),
         fofa_config=fofa_cfg, concurrency=req.concurrency,
@@ -489,6 +490,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         task.vuln_types = [v.strip() for v in req.vuln_types if str(v).strip()]
     if req.src_rules is not None:
         task.src_rules = req.src_rules
+    if req.cas_sso_config is not None:
+        task.cas_sso_config = req.cas_sso_config
     if req.target_source is not None:
         if req.target_source not in {"fofa", "manual", "both", "site"}:
             raise HTTPException(400, "target_source 必须是 fofa/manual/both/site")

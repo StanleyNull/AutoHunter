@@ -18,9 +18,18 @@ const events = ref([]);
 const liveWorkers = ref([]);       // 在跑 worker 活态
 const siteCollab = ref(null);      // 单站协作态势（三阶段路线流水线，仅 site 任务）
 const queue = ref([]);             // 复审队列
+const queueHasMore = ref(false);
+const queueLoading = ref(false);
+const REVIEW_PAGE_SIZE = 50;
 const submitItems = ref([]);       // 待提交
 const killsweepItems = ref([]);    // 通杀列
+const killsweepHasMore = ref(false);
+const killsweepLoading = ref(false);
+const KILLSWEEP_PAGE_SIZE = 50;
 const rejectedItems = ref([]);     // 已驳回
+const rejectedHasMore = ref(false);
+const rejectedLoading = ref(false);
+const REJECTED_PAGE_SIZE = 50;
 const archivedItems = ref([]);     // AI 未采纳归档（ignored/deepen，可救回）
 const expandedKillsweeps = ref(new Set());
 const searchDraft = ref("");
@@ -115,10 +124,28 @@ async function loadTask() {
   const t = await api.getTask(id);
   if (id === props.id && id === loadedTaskId.value) task.value = t;
 }
-async function loadQueue() {
+async function loadQueue(opts = {}) {
   const id = props.id;
-  const rows = await api.reviewQueue(id);
-  if (id === props.id) queue.value = rows.map(withSearchCache);
+  const reset = opts.reset !== false;
+  const offset = reset ? 0 : queue.value.length;
+  queueLoading.value = true;
+  try {
+    const res = await api.reviewQueue(id, undefined, {
+      limit: REVIEW_PAGE_SIZE,
+      offset,
+    });
+    const rows = Array.isArray(res) ? res : (res.items || []);
+    const next = rows.map(withSearchCache);
+    if (id !== props.id) return;
+    queue.value = reset ? next : [...queue.value, ...next];
+    queueHasMore.value = !Array.isArray(res) && !!res.has_more;
+  } finally {
+    queueLoading.value = false;
+  }
+}
+async function loadMoreQueue() {
+  if (queueLoading.value || !queueHasMore.value) return;
+  await loadQueue({ reset: false });
 }
 async function loadSubmit(opts = {}) {
   const id = props.id;
@@ -140,15 +167,51 @@ async function loadSubmit(opts = {}) {
     submitLoading.value = false;
   }
 }
-async function loadKillsweeps() {
+async function loadKillsweeps(opts = {}) {
   const id = props.id;
-  const rows = await api.killsweeps(id);
-  if (id === props.id) killsweepItems.value = rows.map(withSearchCache);
+  const reset = opts.reset !== false;
+  const offset = reset ? 0 : killsweepItems.value.length;
+  killsweepLoading.value = true;
+  try {
+    const res = await api.killsweeps(id, undefined, {
+      limit: KILLSWEEP_PAGE_SIZE,
+      offset,
+    });
+    const rows = Array.isArray(res) ? res : (res.items || []);
+    const next = rows.map(withSearchCache);
+    if (id !== props.id) return;
+    killsweepItems.value = reset ? next : [...killsweepItems.value, ...next];
+    killsweepHasMore.value = !Array.isArray(res) && !!res.has_more;
+  } finally {
+    killsweepLoading.value = false;
+  }
 }
-async function loadRejected() {
+async function loadMoreKillsweeps() {
+  if (killsweepLoading.value || !killsweepHasMore.value) return;
+  await loadKillsweeps({ reset: false });
+}
+async function loadRejected(opts = {}) {
   const id = props.id;
-  const rows = await api.rejectedList(id);
-  if (id === props.id) rejectedItems.value = rows.map(withSearchCache);
+  const reset = opts.reset !== false;
+  const offset = reset ? 0 : rejectedItems.value.length;
+  rejectedLoading.value = true;
+  try {
+    const res = await api.rejectedList(id, undefined, {
+      limit: REJECTED_PAGE_SIZE,
+      offset,
+    });
+    const rows = Array.isArray(res) ? res : (res.items || []);
+    const next = rows.map(withSearchCache);
+    if (id !== props.id) return;
+    rejectedItems.value = reset ? next : [...rejectedItems.value, ...next];
+    rejectedHasMore.value = !Array.isArray(res) && !!res.has_more;
+  } finally {
+    rejectedLoading.value = false;
+  }
+}
+async function loadMoreRejected() {
+  if (rejectedLoading.value || !rejectedHasMore.value) return;
+  await loadRejected({ reset: false });
 }
 async function loadArchived(opts = {}) {
   const id = props.id;
@@ -257,9 +320,12 @@ function resetTaskState(full = true) {
   if (full) {
     task.value = null;
     queue.value = [];
+    queueHasMore.value = false;
     submitItems.value = [];
     killsweepItems.value = [];
+    killsweepHasMore.value = false;
     rejectedItems.value = [];
+    rejectedHasMore.value = false;
     archivedItems.value = [];
     archivedHasMore.value = false;
     submitHasMore.value = false;
@@ -1584,7 +1650,9 @@ function fmtTime(iso) {
 
     <!-- 复审队列 -->
     <div v-show="tab === 'review'" class="list-panel">
-      <div class="list-head"><span>复审队列</span><small>AI 采纳后等待人工裁决</small></div>
+      <div class="list-head"><span>复审队列</span><small>AI 采纳后等待人工裁决</small>
+        <small v-if="queue.length" class="muted">已加载 {{ queue.length }} 条{{ queueHasMore ? "，还有更多" : "" }}</small>
+      </div>
       <div v-if="queue.length" class="submit-toolbar">
         <small class="muted">{{ queue.length }} 条待复审</small>
         <span class="grow"></span>
@@ -1605,6 +1673,9 @@ function fmtTime(iso) {
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
+      <button v-if="queueHasMore" class="load-more" @click="loadMoreQueue" :disabled="queueLoading">
+        {{ queueLoading ? "加载中..." : "加载更多复审漏洞" }}
+      </button>
     </div>
 
     <!-- 待提交 -->
@@ -1636,7 +1707,9 @@ function fmtTime(iso) {
 
     <!-- 通杀列 -->
     <div v-show="tab === 'killsweep'" class="list-panel">
-      <div class="list-head"><span>通杀列</span><small>人工通过后触发，验证 1 个同款站点</small></div>
+      <div class="list-head"><span>通杀列</span><small>人工通过后触发，验证 1 个同款站点</small>
+        <small v-if="killsweepItems.length" class="muted">已加载 {{ killsweepItems.length }} 条{{ killsweepHasMore ? "，还有更多" : "" }}</small>
+      </div>
       <div v-if="!killsweepItems.length" class="empty">还没有通杀候选（人工复审通过后，通杀 Hunter 会自动分析同款系统）</div>
       <div v-else-if="!filteredKillsweeps.length" class="empty">没有匹配当前关键词的通杀记录</div>
       <div v-for="k in filteredKillsweeps" :key="k.id" class="killsweep-card" :class="{ open: isKillsweepOpen(k.id) }">
@@ -1705,11 +1778,16 @@ function fmtTime(iso) {
           </div>
         </div>
       </div>
+      <button v-if="killsweepHasMore" class="load-more" @click="loadMoreKillsweeps" :disabled="killsweepLoading">
+        {{ killsweepLoading ? "加载中..." : "加载更多通杀记录" }}
+      </button>
     </div>
 
     <!-- 已驳回 -->
     <div v-show="tab === 'rejected'" class="list-panel">
-      <div class="list-head"><span>已驳回</span><small>沉淀不收口径，可恢复或继续深挖</small></div>
+      <div class="list-head"><span>已驳回</span><small>沉淀不收口径，可恢复或继续深挖</small>
+        <small v-if="rejectedItems.length" class="muted">已加载 {{ rejectedItems.length }} 条{{ rejectedHasMore ? "，还有更多" : "" }}</small>
+      </div>
       <div v-if="!rejectedItems.length" class="empty">还没有被驳回的漏洞（复审点「不通过」会进这里，可回看与恢复）</div>
       <div v-else-if="!filteredRejected.length" class="empty">没有匹配当前关键词的驳回漏洞</div>
       <div v-for="f in filteredRejected" :key="f.id" class="result-row rejected" @click="openRejected(f.id)">
@@ -1721,6 +1799,9 @@ function fmtTime(iso) {
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
+      <button v-if="rejectedHasMore" class="load-more" @click="loadMoreRejected" :disabled="rejectedLoading">
+        {{ rejectedLoading ? "加载中..." : "加载更多驳回漏洞" }}
+      </button>
     </div>
 
     <!-- AI 未采纳归档：ignored（疑似误杀）/ deepen 未升级，保留可回看纠错，一键救回复审 -->

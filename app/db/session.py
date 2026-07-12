@@ -85,6 +85,7 @@ _MIGRATIONS = [
     ("tasks", "retest_state", "JSON"),
     ("tasks", "enable_worker_fofa_lookup", "BOOLEAN DEFAULT 1"),
     ("tasks", "enable_killsweep_fofa_search", "BOOLEAN DEFAULT 1"),
+    ("tasks", "cas_sso_config", "TEXT DEFAULT ''"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。

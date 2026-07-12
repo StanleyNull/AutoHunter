@@ -237,13 +237,29 @@ async def get_finding(finding_id: str, session: AsyncSession = Depends(get_sessi
 
 @router.get("/tasks/{task_id}/review-queue")
 async def user_review_queue(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                            limit: int = Query(0, ge=0, le=500),
+                            offset: int = Query(0, ge=0),
                             session: AsyncSession = Depends(get_session)):
-    """用户复审队列：AI accepted 且用户尚未处理（pending）的漏洞。"""
+    """用户复审队列：AI accepted 且用户尚未处理（pending）的漏洞。
+    支持分页（limit/offset）：量大时前端一次拉 50 条、滚动加载更多。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.verdict == "accepted", Review.user_status == "pending"
     ).order_by(Review.score.desc())
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
     rows = (await session.execute(q)).all()
     out = [_finding_dict(f, r) for f, r in rows]
+    if search:
+        out = [d for d in out if _matches_query(d, search)]
+        if limit:
+            out = out[offset:offset + limit + 1]
+    if limit:
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
     return [d for d in out if _matches_query(d, search)]
 
 
@@ -280,13 +296,29 @@ async def submit_list(task_id: str, submitted: Optional[bool] = None,
 
 @router.get("/tasks/{task_id}/rejected")
 async def rejected_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                        limit: int = Query(0, ge=0, le=500),
+                        offset: int = Query(0, ge=0),
                         session: AsyncSession = Depends(get_session)):
-    """已驳回列表：用户复审判 rejected 的漏洞（可回看 / 恢复到复审队列）。"""
+    """已驳回列表：用户复审判 rejected 的漏洞（可回看 / 恢复到复审队列）。
+    支持分页（limit/offset）：量大时前端一次拉 50 条、滚动加载更多。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.user_status == "rejected"
     ).order_by(Review.user_reviewed_at.desc().nullslast(), Review.score.desc())
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
     rows = (await session.execute(q)).all()
     out = [_finding_dict(f, r) for f, r in rows]
+    if search:
+        out = [d for d in out if _matches_query(d, search)]
+        if limit:
+            out = out[offset:offset + limit + 1]
+    if limit:
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
     return [d for d in out if _matches_query(d, search)]
 
 
@@ -365,10 +397,13 @@ async def restore_archived(finding_id: str, session: AsyncSession = Depends(get_
 @router.get("/tasks/{task_id}/killsweeps")
 async def killsweep_list(task_id: str, only_hits: bool = True,
                          search: Optional[str] = Query(None, alias="q"),
+                         limit: int = Query(0, ge=0, le=500),
+                         offset: int = Query(0, ge=0),
                          session: AsyncSession = Depends(get_session)):
     """通杀列：人工复审通过后由通杀 Hunter 产出的可通杀候选。
 
     默认只返回 is_killsweep=true 的命中项，避免把不可通杀分析噪音摆到主列表里。
+    支持分页（limit/offset）：量大时前端一次拉 50 条、滚动加载更多。
     """
     q = (
         select(Killsweep, Finding.title)
@@ -378,6 +413,8 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
     if only_hits:
         q = q.where(Killsweep.is_killsweep == True)  # noqa: E712
     q = q.order_by(Killsweep.verified.desc(), Killsweep.asset_count.desc(), Killsweep.created_at.desc())
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
     rows = (await session.execute(q)).all()
     out = []
     for k, origin_title in rows:
@@ -404,6 +441,15 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
         }
         if _matches_query(item, search):
             out.append(item)
+    if search and limit:
+        out = out[offset:offset + limit + 1]
+    if limit:
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
     return out
 
 

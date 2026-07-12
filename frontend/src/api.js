@@ -238,13 +238,13 @@ export const api = {
   batchPause: () => req("POST", "/api/tasks/batch/pause"),
   batchStart: () => req("POST", "/api/tasks/batch/start"),
   results: (id, conf, q) => req("GET", `/api/tasks/${id}/results${qs({ confidence: conf, q })}`),
-  reviewQueue: (id, q) => req("GET", `/api/tasks/${id}/review-queue${qs({ q })}`),
+  reviewQueue: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/review-queue${qs({ q, ...opts })}`),
   submitList: (id, submitted, q, opts = {}) =>
     req("GET", `/api/tasks/${id}/submit-list${qs({ submitted, q, ...opts })}`),
-  rejectedList: (id, q) => req("GET", `/api/tasks/${id}/rejected${qs({ q })}`),
+  rejectedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/rejected${qs({ q, ...opts })}`),
   archivedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/archived${qs({ q, ...opts })}`),
   restoreArchived: (id) => req("POST", `/api/results/${id}/restore`),
-  killsweeps: (id, q) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q })}`),
+  killsweeps: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q, ...opts })}`),
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),
   finding: (id) => req("GET", `/api/findings/${id}`),
@@ -262,16 +262,16 @@ export const api = {
   testEngine: (engineName) => req("POST", `/api/settings/test/engine/${engineName}`),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
-  intelList: (kind, confidence, q, limit) =>
-    req("GET", `/api/intel${qs({ kind, confidence, q, limit })}`),
+  intelList: (kind, confidence, q, limit, opts = {}) =>
+    req("GET", `/api/intel${qs({ kind, confidence, q, limit, ...opts })}`),
   previewIntelCurate: (limit) => req("GET", `/api/intel/curate${qs({ limit })}`),
   applyIntelCurate: (limit) => req("POST", `/api/intel/curate${qs({ limit })}`),
   deleteIntel: (id) => req("DELETE", `/api/intel/${id}`),
   clearIntel: (kind) => req("DELETE", `/api/intel${qs({ kind })}`),
   // 人工知识库
   knowledgeStats: () => req("GET", "/api/knowledge/stats"),
-  knowledgeList: (doc_type, enabled, q, limit) =>
-    req("GET", `/api/knowledge${qs({ doc_type, enabled, q, limit })}`),
+  knowledgeList: (doc_type, enabled, q, limit, opts = {}) =>
+    req("GET", `/api/knowledge${qs({ doc_type, enabled, q, limit, ...opts })}`),
   knowledgeGet: (id) => req("GET", `/api/knowledge/${id}`),
   knowledgeCreate: (data) => req("POST", "/api/knowledge", data),
   knowledgeBatchCreate: (docs) => req("POST", "/api/knowledge/batch", { docs }),

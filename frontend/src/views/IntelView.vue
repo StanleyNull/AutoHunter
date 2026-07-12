@@ -13,6 +13,10 @@ const searchText = ref("");
 const curator = ref(null);
 const curatorLoading = ref(false);
 const curatorApplying = ref(false);
+const total = ref(0);
+const page = ref(0);
+const pageSize = 100;
+const hasMore = ref(false);
 let searchTimer = null;
 const writable = computed(() => canWrite());
 
@@ -39,7 +43,12 @@ async function loadList() {
   if (!rows.value.length) initialLoading.value = true;
   else refreshing.value = true;
   try {
-    rows.value = await api.intelList(kind.value, confidence.value, searchText.value, 800);
+    const res = await api.intelList(kind.value, confidence.value, searchText.value, pageSize, {
+      offset: page.value * pageSize,
+    });
+    rows.value = Array.isArray(res) ? res : (res.items || []);
+    total.value = Array.isArray(res) ? rows.value.length : (res.total || 0);
+    hasMore.value = !Array.isArray(res) && !!res.has_more;
   } finally {
     initialLoading.value = false;
     refreshing.value = false;
@@ -47,7 +56,20 @@ async function loadList() {
 }
 
 async function reload() {
+  page.value = 0;
   await Promise.all([loadStats(), loadList(), previewCurator()]);
+}
+
+function nextPage() {
+  if (!hasMore.value || refreshing.value) return;
+  page.value += 1;
+  loadList();
+}
+
+function prevPage() {
+  if (page.value <= 0 || refreshing.value) return;
+  page.value -= 1;
+  loadList();
 }
 
 function fmtTime(iso) {
@@ -119,6 +141,7 @@ watch(searchDraft, (v) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     searchText.value = v.trim();
+    page.value = 0;
     loadList();
   }, 180);
 });
@@ -222,6 +245,11 @@ onMounted(reload);
         </div>
         <button v-if="writable" class="ir-del" type="button" title="删除" @click="removeOne(row)">✕</button>
       </article>
+    </div>
+    <div v-if="!initialLoading && total > pageSize" class="hard-pager">
+      <button type="button" @click="prevPage" :disabled="page <= 0 || refreshing">上一页</button>
+      <span>第 {{ page + 1 }} 页 · {{ page * pageSize + 1 }}-{{ page * pageSize + rows.length }}{{ hasMore ? '+' : '' }}</span>
+      <button type="button" @click="nextPage" :disabled="!hasMore || refreshing">下一页</button>
     </div>
   </section>
 </template>

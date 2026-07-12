@@ -61,10 +61,12 @@ async def list_intel(
     kind: str = Query("all"),
     confidence: str = Query("all", pattern="^(all|verified|likely)$"),
     q: str | None = Query(None),
-    limit: int = Query(500, ge=1, le=5000),
+    limit: int = Query(0, ge=0, le=5000),
+    offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_session),
 ):
-    """情报列表：按类别/可信度筛选 + 关键词搜索（match_key/summary/source_host/payload）。"""
+    """情报列表：按类别/可信度筛选 + 关键词搜索（match_key/summary/source_host/payload）。
+    支持分页（limit/offset）：limit=0 返回全量列表（向后兼容），limit>0 返回 {items, has_more}。"""
     stmt = select(Intel)
     if kind in _KINDS:
         stmt = stmt.where(Intel.kind == kind)
@@ -72,12 +74,23 @@ async def list_intel(
         stmt = stmt.where(Intel.confidence == confidence)
     stmt = stmt.order_by(
         Intel.confidence.desc(), Intel.hit_count.desc(), Intel.last_seen.desc()
-    ).limit(limit)
+    )
+    needle = (q or "").strip().lower()
+    if not needle and limit:
+        # 无搜索关键词：DB 层分页，多取 1 条判断 has_more
+        stmt = stmt.offset(offset).limit(limit + 1)
+        rows = (await session.execute(stmt)).scalars().all()
+        out = [_intel_to_dict(it) for it in rows]
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
+    # 有搜索关键词或无分页：全量加载后内存过滤（安全上限 5000）
+    stmt = stmt.limit(5000)
     rows = (await session.execute(stmt)).scalars().all()
     out = [_intel_to_dict(it) for it in rows]
-    # 关键词在内存过滤（覆盖 match_key/summary/source_host/payload 全字段；
-    # SQLite JSON 列检索能力有限，统一在内存做更可靠，数据量小性能无忧）。
-    needle = (q or "").strip().lower()
     if needle:
         out = [
             d for d in out
@@ -86,6 +99,14 @@ async def list_intel(
                 or needle in (d["source_host"] or "").lower()
                 or needle in str(d["payload"]).lower())
         ]
+    if limit:
+        page = out[offset:offset + limit]
+        return {
+            "items": page,
+            "has_more": offset + limit < len(out),
+            "limit": limit,
+            "offset": offset,
+        }
     return out
 
 

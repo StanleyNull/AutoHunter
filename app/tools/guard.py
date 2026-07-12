@@ -26,7 +26,21 @@ _SELF_DESTRUCT_PATTERNS = [
     # 篡改系统认证/配置
     r">\s*/etc/(passwd|shadow|sudoers|hosts)\b",
     r"\bchmod\s+-R\s+000\s+/\b",
+    # pip install 安装会破坏运行时的危险包（pyppeteer/selenium/undetected-chromedriver
+    # 依赖无约束的旧版 websockets，会将其降级到 <13，导致 uvicorn 崩溃）
+    r"\bpip3?\s+install\b.*\b(pyppeteer|selenium|undetected[_-]chromedriver)\b",
+    r"\bpython3?\s+-m\s+pip\s+install\b.*\b(pyppeteer|selenium|undetected[_-]chromedriver)\b",
+    # 直接修改/卸载运行时核心包（websockets/uvicorn/fastapi 等）
+    r"\bpip3?\s+(install|uninstall)\b.*\b(websockets|uvicorn|fastapi|sqlalchemy|aiosqlite|greenlet)\b",
+    r"\bpython3?\s+-m\s+pip\s+(install|uninstall)\b.*\b(websockets|uvicorn|fastapi|sqlalchemy|aiosqlite|greenlet)\b",
 ]
+
+# 拦截 pip install 危险包时的指导信息
+_DANGEROUS_PIP_MSG = (
+    "禁止在容器内 pip install pyppeteer/selenium/undetected-chromedriver 等包："
+    "它们会无约束拉旧版 websockets，导致 uvicorn 启动崩溃（ServerProtocol 导入失败）。"
+    "如需浏览器自动化，请将 playwright 加入 requirements.txt 并重新构建镜像。"
+)
 
 _COMPILED = [re.compile(p, re.IGNORECASE) for p in _SELF_DESTRUCT_PATTERNS]
 
@@ -65,8 +79,13 @@ def check_command(cmd: str, enterprise: bool = False) -> None:
     enterprise=True 时额外拦截对企业生产环境的破坏性/不可逆操作。"""
     for pat in _COMPILED:
         if pat.search(cmd):
+            hint = ""
+            if "pip" in cmd.lower() and "install" in cmd.lower():
+                hint = f"\n指导：{_DANGEROUS_PIP_MSG}"
+            elif "pip" in cmd.lower() and "uninstall" in cmd.lower():
+                hint = "\n指导：禁止卸载运行时核心包，会破坏容器环境。"
             raise CommandBlocked(
-                f"命令被安全防护拦截（疑似自毁运行环境，非攻击限制）：匹配模式 {pat.pattern}"
+                f"命令被安全防护拦截（疑似自毁运行环境，非攻击限制）：匹配模式 {pat.pattern}{hint}"
             )
     if enterprise:
         for pat, msg in _ENTERPRISE_COMPILED:

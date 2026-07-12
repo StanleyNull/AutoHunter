@@ -52,6 +52,7 @@ class Task(Base):
     src_type: Mapped[str] = mapped_column(String(20), default="edusrc")
     vuln_types: Mapped[list] = mapped_column(JSON, default=list)        # 选定漏洞类型
     src_rules: Mapped[str] = mapped_column(Text, default="")            # SRC 规则全文（审核用）
+    cas_sso_config: Mapped[str] = mapped_column(Text, default="")        # CAS SSO 统一认证凭证（任务级，每个 worker 都会收到）
     target_source: Mapped[str] = mapped_column(String(20), default="fofa")  # fofa / manual / both / site
     fofa_query: Mapped[str] = mapped_column(Text, default="")
     manual_targets: Mapped[list] = mapped_column(JSON, default=list)

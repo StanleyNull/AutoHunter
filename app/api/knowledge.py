@@ -121,9 +121,12 @@ async def list_docs(
     doc_type: str = Query("all", pattern="^(all|pre_vuln|post_vuln)$"),
     enabled: str = Query("all", pattern="^(all|enabled|disabled)$"),
     q: str | None = Query(None),
-    limit: int = Query(200, ge=1, le=2000),
+    limit: int = Query(0, ge=0, le=2000),
+    offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_session),
 ):
+    """知识库列表：按类型/状态筛选 + 关键词搜索。
+    支持分页（limit/offset）：limit=0 返回全量列表（向后兼容），limit>0 返回 {items, has_more}。"""
     stmt = select(KnowledgeDoc)
     if doc_type in ("pre_vuln", "post_vuln"):
         stmt = stmt.where(KnowledgeDoc.doc_type == doc_type)
@@ -131,10 +134,23 @@ async def list_docs(
         stmt = stmt.where(KnowledgeDoc.enabled == True)  # noqa: E712
     elif enabled == "disabled":
         stmt = stmt.where(KnowledgeDoc.enabled == False)  # noqa: E712
-    stmt = stmt.order_by(KnowledgeDoc.created_at.desc()).limit(limit)
+    stmt = stmt.order_by(KnowledgeDoc.created_at.desc())
+    needle = (q or "").strip().lower()
+    if not needle and limit:
+        # 无搜索关键词：DB 层分页
+        stmt = stmt.offset(offset).limit(limit + 1)
+        rows = (await session.execute(stmt)).scalars().all()
+        out = [_doc_to_dict_brief(d) for d in rows]
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
+    # 有搜索关键词或无分页：全量加载后内存过滤（安全上限 2000）
+    stmt = stmt.limit(2000)
     rows = (await session.execute(stmt)).scalars().all()
     out = [_doc_to_dict_brief(d) for d in rows]
-    needle = (q or "").strip().lower()
     if needle:
         out = [
             d for d in out
@@ -142,6 +158,14 @@ async def list_docs(
             or needle in (d["summary"] or "").lower()
             or needle in " ".join(d.get("tags") or []).lower()
         ]
+    if limit:
+        page = out[offset:offset + limit]
+        return {
+            "items": page,
+            "has_more": offset + limit < len(out),
+            "limit": limit,
+            "offset": offset,
+        }
     return out
 
 

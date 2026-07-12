@@ -32,6 +32,7 @@ class CreateTaskRequest(BaseModel):
     src_type: str = "edusrc"
     vuln_types: list[str] = Field(default_factory=list)
     src_rules: str = ""
+    cas_sso_config: str = ""
     target_source: str = "fofa"
     engine: str = ""                                           # 搜索引擎：fofa/quake/hunter/...
     fofa_query: str = ""
@@ -69,6 +70,7 @@ class UpdateTaskRequest(BaseModel):
     src_type: Optional[str] = None
     vuln_types: Optional[list[str]] = None
     src_rules: Optional[str] = None
+    cas_sso_config: Optional[str] = None
     target_source: Optional[str] = None
     engine: Optional[str] = None                                 # 切换引擎
     fofa_query: Optional[str] = None
@@ -111,6 +113,7 @@ class TaskResponse(BaseModel):
     fofa_query: str
     concurrency: int
     src_rules: str = ""
+    cas_sso_config: str = ""
     manual_targets: list[str] = Field(default_factory=list)
     model_config_data: dict = Field(default_factory=dict)
     fofa_config: dict = Field(default_factory=dict)
