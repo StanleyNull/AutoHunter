@@ -510,10 +510,26 @@ class TaskRunner:
     async def _tick(self) -> None:
         async with SessionLocal() as session:
             task = await session.get(Task, self.task_id)
-            if not task or task.status in ("paused", "stopped"):
-                if task and task.retest_state:
+            if not task:
+                return
+            if task.status == "stopped":
+                # 停止：清除重测状态（完全重置）
+                if task.retest_state:
                     task.retest_state = None
                     await session.commit()
+                return
+            if task.status == "paused":
+                # 暂停：保留 retest_state，恢复后从断点继续休眠/重测
+                # 仅重置 testing → idle（worker 已被 pause 取消，恢复后重新取目标）
+                if task.retest_state and task.retest_state.get("current_step") == "testing":
+                    task.retest_state["current_step"] = "idle"
+                    task.retest_state["current_id"] = None
+                    await self._retest_save(session, task)
+                    await self._log(
+                        session, "orchestrator", "retest_paused",
+                        "任务暂停，重测进度已保留（恢复后从断点继续）",
+                        level="info",
+                    )
                 return
             self._is_enterprise = is_enterprise_src(task.src_type)
 
@@ -741,6 +757,13 @@ class TaskRunner:
                 return 1
 
             # Phase 1 / noproxy_round: 需要探活
+            # 暂停恢复后，目标可能已被正常调度处理（状态不再是 dead），跳过
+            tgt = await session.get(Target, current_id)
+            if not tgt or tgt.status != "dead":
+                state["remaining_ids"].remove(current_id)
+                state["current_id"] = None
+                await self._retest_save(session, task)
+                return 1
             state["current_step"] = "probing"
             await self._retest_save(session, task)
             return 1
