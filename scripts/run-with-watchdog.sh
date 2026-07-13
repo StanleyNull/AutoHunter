@@ -55,15 +55,16 @@ dump_native_diagnostics() {
 }
 
 # ============================================================================
-#  启动前安全检查：websockets 版本必须在 >=13.0 且 <15.0
-#  pyppeteer/selenium/undetected-chromedriver 等包会降级 websockets 到 <13，
+#  启动前安全检查：websockets 主版本必须 >=13。
+#  pyppeteer/selenium/undetected-chromedriver 等包会把 websockets 降级到 <13，
 #  导致 uvicorn 报 ImportError: cannot import name 'ServerProtocol'。
-#  此检查是最后一道防线，即使 guard 未拦截也能在启动前自动修复。
+#  只在被降级到 <13 时才自动修复；高版本（>=15）uvicorn 通常向后兼容，
+#  不强制降级（避免在受限网络里 pip 反复失败拖慢启动）。
 # ============================================================================
 WS_MAJOR=$(python3 -c "import websockets; print(websockets.__version__.split('.')[0])" 2>/dev/null || echo "0")
-if [ "$WS_MAJOR" -lt 13 ] 2>/dev/null || [ "$WS_MAJOR" -ge 15 ] 2>/dev/null; then
-  echo "[watchdog] websockets major=$WS_MAJOR is out of safe range [13,15), auto-repairing..." >&2
-  pip3 install --quiet 'websockets>=13.0,<15' 2>&1 || pip install --quiet 'websockets>=13.0,<15' 2>&1 || true
+if [ "$WS_MAJOR" -lt 13 ] 2>/dev/null; then
+  echo "[watchdog] websockets major=$WS_MAJOR < 13, auto-repairing..." >&2
+  pip3 install --quiet 'websockets>=13.0' 2>&1 || pip install --quiet 'websockets>=13.0' 2>&1 || true
   WS_MAJOR=$(python3 -c "import websockets; print(websockets.__version__.split('.')[0])" 2>/dev/null || echo "0")
   echo "[watchdog] websockets repaired, new major=$WS_MAJOR" >&2
 fi
