@@ -143,6 +143,23 @@ FOCUSED_ROUTE = SiteRoute(
 )
 
 
+# 开启「跳过入口盘点」时被跳过的侦察路线（只跳 site_map；site_js 前端密钥价值高，保留）。
+SKIPPABLE_RECON_SOURCES = ("site_map",)
+
+
+def skip_recon_enabled(task) -> bool:
+    """任务是否开启了「跳过入口盘点侦察」（fofa_config.skip_site_recon）。"""
+    cfg = getattr(task, "fofa_config", None) or {}
+    return bool(cfg.get("skip_site_recon"))
+
+
+def initial_routes_for(task) -> tuple[SiteRoute, ...]:
+    """按任务配置返回开局入队的路线：开启跳过侦察时剔除 site_map。"""
+    if skip_recon_enabled(task):
+        return tuple(r for r in INITIAL_ROUTES if r.source not in SKIPPABLE_RECON_SOURCES)
+    return INITIAL_ROUTES
+
+
 def is_site_source(source: str | None) -> bool:
     return (source or "").startswith("site_")
 
@@ -204,6 +221,7 @@ def render_context(
     site_info: str = "",
     coverage_block: str = "",
     focus_note: str = "",
+    skip_recon: bool = False,
 ) -> str:
     lines = [
         "# 单站协作分工",
@@ -220,11 +238,22 @@ def render_context(
             "打穿就 submit_finding；差一步（有据点但缺 ID/凭据/回显）就写 deepen_lead，"
             "系统会自动接力深挖、出洞后还会自动扩大危害；确认无洞也要说清测了哪些入口、为何不通。"
             "不要首页加几个常见路径扫一遍就 finish。",
-            "- 复用侦察：site_map/site_js 侦察路线与你并发在跑，成果会陆续上报。"
-            "下方【若已有覆盖摘要】就优先在这些已知入口上做本路线的定向验证，别从零重复侦察；"
-            "【若暂无覆盖摘要】说明侦察还在跑，你直接按本路线 focus 自己快速摸一遍相关入口就开打，"
-            "不要空等侦察——先扒首页/JS 找本路线相关接口（如认证路线找登录/越权接口），边测边深挖。",
         ]
+        if skip_recon:
+            # 用户关闭了「入口盘点(site_map)」侦察：多为已给登录凭据、目标明确的场景，
+            # 不再苦等/复用全站入口地图，直接按本路线 focus 快速定位入口开打（省 token）。
+            lines += [
+                "- 侦察说明：本次已关闭「入口盘点」泛侦察（通常因为你已拿到登录凭据或目标明确）。"
+                "site_js 前端资源侦察仍在并发跑、成果会陆续上报；除此之外别再从零泛扒全站，"
+                "直接按本路线 focus 定位相关入口（如认证路线直奔登录/越权接口）就开打，边测边深挖。",
+            ]
+        else:
+            lines += [
+                "- 复用侦察：site_map/site_js 侦察路线与你并发在跑，成果会陆续上报。"
+                "下方【若已有覆盖摘要】就优先在这些已知入口上做本路线的定向验证，别从零重复侦察；"
+                "【若暂无覆盖摘要】说明侦察还在跑，你直接按本路线 focus 自己快速摸一遍相关入口就开打，"
+                "不要空等侦察——先扒首页/JS 找本路线相关接口（如认证路线找登录/越权接口），边测边深挖。",
+            ]
     if site_info.strip():
         lines += ["", "# 用户提供的目标相关信息", site_info.strip()[:2000]]
         if detect_user_credentials(site_info):

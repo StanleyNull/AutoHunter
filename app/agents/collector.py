@@ -374,7 +374,8 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
         # 认证越权路线」被侦察串行硬拖到几十分钟。改回并发：侦察 worker 产出的
         # coverage 仍会通过 _build_coverage_context 喂给后启动的主题 worker，
         # 成果照样复用、又不牺牲开局速度。priority 高的侦察路线天然先抢并发。
-        for route in site_collab.INITIAL_ROUTES:
+        # 若任务开启「跳过入口盘点」(有登录凭据/目标明确) → 剔除 site_map 侦察路线省 token。
+        for route in site_collab.initial_routes_for(task):
             if route.source in existing_sources:
                 continue
             session.add(Target(

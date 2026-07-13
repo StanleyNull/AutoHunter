@@ -1519,6 +1519,7 @@ class TaskRunner:
                             site_info=(task_obj.fofa_query if task_obj else ""),
                             coverage_block=coverage_block,
                             focus_note=tgt.priority_reason or "",
+                            skip_recon=site_collab.skip_recon_enabled(task_obj) if task_obj else False,
                         )
                         self._live[target_id]["mode"] = "site"
                         self._live[target_id]["playbook"] = route.label

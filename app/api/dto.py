@@ -19,6 +19,7 @@ class FofaConfigDTO(BaseModel):
     max_pages: int = 20
     page_size: int = 100
     intent_mode: str = ""
+    skip_site_recon: bool = False   # 单站协作：跳过入口盘点(site_map)侦察，省 token
 
 
 class EngineConfigDTO(BaseModel):
@@ -55,6 +56,7 @@ class PartialFofaConfigDTO(BaseModel):
     max_pages: Optional[int] = None
     page_size: Optional[int] = None
     intent_mode: Optional[str] = None
+    skip_site_recon: Optional[bool] = None
 
 
 class PartialEngineConfigDTO(BaseModel):

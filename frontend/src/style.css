@@ -759,6 +759,17 @@ main {
 }
 .form details summary { cursor: pointer; color: var(--ink); font-weight: 500; }
 .form details label { margin-top: 12px; }
+.form label.check-line {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 500; color: var(--ink); cursor: pointer;
+}
+.form label.check-line input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
+.form .field-hint {
+  margin: -4px 0 4px; font-size: 12px; line-height: 1.6;
+  color: var(--muted); background: var(--surface-2);
+  border-radius: 8px; padding: 8px 10px;
+}
+.form .field-hint strong { color: var(--ink); }
 
 /* ---------- 全局硬骨头库 ---------- */
 .hard-toolbar {

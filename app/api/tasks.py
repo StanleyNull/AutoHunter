@@ -138,6 +138,7 @@ def _public_fofa_config(task: Task) -> dict:
         "page_size": eff["page_size"],
         "intent_mode": eff["intent_mode"],
         "key_set": bool(eff["key"]),
+        "skip_site_recon": bool(cfg.get("skip_site_recon")),
         "current_query": cfg.get("current_query", ""),
         "cursor": cfg.get("cursor", 0),
         "collector_phase": cfg.get("collector_phase", ""),

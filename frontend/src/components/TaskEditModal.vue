@@ -55,6 +55,7 @@ const form = reactive({
   max_pages: 20,
   page_size: 100,
   concurrency: 3,
+  skip_site_recon: false,
 });
 const original = reactive({
   base_url: "",
@@ -88,6 +89,7 @@ function fill(task) {
   form.fofa_base_url = fofaCfg.base_url || "";
   form.max_pages = fofaCfg.max_pages ?? 20;
   form.page_size = fofaCfg.page_size ?? 100;
+  form.skip_site_recon = !!fofaCfg.skip_site_recon;
   form.concurrency = task.concurrency || 3;
   original.base_url = form.base_url;
   original.model = form.model;
@@ -125,6 +127,8 @@ async function save() {
   if (form.intent_mode !== original.intent_mode) fofaConfig.intent_mode = form.intent_mode;
   if (form.fofa_key.trim()) fofaConfig.key = form.fofa_key.trim();
   if (form.fofa_base_url !== original.fofa_base_url) fofaConfig.base_url = form.fofa_base_url;
+  // 单站模式：总是显式带上开关值，支持从 true 改回 false。
+  if (isSiteMode.value) fofaConfig.skip_site_recon = !!form.skip_site_recon;
 
   const updated = await api.updateTask(props.task.id, {
     name: form.name,
@@ -199,6 +203,14 @@ async function save() {
       <label>{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
         <textarea v-model="form.manual_targets" rows="3"></textarea>
       </label>
+      <label v-if="isSiteMode" class="check-line">
+        <input type="checkbox" v-model="form.skip_site_recon" />
+        跳过入口盘点侦察（省 token）
+      </label>
+      <p v-if="isSiteMode" class="field-hint">
+        跳过泛扒首页/API 文档的「入口盘点」路线。已给登录凭据时推荐开启：Agent 直接登录进系统挖，
+        不浪费 token 泛侦察（前端 JS/密钥侦察仍保留）。
+      </p>
 
       <details open>
         <summary>高级：模型 / FOFA</summary>
