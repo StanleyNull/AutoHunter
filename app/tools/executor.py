@@ -289,17 +289,28 @@ class ToolExecutor:
 
         req: httpx.Request | None = None
         try:
+            # 用持久 cookie jar 的 Client：跟随重定向时 httpx 会自动把每一跳 Set-Cookie
+            # 存进 jar 并在后续跳转/同域请求里带上——这是走通 CAS/SSO 这类
+            # 「302 连环跳 + 每跳发新 Cookie（lt→CASTGC→ST ticket→JSESSIONID）」登录链的关键。
+            # 之前每次新建无 jar 的 Client + 只读最终 resp.cookies，会丢掉中间跳的 CASTGC/跨域
+            # JSESSIONID，导致「明明账号对却始终登不进、没法进系统深挖」。
             with httpx.Client(verify=False, follow_redirects=follow_redirects, timeout=timeout) as client:
+                # 先把已维持的 session cookie 灌进 client jar，重定向跳转时自动携带。
+                for _ck, _cv in self._session_cookies.items():
+                    try:
+                        client.cookies.set(_ck, _cv)
+                    except Exception:
+                        pass
                 req = client.build_request(
                     method.upper(), url, headers=merged_headers, content=data, json=json_body
                 )
                 resp = client.send(req, stream=True)
                 body, truncated = self._read_limited_response(resp)
+                # 吸收整条重定向链（resp.history 里每个中间 302 + 最终响应）的 Set-Cookie，
+                # 而不是只读最终 resp.cookies；再兜底吸收 client.cookies jar 里的全部。
+                session_updated = self._absorb_redirect_chain(resp, client)
         except Exception as e:
             return {"ok": False, "error": f"HTTP 请求异常: {e}", "url": url}
-
-        # 自动吸收响应 Set-Cookie，后续请求自动续上登录态（全模式）。
-        session_updated = self._absorb_set_cookie(resp)
 
         # 原始请求行（取证/格式参考）。响应报文不再单独回传：状态码 + response_headers +
         # body 已结构化提供，raw_response 会与它们 100% 重复，是当轮就纯冗余的双份大文本。
@@ -316,6 +327,16 @@ class ToolExecutor:
             "body_truncated": truncated,
             "raw_request": _truncate(raw_req, 1536),
         }
+        # 跟随重定向时给出跳转链摘要，方便 agent 看清 CAS/SSO 登录流程走到哪、最终落在哪。
+        try:
+            hist = list(getattr(resp, "history", []) or [])
+            if hist:
+                chain = [f"{h.status_code} {h.request.method} {str(h.url)}" for h in hist]
+                chain.append(f"{resp.status_code} {resp.request.method} {str(resp.url)}")
+                result["redirect_chain"] = chain[:12]
+                result["final_url"] = str(resp.url)
+        except Exception:
+            pass
         if session_applied:
             result["session_applied"] = session_applied
         if session_updated:
@@ -350,20 +371,52 @@ class ToolExecutor:
         except Exception:
             return (dict(headers) if headers else {}), []
 
+    def _put_cookie(self, name: str, value: str, updated: list[str]) -> None:
+        if name in self._session_cookies:
+            self._session_cookies[name] = value
+            if name not in updated:
+                updated.append(name)
+        elif len(self._session_cookies) < _SESSION_MAX_COOKIES:
+            self._session_cookies[name] = value
+            if name not in updated:
+                updated.append(name)
+
     def _absorb_set_cookie(self, resp: httpx.Response) -> list[str]:
-        """从响应吸收 Set-Cookie 进 session jar（带数量上限防爆内存）。"""
+        """从单个响应吸收 Set-Cookie 进 session jar（带数量上限防爆内存）。"""
         try:
             updated: list[str] = []
             for name, value in resp.cookies.items():
-                if name in self._session_cookies:
-                    self._session_cookies[name] = value
-                    updated.append(name)
-                elif len(self._session_cookies) < _SESSION_MAX_COOKIES:
-                    self._session_cookies[name] = value
-                    updated.append(name)
+                self._put_cookie(name, value, updated)
             return updated
         except Exception:
             return []
+
+    def _absorb_redirect_chain(self, resp: httpx.Response, client: "httpx.Client") -> list[str]:
+        """吸收整条重定向链上每一跳的 Set-Cookie（CAS/SSO 登录链的关键）。
+
+        httpx 跟随重定向时，中间的每个 302 响应都在 resp.history 里。CAS 登录的
+        CASTGC / 跨域 JSESSIONID 往往就发在这些中间跳上；只读最终 resp.cookies 会漏。
+        再用 client.cookies jar 兜底（httpx 已把整条链的 cookie 归并进 jar）。
+        """
+        updated: list[str] = []
+        try:
+            for hist in list(getattr(resp, "history", []) or []):
+                try:
+                    for name, value in hist.cookies.items():
+                        self._put_cookie(name, value, updated)
+                except Exception:
+                    pass
+            for name, value in resp.cookies.items():
+                self._put_cookie(name, value, updated)
+            try:
+                for ck in client.cookies.jar:
+                    if ck.name and ck.value:
+                        self._put_cookie(ck.name, ck.value, updated)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return updated
 
     def session_set(
         self,

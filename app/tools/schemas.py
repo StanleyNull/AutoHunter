@@ -10,7 +10,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "http_request",
-            "description": "发一个 HTTP 请求并返回完整的请求包、响应包、状态码、响应头和响应体。挖洞取证的首选工具。已用 session_set 登记登录态后，本工具会自动携带 Cookie/鉴权头、并自动吸收响应 Set-Cookie，登录后深挖无需每次手拼凭证。",
+            "description": "发一个 HTTP 请求并返回完整的请求包、响应包、状态码、响应头和响应体。挖洞取证的首选工具。会自动携带并吸收 Cookie（含整条重定向链每一跳的 Set-Cookie），登录后深挖无需每次手拼凭证。【登录/CAS/SSO 场景】务必把 follow_redirects 设为 true：一次 POST 账号密码即可自动走完 302 连环跳（lt→CASTGC→ST ticket→JSESSIONID），返回里的 redirect_chain/final_url 可看清跳到哪、是否登录成功；别再手动一跳跳拼 ticket。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -19,7 +19,7 @@ TOOL_SCHEMAS = [
                     "headers": {"type": "object", "description": "请求头键值对", "additionalProperties": {"type": "string"}},
                     "data": {"type": "string", "description": "请求体原始字符串（如表单 a=1&b=2）"},
                     "json_body": {"type": "object", "description": "JSON 请求体（与 data 二选一）"},
-                    "follow_redirects": {"type": "boolean", "default": False},
+                    "follow_redirects": {"type": "boolean", "default": False, "description": "是否自动跟随 302/301 跳转。登录/CAS/SSO 走通登录链必须设 true（自动带齐每跳 Cookie）。仅想看单跳 302 目标时才用 false。"},
                 },
                 "required": ["url"],
             },
@@ -357,7 +357,7 @@ KILLSWEEP_TOOL_SCHEMAS = [
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "data": {"type": "string"},
                     "json_body": {"type": "object"},
-                    "follow_redirects": {"type": "boolean", "default": False},
+                    "follow_redirects": {"type": "boolean", "default": False, "description": "登录/CAS/SSO 走登录链必须设 true（自动带齐每跳 Cookie）。"},
                 },
                 "required": ["url"],
             },
@@ -436,7 +436,7 @@ ESCALATE_TOOL_SCHEMAS = [
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "data": {"type": "string"},
                     "json_body": {"type": "object"},
-                    "follow_redirects": {"type": "boolean", "default": False},
+                    "follow_redirects": {"type": "boolean", "default": False, "description": "登录/CAS/SSO 走登录链必须设 true（自动带齐每跳 Cookie）。"},
                 },
                 "required": ["url"],
             },
