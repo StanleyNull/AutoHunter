@@ -54,6 +54,20 @@ dump_native_diagnostics() {
   echo "[watchdog] native diagnostics end pid=$UVICORN_PID" >&2
 }
 
+# ============================================================================
+#  启动前安全检查：websockets 版本必须在 >=13.0 且 <15.0
+#  pyppeteer/selenium/undetected-chromedriver 等包会降级 websockets 到 <13，
+#  导致 uvicorn 报 ImportError: cannot import name 'ServerProtocol'。
+#  此检查是最后一道防线，即使 guard 未拦截也能在启动前自动修复。
+# ============================================================================
+WS_MAJOR=$(python3 -c "import websockets; print(websockets.__version__.split('.')[0])" 2>/dev/null || echo "0")
+if [ "$WS_MAJOR" -lt 13 ] 2>/dev/null || [ "$WS_MAJOR" -ge 15 ] 2>/dev/null; then
+  echo "[watchdog] websockets major=$WS_MAJOR is out of safe range [13,15), auto-repairing..." >&2
+  pip3 install --quiet 'websockets>=13.0,<15' 2>&1 || pip install --quiet 'websockets>=13.0,<15' 2>&1 || true
+  WS_MAJOR=$(python3 -c "import websockets; print(websockets.__version__.split('.')[0])" 2>/dev/null || echo "0")
+  echo "[watchdog] websockets repaired, new major=$WS_MAJOR" >&2
+fi
+
 uvicorn app.main:app --host "$HOST" --port "$PORT" &
 UVICORN_PID="$!"
 

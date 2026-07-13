@@ -150,6 +150,13 @@ function stepLabel(ev) {
   return ev.text || "";
 }
 
+/** 聊天输入框 Enter 发送：跳过 IME 组合期（拼音输入法确认候选词时不触发发送）。 */
+function onChatEnter(e, fn) {
+  if (e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  fn();
+}
+
 async function askAssistant(preset = "") {
   const text = (preset || assistantText.value).trim();
   if (!text || assistantBusy.value || !f.value) return;
@@ -300,7 +307,7 @@ async function askAssistant(preset = "") {
           <div v-if="!readonly" class="ra-input">
             <textarea v-model="assistantText" rows="2"
               placeholder="例：这个洞为什么不是普通信息泄露？再 curl 一下 PoC 看状态码。"
-              @keydown.enter.exact.prevent="askAssistant()"></textarea>
+              @keydown.enter.exact="onChatEnter($event, askAssistant)"></textarea>
             <button class="primary" @click="askAssistant()" :disabled="assistantBusy || !assistantText.trim()">发送</button>
           </div>
         </section>

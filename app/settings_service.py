@@ -130,29 +130,43 @@ def resolve_engine_name(task: Task | None = None) -> str:
 
 
 def resolve_engine_key(engine_name: str, task: Task | None = None) -> str:
-    """获取指定引擎的 API Key（任务级 > DB缓存 > 环境变量）。"""
-    eff = effective_settings()["engines"]
+    """获取指定引擎的 API Key（任务级 > DB缓存 > 环境变量）。
+
+    FOFA 引擎额外兼容旧版 fofa section（key 保存在 row.fofa 而非 row.engines）。
+    """
+    eff = effective_settings()
     # 任务级 fofa_config 兼容旧版
     if engine_name == "fofa" and task:
         cfg = task.fofa_config or {}
         if cfg.get("key"):
             return str(cfg["key"])
-    eng_cfg = eff.get(engine_name, {})
-    return str(eng_cfg.get("key") or "")
+    eng_cfg = eff.get("engines", {}).get(engine_name, {})
+    key = str(eng_cfg.get("key") or "")
+    # FOFA 兼容旧版 fofa section
+    if not key and engine_name == "fofa":
+        key = str(eff.get("fofa", {}).get("key") or "")
+    return key
 
 
 def resolve_engine_base_url(engine_name: str, task: Task | None = None) -> str:
-    """获取指定引擎的 base_url。"""
+    """获取指定引擎的 base_url。
+
+    FOFA 引擎额外兼容旧版 fofa section。
+    """
     engine = get_engine(engine_name)
     default = engine.get_default_base_url() if engine else ""
-    eff = effective_settings()["engines"]
+    eff = effective_settings()
     # 任务级 fofa_config 兼容旧版
     if engine_name == "fofa" and task:
         cfg = task.fofa_config or {}
         if cfg.get("base_url"):
             return str(cfg["base_url"])
-    eng_cfg = eff.get(engine_name, {})
-    return str(eng_cfg.get("base_url") or default)
+    eng_cfg = eff.get("engines", {}).get(engine_name, {})
+    base = str(eng_cfg.get("base_url") or "")
+    # FOFA 兼容旧版 fofa section
+    if not base and engine_name == "fofa":
+        base = str(eff.get("fofa", {}).get("base_url") or "")
+    return base or default
 
 
 def resolve_engine_config(task: Task | None = None) -> dict[str, Any]:
@@ -211,15 +225,23 @@ def public_settings_view() -> dict[str, Any]:
     defaults = eff["defaults"]
 
     # 构建引擎列表视图
+    # FOFA 引擎需额外合并 fofa section 的 key/base_url（旧版兼容）
     engines_view = {}
     for eng in list_engines():
         name = eng["name"]
         ecfg = engines.get(name, {})
+        key = ecfg.get("key", "")
+        base_url = ecfg.get("base_url", "")
+        if name == "fofa":
+            if not key:
+                key = fofa.get("key", "")
+            if not base_url:
+                base_url = fofa.get("base_url", "")
         engines_view[name] = {
             "display_name": eng["display_name"],
-            "key": mask_secret(ecfg.get("key", "")),
-            "key_set": bool(ecfg.get("key")),
-            "base_url": ecfg.get("base_url", ""),
+            "key": mask_secret(key),
+            "key_set": bool(key),
+            "base_url": base_url or "",
         }
 
     return {
@@ -298,6 +320,16 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
             if v is not None:
                 fofa[k] = v
         row.fofa = fofa
+        # 同步 FOFA key/base_url 到 engines.fofa（多引擎统一路径）
+        if fofa.get("key") or fofa.get("base_url"):
+            engines = dict(row.engines or {})
+            eng_fofa = dict(engines.get("fofa", {}))
+            if fofa.get("key"):
+                eng_fofa["key"] = fofa["key"]
+            if fofa.get("base_url"):
+                eng_fofa["base_url"] = fofa["base_url"]
+            engines["fofa"] = eng_fofa
+            row.engines = engines
 
     # 多引擎配置
     if "engines" in payload and payload["engines"]:
