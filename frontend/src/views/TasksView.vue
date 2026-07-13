@@ -23,7 +23,7 @@ const _pinyinCollator = new Intl.Collator("zh-Hans-CN", { sensitivity: "accent" 
 const page = ref(taskListState.hasSavedState ? taskListState.page : 0);                 // 当前页，0-based
 const pageSize = ref(taskListState.hasSavedState ? taskListState.pageSize : 20);            // 每页数量
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
-const filterBy = ref("all");         // all | bubbled | pending_reg
+const filterBy = ref("all");         // all | review_archived | discarded | pending_reg
 
 const filteredTasks = computed(() => {
   let list = tasks.value;
@@ -34,9 +34,11 @@ const filteredTasks = computed(() => {
       (t.fofa_query || "").toLowerCase().includes(q)
     );
   }
-  // 筛选：有气泡（待复审红点 / AI未采纳绿点）/ 待注册目标
-  if (filterBy.value === "bubbled") {
+  // 筛选：待复审/AI未采纳（红点+绿点）/ AI已作废（灰点）/ 待注册目标
+  if (filterBy.value === "review_archived") {
     list = list.filter((t) => (t.pending_user_review > 0) || (t.pending_archived > 0));
+  } else if (filterBy.value === "discarded") {
+    list = list.filter((t) => (t.pending_discarded > 0));
   } else if (filterBy.value === "pending_reg") {
     list = list.filter((t) => (t.pending_input ?? 0) > 0);
   }
@@ -233,7 +235,8 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
         <input v-model="searchQuery" class="task-search" placeholder="搜索任务名/FOFA语法…" />
         <select v-model="filterBy" class="task-sort">
           <option value="all">全部任务</option>
-          <option value="bubbled">有气泡（待复审/AI未采纳）</option>
+          <option value="review_archived">待复审 / AI未采纳</option>
+          <option value="discarded">AI已作废</option>
           <option value="pending_reg">待注册目标</option>
         </select>
         <select v-model="sortBy" class="task-sort">
@@ -314,6 +317,8 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
                 :title="`${t.pending_user_review} 个漏洞待复审`">{{ t.pending_user_review }}</span>
           <span v-if="t.pending_archived > 0" class="archived-dot"
                 :title="`${t.pending_archived} 个漏洞 AI 未采纳`">{{ t.pending_archived }}</span>
+          <span v-if="t.pending_discarded > 0" class="discarded-dot"
+                :title="`${t.pending_discarded} 个漏洞 AI 已作废`">{{ t.pending_discarded }}</span>
           <div class="task-card-meta">
             <span class="badge" :class="t.status">{{ STATUS_LABEL[t.status] || t.status }}</span>
             <span class="meta">{{ taskModeLabel(t) }} · {{ targetSourceLabel(t.target_source) }} · 并发 {{ t.concurrency }}</span>

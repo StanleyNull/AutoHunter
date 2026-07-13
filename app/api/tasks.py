@@ -204,7 +204,7 @@ def _public_fofa_config(task: Task) -> dict:
 def _task_to_dto(t: Task, stats: TaskStats | None = None,
                  pending_user_review: int = 0, pending_archived: int = 0,
                  pending_input: int = 0, observer: bool = False,
-                 progress_pct: int = 0) -> TaskResponse:
+                 progress_pct: int = 0, pending_discarded: int = 0) -> TaskResponse:
     model_config = _public_model_config(t)
     if observer:
         model_config = _observer_model_config()
@@ -230,6 +230,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
         stats=stats, pending_user_review=pending_user_review,
         pending_archived=pending_archived, pending_input=pending_input,
+        pending_discarded=pending_discarded,
         retest_active=bool(t.retest_state),
         progress_pct=progress_pct,
     )
@@ -300,6 +301,22 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
             Finding.status != "superseded",
         )
     )).scalar() or 0
+    # AI 已作废：superseded 且用户未处理，按 target_id 去重，且排除已有非 superseded 报告的目标
+    active_targets_sq = select(Finding.target_id).where(
+        Finding.task_id == task_id,
+        Finding.status != "superseded",
+    ).distinct()
+    stats.discarded = (await session.execute(
+        select(func.count(Finding.target_id.distinct()))
+        .select_from(Finding)
+        .join(Review, Review.finding_id == Finding.id)
+        .where(
+            Finding.task_id == task_id,
+            Finding.status == "superseded",
+            Review.user_status == "pending",
+            ~Finding.target_id.in_(active_targets_sq),
+        )
+    )).scalar() or 0
     return stats
 
 
@@ -358,6 +375,26 @@ async def list_tasks(request: Request, session: AsyncSession = Depends(get_sessi
     )
     for tid, cnt in ar_rows.all():
         archived_map[tid] = cnt
+    # AI 已作废数（superseded 且用户 pending，按 target_id 去重，排除已有非 superseded 报告的目标）
+    discarded_map: dict[str, int] = {}
+    # 先查所有有非 superseded 报告的 (task_id, target_id) 对
+    active_pairs: set[tuple[str, str]] = set()
+    for tid, target_id in (await session.execute(
+        select(Finding.task_id, Finding.target_id)
+        .where(Finding.status != "superseded")
+        .distinct()
+    )).all():
+        active_pairs.add((tid, target_id))
+    # 再查 superseded + pending 的 (task_id, target_id) 对，排除已有非 superseded 报告的
+    for tid, target_id in (await session.execute(
+        select(Finding.task_id, Finding.target_id)
+        .join(Review, Review.finding_id == Finding.id)
+        .where(Finding.status == "superseded", Review.user_status == "pending")
+        .distinct()
+    )).all():
+        if (tid, target_id) in active_pairs:
+            continue
+        discarded_map[tid] = discarded_map.get(tid, 0) + 1
     # 待注册(pending_input)目标数：与 pending_map/archived_map 同构，一次聚合避免 N+1
     pending_input_map: dict[str, int] = {}
     pi_rows = await session.execute(
@@ -385,7 +422,8 @@ async def list_tasks(request: Request, session: AsyncSession = Depends(get_sessi
                         pending_archived=archived_map.get(t.id, 0),
                         pending_input=pending_input_map.get(t.id, 0),
                         observer=observer,
-                        progress_pct=_calc_progress(t.id)) for t in tasks]
+                        progress_pct=_calc_progress(t.id),
+                        pending_discarded=discarded_map.get(t.id, 0)) for t in tasks]
 
 
 @router.get("/hard-targets")

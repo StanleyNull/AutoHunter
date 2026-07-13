@@ -244,6 +244,9 @@ export const api = {
   rejectedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/rejected${qs({ q, ...opts })}`),
   archivedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/archived${qs({ q, ...opts })}`),
   restoreArchived: (id) => req("POST", `/api/results/${id}/restore`),
+  rejectArchived: (id) => req("POST", `/api/results/${id}/reject-archived`),
+  discardedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/discarded${qs({ q, ...opts })}`),
+  restoreDiscarded: (id) => req("POST", `/api/results/${id}/restore-discarded`),
   killsweeps: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q, ...opts })}`),
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),

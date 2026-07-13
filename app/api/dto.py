@@ -100,6 +100,7 @@ class TaskStats(BaseModel):
     submit_ready: int = 0
     rejected: int = 0
     archived: int = 0
+    discarded: int = 0  # AI 已作废（superseded 且用户未处理）
 
 
 class TaskResponse(BaseModel):
@@ -128,6 +129,8 @@ class TaskResponse(BaseModel):
     pending_user_review: int = 0
     # AI 未采纳归档数（ignored/deepen 且用户未处理）——任务卡片绿点用，列表接口轻量填充
     pending_archived: int = 0
+    # AI 已作废数（superseded 且用户未处理）——任务卡片灰点用，列表接口轻量填充
+    pending_discarded: int = 0
     # 待注册(pending_input)目标数——任务列表"待注册"筛选用，列表接口轻量填充
     pending_input: int = 0
     # 失败目标重测是否进行中——任务列表卡片黄色边框用

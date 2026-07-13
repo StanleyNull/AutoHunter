@@ -31,6 +31,7 @@ const rejectedHasMore = ref(false);
 const rejectedLoading = ref(false);
 const REJECTED_PAGE_SIZE = 50;
 const archivedItems = ref([]);     // AI 未采纳归档（ignored/deepen，可救回）
+const discardedItems = ref([]);    // AI 已作废归档（superseded，可救回）
 const expandedKillsweeps = ref(new Set());
 const searchDraft = ref("");
 const searchText = ref("");
@@ -49,13 +50,16 @@ const submitLoading = ref(false);
 const archivedHasMore = ref(false);
 const archivedLoading = ref(false);
 const ARCHIVED_PAGE_SIZE = 50;
+const discardedHasMore = ref(false);
+const discardedLoading = ref(false);
+const DISCARDED_PAGE_SIZE = 50;
 const bulkWorking = ref(false);
 const SUBMIT_PAGE_SIZE = 120;
 const EXPORT_PAGE_SIZE = 80;
 let ws = null, poll = null, boardPoll = null, searchTimer = null, poolPoll = null;
 let wsReconnectTimer = null, wsReconnectAttempt = 0, wsIntentionalClose = false;
 let eventRefreshTimer = null, eventRefreshPending = null;
-const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived"]);
+const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived", "discarded"]);
 // 记录哪些列表 tab 已经加载过数据：首屏只拉看板，列表按需加载；后台只刷新看过的列表。
 const loadedTabs = ref(new Set());
 
@@ -236,6 +240,29 @@ async function loadMoreArchived() {
   if (archivedLoading.value || !archivedHasMore.value) return;
   await loadArchived({ reset: false });
 }
+async function loadDiscarded(opts = {}) {
+  const id = props.id;
+  const reset = opts.reset !== false;
+  const offset = reset ? 0 : discardedItems.value.length;
+  discardedLoading.value = true;
+  try {
+    const res = await api.discardedList(id, undefined, {
+      limit: DISCARDED_PAGE_SIZE,
+      offset,
+    });
+    const rows = Array.isArray(res) ? res : (res.items || []);
+    const next = rows.map(withSearchCache);
+    if (id !== props.id) return;
+    discardedItems.value = reset ? next : [...discardedItems.value, ...next];
+    discardedHasMore.value = !Array.isArray(res) && !!res.has_more;
+  } finally {
+    discardedLoading.value = false;
+  }
+}
+async function loadMoreDiscarded() {
+  if (discardedLoading.value || !discardedHasMore.value) return;
+  await loadDiscarded({ reset: false });
+}
 
 async function refreshAll(opts = {}) {
   const background = !!opts.background;
@@ -262,6 +289,7 @@ async function loadTabData(t = tab.value) {
   else if (t === "killsweep") await loadKillsweeps();
   else if (t === "rejected") await loadRejected();
   else if (t === "archived") await loadArchived();
+  else if (t === "discarded") await loadDiscarded();
   else return;
   markTabLoaded(t);
 }
@@ -297,6 +325,9 @@ async function refreshFromEvent(ev) {
   if ((k.includes("finding") || k.includes("review")) && shouldRefreshTab("archived")) {
     jobs.push(loadTabData("archived"));
   }
+  if ((k.includes("finding") || k.includes("review")) && shouldRefreshTab("discarded")) {
+    jobs.push(loadTabData("discarded"));
+  }
   if ((k.includes("submit") || k.includes("review")) && shouldRefreshTab("submit")) {
     jobs.push(loadTabData("submit"));
   }
@@ -328,6 +359,8 @@ function resetTaskState(full = true) {
     rejectedHasMore.value = false;
     archivedItems.value = [];
     archivedHasMore.value = false;
+    discardedItems.value = [];
+    discardedHasMore.value = false;
     submitHasMore.value = false;
     loadedTabs.value = new Set();
     clearSearch();
@@ -873,6 +906,7 @@ function openReview(id) { drawerId.value = id; drawerMode.value = "review"; }
 function openSubmit(id) { drawerId.value = id; drawerMode.value = "submit"; }
 function openRejected(id) { drawerId.value = id; drawerMode.value = "rejected"; }
 function openArchived(id) { drawerId.value = id; drawerMode.value = "archived"; }
+function openDiscarded(id) { drawerId.value = id; drawerMode.value = "discarded"; }
 async function restoreArchived(id) {
   try {
     await api.restoreArchived(id);
@@ -884,6 +918,48 @@ async function restoreArchived(id) {
     await Promise.all(jobs);
   } catch (e) {
     toast(`恢复失败：${e?.message || e}`);
+  }
+}
+async function rejectArchived(id) {
+  try {
+    const res = await api.rejectArchived(id);
+    toast(res.cascade_rejected
+      ? `已驳回（同时驳回 ${res.cascade_rejected} 份同目标的已作废报告）`
+      : "已驳回");
+    archivedItems.value = archivedItems.value.filter((f) => f.id !== id);
+    const jobs = [];
+    if (shouldRefreshTab("rejected")) jobs.push(loadTabData("rejected"));
+    if (shouldRefreshTab("discarded")) jobs.push(loadTabData("discarded"));
+    jobs.push(loadBoard());
+    await Promise.all(jobs);
+  } catch (e) {
+    toast(`驳回失败：${e?.message || e}`);
+  }
+}
+async function restoreDiscarded(id) {
+  try {
+    await api.restoreDiscarded(id);
+    toast("已恢复到复审队列");
+    discardedItems.value = discardedItems.value.filter((f) => f.id !== id);
+    const jobs = [];
+    if (shouldRefreshTab("review")) jobs.push(loadTabData("review"));
+    jobs.push(loadBoard());
+    await Promise.all(jobs);
+  } catch (e) {
+    toast(`恢复失败：${e?.message || e}`);
+  }
+}
+async function rejectDiscarded(id) {
+  try {
+    await api.userReview(id, { user_status: "rejected" });
+    toast("已驳回");
+    discardedItems.value = discardedItems.value.filter((f) => f.id !== id);
+    const jobs = [];
+    if (shouldRefreshTab("rejected")) jobs.push(loadTabData("rejected"));
+    jobs.push(loadBoard());
+    await Promise.all(jobs);
+  } catch (e) {
+    toast(`驳回失败：${e?.message || e}`);
   }
 }
 function toggleKillsweep(id) {
@@ -1112,6 +1188,8 @@ const rejectedCount = computed(() =>
   Math.max(stats.value.rejected ?? 0, loadedTabs.value.has("rejected") ? rejectedItems.value.length : 0));
 const archivedCount = computed(() =>
   Math.max(stats.value.archived ?? 0, loadedTabs.value.has("archived") ? archivedItems.value.length : 0));
+const discardedCount = computed(() =>
+  Math.max(stats.value.discarded ?? 0, loadedTabs.value.has("discarded") ? discardedItems.value.length : 0));
 const totalTargets = computed(() =>
   (stats.value.queued ?? 0) + (stats.value.scanning ?? 0) +
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0) +
@@ -1330,12 +1408,14 @@ const filteredSubmit = computed(() => submitItems.value.filter(matchSearch));
 const filteredKillsweeps = computed(() => killsweepItems.value.filter(matchSearch));
 const filteredRejected = computed(() => rejectedItems.value.filter(matchSearch));
 const filteredArchived = computed(() => archivedItems.value.filter(matchSearch));
+const filteredDiscarded = computed(() => discardedItems.value.filter(matchSearch));
 const visibleCount = computed(() => {
   if (tab.value === "review") return filteredQueue.value.length;
   if (tab.value === "submit") return filteredSubmit.value.length;
   if (tab.value === "killsweep") return filteredKillsweeps.value.length;
   if (tab.value === "rejected") return filteredRejected.value.length;
   if (tab.value === "archived") return filteredArchived.value.length;
+  if (tab.value === "discarded") return filteredDiscarded.value.length;
   return 0;
 });
 const rawCount = computed(() => {
@@ -1344,6 +1424,7 @@ const rawCount = computed(() => {
   if (tab.value === "killsweep") return killsweepItems.value.length;
   if (tab.value === "rejected") return rejectedItems.value.length;
   if (tab.value === "archived") return archivedItems.value.length;
+  if (tab.value === "discarded") return discardedItems.value.length;
   return 0;
 });
 function evClass(ev) { return `ev ${ev.level || "info"}`; }
@@ -1585,6 +1666,10 @@ function fmtTime(iso) {
         <span class="tab-long">AI 未采纳</span><span class="tab-short">AI 未采纳</span>
         <i v-if="archivedCount">{{ archivedCount }}</i>
       </button>
+      <button type="button" role="tab" :aria-selected="tab === 'discarded'" :class="{ active: tab === 'discarded' }" @click="tab = 'discarded'">
+        <span class="tab-long">AI 已作废</span><span class="tab-short">已作废</span>
+        <i v-if="discardedCount">{{ discardedCount }}</i>
+      </button>
     </div>
 
     <div v-if="searchEnabled" class="search-strip">
@@ -1808,7 +1893,7 @@ function fmtTime(iso) {
     <div v-show="tab === 'archived'" class="list-panel">
       <div class="list-head">
         <span>AI 未采纳</span>
-        <small>AI 判为非漏洞或深挖未升级的洞，保留在此防误杀，可点开查看、必要时「恢复到复审」</small>
+        <small>AI 判为非漏洞或深挖未升级的洞，保留在此防误杀，可点开查看、必要时「恢复到复审」或「驳回」</small>
         <small v-if="archivedItems.length" class="muted">已加载 {{ archivedItems.length }} 条{{ archivedHasMore ? "，还有更多" : "" }}</small>
       </div>
       <div v-if="!archivedItems.length" class="empty">
@@ -1828,10 +1913,43 @@ function fmtTime(iso) {
         <div class="rr-side" @click.stop>
           <span class="score">{{ f.review?.score ?? "-" }}</span>
           <button v-if="!readonly" class="mini-action" type="button" @click="restoreArchived(f.id)">恢复到复审</button>
+          <button v-if="!readonly" class="mini-action danger" type="button" @click="rejectArchived(f.id)">驳回</button>
         </div>
       </div>
       <button v-if="archivedHasMore" class="load-more" @click="loadMoreArchived" :disabled="archivedLoading">
         {{ archivedLoading ? "加载中..." : "加载更多未采纳漏洞" }}
+      </button>
+    </div>
+
+    <!-- AI 已作废归档：superseded（深挖回炉后旧线索被作废），保留可回看纠错，一键「恢复到复审」或「驳回」 -->
+    <div v-show="tab === 'discarded'" class="list-panel">
+      <div class="list-head">
+        <span>AI 已作废</span>
+        <small>深挖回炉后未确认的旧线索，单独分析可能仍存在，可点开查看、「恢复到复审」或「驳回」</small>
+        <small v-if="discardedItems.length" class="muted">已加载 {{ discardedItems.length }} 条{{ discardedHasMore ? "，还有更多" : "" }}</small>
+      </div>
+      <div v-if="!discardedItems.length" class="empty">
+        暂无 AI 已作废的漏洞（深挖回炉后未确认的旧线索会沉淀到这里，防止漏掉可能存在的漏洞）
+      </div>
+      <div v-else-if="!filteredDiscarded.length" class="empty">没有匹配当前关键词的已作废漏洞</div>
+      <div v-for="f in filteredDiscarded" :key="f.id" class="result-row discarded" @click="openDiscarded(f.id)">
+        <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
+        <div class="rr-main">
+          <div class="rr-title">
+            <span class="arch-tag superseded">{{ f.archive_reason_text }}</span>
+            {{ f.title }}
+          </div>
+          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }} · {{ fmtTime(f.created_at) }}</div>
+          <div v-if="f.deepen_directive" class="meta rr-note">深挖指令：{{ f.deepen_directive }}</div>
+        </div>
+        <div class="rr-side" @click.stop>
+          <span class="score">{{ f.review?.score ?? "-" }}</span>
+          <button v-if="!readonly" class="mini-action" type="button" @click="restoreDiscarded(f.id)">恢复到复审</button>
+          <button v-if="!readonly" class="mini-action danger" type="button" @click="rejectDiscarded(f.id)">驳回</button>
+        </div>
+      </div>
+      <button v-if="discardedHasMore" class="load-more" @click="loadMoreDiscarded" :disabled="discardedLoading">
+        {{ discardedLoading ? "加载中..." : "加载更多已作废漏洞" }}
       </button>
     </div>
 

@@ -1681,6 +1681,9 @@ main {
 /* AI 未采纳归档：默认淡出弱化存在感，悬浮时恢复，暗示「沉淀区、需要时才翻」 */
 .result-row.archived { opacity: .68; }
 .result-row.archived:hover { opacity: 1; }
+/* AI 已作废归档：更弱化，灰色调 */
+.result-row.discarded { opacity: .55; }
+.result-row.discarded:hover { opacity: 1; }
 .rr-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
 /* 归档原因标：ignored=疑似误杀用告警色，deepen=深挖未升级用中性信息色 */
 .arch-tag {
@@ -1689,6 +1692,7 @@ main {
 }
 .arch-tag.ignored { background: var(--warn-bg); color: var(--warn); }
 .arch-tag.deepen { background: var(--info-bg); color: var(--info); }
+.arch-tag.superseded { background: var(--muted-bg, color-mix(in oklch, var(--muted) 12%, transparent)); color: var(--muted); }
 .rr-note { color: var(--danger); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .review-bar .rb-hint { font-size: 12.5px; color: var(--muted); }
 .rr-main { flex: 1; min-width: 0; }
@@ -1857,6 +1861,8 @@ main {
 .review-bar .rb-btns { margin-left: auto; display: flex; gap: 10px; }
 .review-bar .ok { background: var(--ok); border-color: var(--ok); color: var(--on-accent); font-weight: 600; }
 .review-bar .ok:hover { filter: brightness(1.06); }
+.review-bar .ok-soft { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); font-weight: 600; }
+.review-bar .ok-soft:hover { background: var(--ok); color: var(--on-accent); }
 .review-bar .no { background: var(--danger-bg); border-color: var(--danger); color: var(--danger); font-weight: 600; }
 .review-bar .no:hover { background: var(--danger); color: var(--on-accent); }
 .review-bar .deep { background: var(--surface-2); border-color: var(--accent); color: var(--accent); font-weight: 600; }
@@ -2667,8 +2673,27 @@ main {
   border-radius: 10px; box-shadow: 0 0 0 3px var(--bg), 0 2px 8px oklch(0% 0 0 / .35);
   animation: review-pop .25s ease;
 }
-/* 两个气泡同时出现时，红点左移给绿点腾位 */
+/* AI 已作废灰点 */
+.discarded-dot {
+  position: absolute; top: 10px; right: 12px;
+  min-width: 19px; height: 19px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; line-height: 1;
+  color: #fff; background: oklch(55% 0 0);
+  border-radius: 10px; box-shadow: 0 0 0 3px var(--bg), 0 2px 8px oklch(0% 0 0 / .35);
+  animation: review-pop .25s ease;
+}
+/* 多个气泡同时出现时，依次左移腾位 */
 .task-card .review-dot:has(~ .archived-dot) {
+  right: calc(12px + 28px);
+}
+.task-card .review-dot:has(~ .discarded-dot) {
+  right: calc(12px + 28px);
+}
+.task-card .review-dot:has(~ .archived-dot):has(~ .discarded-dot) {
+  right: calc(12px + 56px);
+}
+.task-card .archived-dot:has(~ .discarded-dot) {
   right: calc(12px + 28px);
 }
 
