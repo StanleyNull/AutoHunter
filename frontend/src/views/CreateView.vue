@@ -8,7 +8,7 @@ const adv = ref(false);
 const form = reactive({
   name: "",
   src_type: "edusrc",
-  vuln_types: "sql_injection,rce,unauthorized_access,idor,file_upload,captcha_bypass",
+  vuln_types: "sql_injection,rce,unauthorized_access,idor,file_upload,captcha_bypass,backdoor_compromised",
   target_source: "fofa",
   engine: "",
   fofa_query: "",
