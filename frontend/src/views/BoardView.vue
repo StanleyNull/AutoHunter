@@ -674,20 +674,37 @@ const totalTargets = computed(() =>
 const resolvedTargets = computed(() =>
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
 );
-// 搜集阶段：任务在跑但还没产出目标（FOFA 查询/过滤/探活期间）。
-// 这时主进度条按 0% 算会让人以为卡住了，改为反映搜集进度 + 不确定动画。
-const isCollecting = computed(() =>
-  task.value?.status === "running" && totalTargets.value === 0
-);
+const collectorCfg = computed(() => task.value?.fofa_config || {});
+// 搜集阶段判定：搜集器还在跑（有 phase 且未到 dispatch）就视为搜集中，
+// 即使已有部分目标入队。这样搜集+处置并行期主进度条保持不确定动画，
+// 不会因 totalTargets 分批增长而导致 resolved/total 进度倒退。
+// 手动/单站模式无搜集器 phase，首批目标入队后即切到确定性进度。
+const isCollecting = computed(() => {
+  if (task.value?.status !== "running") return false;
+  const phase = collectorCfg.value.collector_phase;
+  if (phase && phase !== "dispatch") return true;    // 搜集器在跑
+  if (!phase && totalTargets.value === 0) return true; // 初始化（还没收到 phase）
+  return false;
+});
+const collectorPct = computed(() => {
+  const phase = collectorCfg.value.collector_phase || "";
+  const total = Number(collectorCfg.value.last_target_filter_total || 0);
+  const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
+  if (phase === "prefilter") return 18;
+  if (phase === "scoring") return 38;
+  if (phase === "target_filter") return 62;
+  if (phase === "enrich") return total > 0 ? Math.max(72, Math.min(88, Math.round((done / total) * 100))) : 78;
+  if (phase === "dispatch") return 100;
+  return 25;
+});
 const progressPct = computed(() => {
-  if (isCollecting.value) return collectorPct.value || 8; // 搜集阶段用搜集进度，最低 8% 不至于全空
+  if (isCollecting.value) return collectorPct.value || 8;
   return totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0;
 });
-const collectorCfg = computed(() => task.value?.fofa_config || {});
 const collectorVisible = computed(() => {
   // 过滤/入队完成后（phase=dispatch）自动隐藏，不再占位。
   if (collectorCfg.value.collector_phase === "dispatch") return false;
-  // 搜集阶段（running + 还没目标）即使没收到 collector_phase 事件也立即显示，
+  // 搜集阶段即使没收到 collector_phase 事件也立即显示，
   // 消除"启动后空窗期体感空闲"的问题。
   if (isCollecting.value) return true;
   return !!(collectorCfg.value.collector_phase || collectorCfg.value.collector_phase_text);
@@ -702,17 +719,6 @@ const collectorMeta = computed(() => {
   const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
   if (total > 0) return `过滤器 ${done}/${total}`;
   return phaseLabel(collectorCfg.value.collector_phase) || (isCollecting.value ? "初始化中" : "");
-});
-const collectorPct = computed(() => {
-  const phase = collectorCfg.value.collector_phase || "";
-  const total = Number(collectorCfg.value.last_target_filter_total || 0);
-  const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
-  if (phase === "prefilter") return 18;
-  if (phase === "scoring") return 38;
-  if (phase === "target_filter") return 62;
-  if (phase === "enrich") return total > 0 ? Math.max(72, Math.min(88, Math.round((done / total) * 100))) : 78;
-  if (phase === "dispatch") return 100;
-  return 25;
 });
 function phaseLabel(phase) {
   return ({
