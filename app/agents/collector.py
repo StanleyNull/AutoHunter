@@ -370,7 +370,7 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
         )).all()
         existing_sources = {r[0] for r in existing}
         # 开局就把侦察(phase0)+5 条主题深挖(phase1)路线一次性全部并发入队。
-        # 之前只入队侦察路线、等它跑完才补派主题路线，导致「能快速出洞的
+        # 之前只入队侦察路线、等它跑完才补派主题路线，导致「能 3 分钟出洞的
         # 认证越权路线」被侦察串行硬拖到几十分钟。改回并发：侦察 worker 产出的
         # coverage 仍会通过 _build_coverage_context 喂给后启动的主题 worker，
         # 成果照样复用、又不牺牲开局速度。priority 高的侦察路线天然先抢并发。
@@ -446,6 +446,22 @@ async def _fofa_collect(
         task.fofa_config = {**cfg}
         return 0
 
+    # 每日额度耗尽冷却检查：FOFA [820041] 等每日上限错误，每小时重试一次，
+    # 12 次都卡才停任务（适合挂机过夜，等 FOFA 次日额度恢复自动继续）。
+    daily_limit_until = float(cfg.get("daily_limit_until", 0))
+    if daily_limit_until > time.monotonic():
+        remain_min = (daily_limit_until - time.monotonic()) / 60
+        dl_count = int(cfg.get("daily_limit_count", 0))
+        cfg["collector_phase"] = "fofa_error"
+        await report(
+            "fofa_error",
+            f"{engine.display_name} 每日额度耗尽，{remain_min:.0f} 分钟后重试（第 {dl_count}/12 次）",
+            fofa_error="daily_limit_cooldown", cursor=cursor, cooldown_remaining_min=remain_min,
+            daily_limit_count=dl_count,
+        )
+        task.fofa_config = {**cfg}
+        return 0
+
     try:
         res = await engine.search(key, cur_query, page=next_cursor, page_size=size,
                                   base_url=base_url)
@@ -470,6 +486,35 @@ async def _fofa_collect(
     except (ValueError, Exception) as e:
         err = f"{e}"[:300]
         err_lower = str(e).lower()
+        # 每日额度耗尽检测（FOFA [820041] 等）：每小时重试一次，12 次都卡才停任务。
+        # 必须在 rate_limit/account 检测之前匹配，避免误判成账号无效导致暂停。
+        _is_daily_limit = any(m in err_lower for m in (
+            "820041", "每日", "上限", "每天限制", "daily limit", "daily_limit",
+            "exceeded daily", "daily quota", "每天额度",
+        ))
+        if _is_daily_limit:
+            dl_count = int(cfg.get("daily_limit_count", 0)) + 1
+            cfg["daily_limit_count"] = dl_count
+            cfg["daily_limit_until"] = time.monotonic() + 3600  # 1 小时后重试
+            cfg["last_fofa_error"] = err
+            cfg["collector_phase"] = "fofa_error"
+            cfg["fofa_auth_fail_count"] = 0  # 不算账号无效，避免触发暂停
+            if dl_count >= 12:
+                cfg["daily_limit_exhausted"] = True
+                await report(
+                    "fofa_error",
+                    f"{engine.display_name} 每日额度耗尽，连续 {dl_count} 次（约 {dl_count} 小时）未恢复，"
+                    f"标记停止任务",
+                    fofa_error=err, cursor=cursor, daily_limit_count=dl_count, daily_limit_exhausted=True,
+                )
+            else:
+                await report(
+                    "fofa_error",
+                    f"{engine.display_name} 每日额度耗尽（第 {dl_count}/12 次），1 小时后自动重试",
+                    fofa_error=err, cursor=cursor, daily_limit_count=dl_count, retry_after=3600,
+                )
+            task.fofa_config = {**cfg}
+            return 0
         # 通用频率限制检测（不限引擎，匹配常见限流关键词）
         _is_rate_limit = any(m in err_lower for m in (
             "rate limit", "too many", "过于频繁", "请求太频繁", "q3005", "429", "retry after",
@@ -518,6 +563,10 @@ async def _fofa_collect(
     cfg["rate_limit_count"] = 0  # 成功请求重置限流计数
     cfg.pop("rate_limit_until", None)
     cfg.pop("last_fofa_error", None)
+    # 成功请求重置每日额度计数（FOFA 次日额度已恢复）
+    cfg["daily_limit_count"] = 0
+    cfg.pop("daily_limit_until", None)
+    cfg.pop("daily_limit_exhausted", None)
 
     # host 归属兜底过滤：即使 FOFA 语法因运算符优先级或 LLM 演化丢锚点而放宽范围，
     # 也在入库前按用户指定的根域名白名单二次过滤，丢弃一切范围外的无关资产。

@@ -469,6 +469,7 @@ async def delete_task(task_id: str, session: AsyncSession = Depends(get_session)
 async def _compute_site_collab(session: AsyncSession, task_id: str) -> dict | None:
     """单站协作态势：把该任务的 site 路线按三阶段聚合，供前端「协作态势」面板渲染。
     每条路线带上它名下已产出的 finding 数（未 superseded），让流水线能体现各路线战果。"""
+    # 每个 site target 的 finding 计数（排除被顶替的旧洞）
     fc_rows = (await session.execute(
         select(Finding.target_id, func.count())
         .where(Finding.task_id == task_id, Finding.status != "superseded")
@@ -593,9 +594,12 @@ async def start_task(task_id: str, session: AsyncSession = Depends(get_session))
     task.status = "running"
     # 重启即清空 FOFA 账号失败计数与错误标记：用户通常已换/续了 key，
     # 否则旧计数 ≥ 阈值会导致刚启动又被自动暂停。
-    if task.fofa_config and task.fofa_config.get("fofa_auth_fail_count"):
+    if task.fofa_config and (task.fofa_config.get("fofa_auth_fail_count") or task.fofa_config.get("daily_limit_count")):
         fc = dict(task.fofa_config)
         fc["fofa_auth_fail_count"] = 0
+        fc["daily_limit_count"] = 0
+        fc.pop("daily_limit_until", None)
+        fc.pop("daily_limit_exhausted", None)
         fc.pop("last_fofa_error", None)
         task.fofa_config = fc
     await session.commit()
