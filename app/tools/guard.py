@@ -80,9 +80,10 @@ def check_command(cmd: str, enterprise: bool = False) -> None:
     for pat in _COMPILED:
         if pat.search(cmd):
             hint = ""
-            if "pip" in cmd.lower() and "install" in cmd.lower():
+            low = cmd.lower()
+            if "pip" in low and "install" in low:
                 hint = f"\n指导：{_DANGEROUS_PIP_MSG}"
-            elif "pip" in cmd.lower() and "uninstall" in cmd.lower():
+            elif "pip" in low and "uninstall" in low:
                 hint = "\n指导：禁止卸载运行时核心包，会破坏容器环境。"
             raise CommandBlocked(
                 f"命令被安全防护拦截（疑似自毁运行环境，非攻击限制）：匹配模式 {pat.pattern}{hint}"

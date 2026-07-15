@@ -143,6 +143,23 @@ FOCUSED_ROUTE = SiteRoute(
 )
 
 
+# 开启「跳过入口盘点」时被跳过的侦察路线（只跳 site_map；site_js 前端密钥价值高，保留）。
+SKIPPABLE_RECON_SOURCES = ("site_map",)
+
+
+def skip_recon_enabled(task) -> bool:
+    """任务是否开启了「跳过入口盘点侦察」（fofa_config.skip_site_recon）。"""
+    cfg = getattr(task, "fofa_config", None) or {}
+    return bool(cfg.get("skip_site_recon"))
+
+
+def initial_routes_for(task) -> tuple[SiteRoute, ...]:
+    """按任务配置返回开局入队的路线：开启跳过侦察时剔除 site_map。"""
+    if skip_recon_enabled(task):
+        return tuple(r for r in INITIAL_ROUTES if r.source not in SKIPPABLE_RECON_SOURCES)
+    return INITIAL_ROUTES
+
+
 def is_site_source(source: str | None) -> bool:
     return (source or "").startswith("site_")
 
@@ -190,6 +207,10 @@ _USER_CRED_DIRECTIVE = (
     "这是用户授权你使用的入场券，请执行：\n"
     "1. 【先登录】用给出的账号密码走登录接口，或把给出的 Cookie/Authorization 用 session_set 登记；"
     "登记后 http_request 会自动携带登录态，不必每次手动拼 Cookie。\n"
+    "   ⚠ 登录若是表单/CAS/SSO：先 GET 登录页取隐藏字段（CAS 的 lt/execution、表单 csrf token），"
+    "再带账号密码+隐藏字段 POST 登录接口，且 http_request 必须设 follow_redirects=true——"
+    "一次即可自动走完 302 连环跳、每跳 Cookie 自动入会话；看返回 redirect_chain/final_url 判成败，"
+    "别手动一跳跳拼 ticket、别在登录这步反复卡壳。\n"
     "2. 【判成败】登录成功的判据：拿到 Set-Cookie/有效 session、能访问到需登录才可见的页面/接口（非跳登录、非 401/403）。"
     "登录本身不是漏洞，不能就此 finish。\n"
     "3. 【进系统深入】带着登录态进入系统内部逐项验证：后台/个人中心/管理菜单，测越权(IDOR/水平垂直)、"
@@ -204,6 +225,7 @@ def render_context(
     site_info: str = "",
     coverage_block: str = "",
     focus_note: str = "",
+    skip_recon: bool = False,
 ) -> str:
     lines = [
         "# 单站协作分工",
@@ -220,11 +242,22 @@ def render_context(
             "打穿就 submit_finding；差一步（有据点但缺 ID/凭据/回显）就写 deepen_lead，"
             "系统会自动接力深挖、出洞后还会自动扩大危害；确认无洞也要说清测了哪些入口、为何不通。"
             "不要首页加几个常见路径扫一遍就 finish。",
-            "- 复用侦察：site_map/site_js 侦察路线与你并发在跑，成果会陆续上报。"
-            "下方【若已有覆盖摘要】就优先在这些已知入口上做本路线的定向验证，别从零重复侦察；"
-            "【若暂无覆盖摘要】说明侦察还在跑，你直接按本路线 focus 自己快速摸一遍相关入口就开打，"
-            "不要空等侦察——先扒首页/JS 找本路线相关接口（如认证路线找登录/越权接口），边测边深挖。",
         ]
+        if skip_recon:
+            # 用户关闭了「入口盘点(site_map)」侦察：多为已给登录凭据、目标明确的场景，
+            # 不再苦等/复用全站入口地图，直接按本路线 focus 快速定位入口开打（省 token）。
+            lines += [
+                "- 侦察说明：本次已关闭「入口盘点」泛侦察（通常因为你已拿到登录凭据或目标明确）。"
+                "site_js 前端资源侦察仍在并发跑、成果会陆续上报；除此之外别再从零泛扒全站，"
+                "直接按本路线 focus 定位相关入口（如认证路线直奔登录/越权接口）就开打，边测边深挖。",
+            ]
+        else:
+            lines += [
+                "- 复用侦察：site_map/site_js 侦察路线与你并发在跑，成果会陆续上报。"
+                "下方【若已有覆盖摘要】就优先在这些已知入口上做本路线的定向验证，别从零重复侦察；"
+                "【若暂无覆盖摘要】说明侦察还在跑，你直接按本路线 focus 自己快速摸一遍相关入口就开打，"
+                "不要空等侦察——先扒首页/JS 找本路线相关接口（如认证路线找登录/越权接口），边测边深挖。",
+            ]
     if site_info.strip():
         lines += ["", "# 用户提供的目标相关信息", site_info.strip()[:2000]]
         if detect_user_credentials(site_info):

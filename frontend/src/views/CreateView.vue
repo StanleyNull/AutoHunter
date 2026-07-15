@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref, onMounted } from "vue";
+import { computed, reactive, ref, watch, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
 
@@ -19,6 +19,8 @@ const form = reactive({
   base_url: "", api_key: "", model: "", prompt_version: "legacy",
   fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3,
   enable_worker_fofa_lookup: true, enable_killsweep_fofa_search: true,
+  skip_site_recon: false,
+  skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
 });
 const inherited = reactive({
   base_url: "",
@@ -30,6 +32,18 @@ const inherited = reactive({
   concurrency: 3,
 });
 const isSiteMode = computed(() => form.target_source === "site");
+
+// 粗略识别用户是否在方向说明里给了登录凭据（账号密码 / Cookie / Token）。
+// 命中即默认帮用户勾上「跳过入口盘点」——有凭据可直接登录进系统，泛侦察费 token。
+const looksHasCreds = computed(() => {
+  const t = (form.fofa_query || "");
+  return /(账号|帐号|账户|用户名|user(name)?|密码|pass(word|wd)?|cookie|token|authorization|bearer|jsessionid|session|登录态|凭据|凭证)/i.test(t);
+});
+watch([() => form.fofa_query, isSiteMode], () => {
+  if (isSiteMode.value && !form.skip_recon_touched) {
+    form.skip_site_recon = looksHasCreds.value;
+  }
+});
 
 async function submit() {
   const modelConfig = {};
@@ -44,6 +58,7 @@ async function submit() {
   if (form.fofa_base_url && form.fofa_base_url !== inherited.fofa_base_url) fofaConfig.base_url = form.fofa_base_url;
   if (maxPages !== inherited.max_pages) fofaConfig.max_pages = maxPages;
   if (form.intent_mode !== inherited.intent_mode) fofaConfig.intent_mode = form.intent_mode;
+  if (isSiteMode.value && form.skip_site_recon) fofaConfig.skip_site_recon = true;
 
   const body = {
     name: form.name,
@@ -140,6 +155,15 @@ onMounted(async () => {
       <label>{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
         <textarea v-model="form.manual_targets" rows="3" :placeholder="isSiteMode ? 'https://target.example.com/' : 'http://target.example.com/'"></textarea>
       </label>
+      <label v-if="isSiteMode" class="check-line">
+        <input type="checkbox" v-model="form.skip_site_recon" @change="form.skip_recon_touched = true" />
+        跳过入口盘点侦察（省 token）
+      </label>
+      <p v-if="isSiteMode" class="field-hint">
+        默认会先派一条「入口盘点」路线泛扒首页/robots/API 文档摸清全站入口。<strong>已给登录凭据时不必这样</strong>——
+        Agent 可直接登录进系统，从内部功能发现入口，泛侦察纯属浪费 token。勾选后跳过它（前端 JS/密钥侦察仍保留）。
+        检测到你填了账号密码/Cookie 会自动勾上，可手动取消。
+      </p>
       <details :open="adv">
         <summary @click="adv = !adv">高级：模型 / FOFA / 并发（留空用服务端默认）</summary>
         <label>模型 base_url <input v-model="form.base_url" placeholder="https://api.deepseek.com/v1" /></label>

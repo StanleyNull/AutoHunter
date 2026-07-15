@@ -488,10 +488,18 @@ class Worker:
 
         ssh_cmd = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p {port} {user_host}"
 
+        # 提取子域名作为远程服务器上的工作目录名
+        target_host = urlparse(self.target if "://" in self.target else f"http://{self.target}").netloc.lower()
+        # 去掉端口部分
+        target_host = target_host.split(":")[0]
+        remote_work_dir = f"/tmp/{target_host}"
+
         lines = [
             "\n# 代理服务器（IP 封禁时使用）",
             f"可用代理: {', '.join(servers)}",
             f"SSH 连接命令: {ssh_cmd} \"命令\"",
+            f"远程工作目录: {remote_work_dir}（首次使用前先创建：{ssh_cmd} \"mkdir -p {remote_work_dir}\"）",
+            "重要：在代理服务器上产生的所有文件（curl 输出、脚本、临时文件等）必须放在上述远程工作目录下，禁止在 ~ 或其他目录创建文件。",
             "",
             "使用场景：",
             "1. 当你连续收到 403/WAF 拦截且怀疑是 IP 被封时，用代理发一个干净 GET 交叉验证：",
@@ -500,6 +508,8 @@ class Worker:
             "2. 若确认 IP 封禁后需继续测试（复测模式），所有 HTTP 请求改为：",
             f'   run_shell: {ssh_cmd} "curl -s -k -X METHOD \'URL\' -H \'Header: Value\' -d \'data\'"',
             "   用代理 curl 的输出作为你的 http_request 替代",
+            f"   如需保存输出到文件，使用 {remote_work_dir}/ 作为路径前缀，例如：",
+            f'   run_shell: {ssh_cmd} "curl -s -k \'URL\' -o {remote_work_dir}/resp.html"',
             "",
         ]
 
@@ -508,6 +518,7 @@ class Worker:
             lines.append("!! 本次为 IP 封禁复测：你的本机 IP 已确认被目标 WAF 封禁。")
             lines.append("所有对目标的请求必须通过上述 SSH 代理执行，不要直接用 http_request。")
             lines.append("用 run_shell + ssh curl 替代所有 http_request 调用。")
+            lines.append(f"所有在代理服务器上产生的文件必须放在 {remote_work_dir}/ 下。")
             lines.append("")
 
         return "\n".join(lines)
