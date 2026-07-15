@@ -14,6 +14,7 @@ const updateState = reactive({
   updating: false,
   restarting: false,
   error: "",
+  supported: true,   // 后端是否注册了 update 路由（原版不注册 → 隐藏整个区块）
 });
 
 async function checkUpdate() {
@@ -22,8 +23,13 @@ async function checkUpdate() {
   updateState.info = null;
   try {
     updateState.info = await api.checkUpdate();
+    if (updateState.info?.error && /非 git|无法/.test(updateState.info.error)) {
+      updateState.supported = false;
+    }
   } catch (e) {
-    updateState.error = String(e.message || e).replace(/^\d+\s*/, "");
+    const msg = String(e.message || e);
+    if (/404|not found/i.test(msg)) { updateState.supported = false; }
+    else { updateState.error = msg.replace(/^\d+\s*/, ""); }
   } finally {
     updateState.checking = false;
   }
@@ -150,7 +156,11 @@ async function save() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
+  checkUpdate();
+});
 </script>
 
 <template>
@@ -279,8 +289,8 @@ onMounted(load);
       </form>
     </div>
 
-    <!-- 一键更新 -->
-    <section class="settings-block update-section">
+    <!-- 一键更新（后端未注册 update 路由时自动隐藏，如原版 rsync 部署） -->
+    <section v-if="updateState.supported" class="settings-block update-section">
       <legend>
         <span>版本更新</span>
         <small>从 GitHub 拉取最新代码并自动重启</small>
