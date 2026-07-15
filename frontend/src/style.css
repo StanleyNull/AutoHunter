@@ -1204,6 +1204,138 @@ main {
   bottom: calc(72px + env(safe-area-inset-bottom, 0px));
 }
 
+/* ---------- 工作目录管理 ---------- */
+.workdir-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.workdir-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.workdir-stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.workdir-stat-label {
+  font-size: 11px;
+  color: var(--muted, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.workdir-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.workdir-stat-value.small {
+  font-size: 14px;
+}
+.workdir-stat-value.on {
+  color: #2d9b50;
+}
+.workdir-stat-value.off {
+  color: #e05260;
+}
+.workdir-cleanup-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.workdir-retention-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.workdir-retention-label input {
+  width: 70px;
+  padding: 4px 8px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg, #111);
+  color: var(--ink);
+}
+.workdir-dryrun-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted, #888);
+  cursor: pointer;
+}
+.workdir-dryrun-label input {
+  cursor: pointer;
+}
+.workdir-result {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.workdir-result-summary {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.workdir-result-details {
+  margin-top: 8px;
+}
+.workdir-result-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted, #888);
+  padding: 4px 0;
+}
+.workdir-result-list {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 6px;
+}
+.workdir-result-item {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.workdir-result-item:last-child {
+  border-bottom: none;
+}
+.workdir-item-name {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workdir-item-age {
+  color: var(--muted, #888);
+  white-space: nowrap;
+}
+.workdir-item-size {
+  color: var(--muted, #888);
+  white-space: nowrap;
+}
+
 /* ---------- 任务指挥台 ---------- */
 .mission-hero {
   position: relative; overflow: hidden;

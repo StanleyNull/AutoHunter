@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dto import SettingsUpdateRequest
+from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
 from app.db.session import get_session
 from app.engines import get_engine, list_engines
 from app.engines.translator import translate_fofa_query
@@ -171,3 +173,29 @@ async def test_ssh(session: AsyncSession = Depends(get_session)):
         f"[{r['type']}] {r['server']}: {'OK' if r['ok'] else r['message']}" for r in results
     )
     return {"ok": all_ok, "message": summary, "details": results}
+
+
+# ===== 工作目录管理 =====
+
+
+@router.get("/workdir/stats")
+async def workdir_stats():
+    """获取工作目录磁盘占用统计。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, get_workdir_stats)
+
+
+@router.post("/workdir/cleanup")
+async def workdir_cleanup(
+    retention_days: int = Query(default=None, ge=0, le=365, description="保留天数，留空用配置默认值，0=不清理"),
+    dry_run: bool = Query(default=False, description="仅模拟运行，不实际删除"),
+):
+    """手动触发工作目录清理。
+
+    按目录最后修改时间判断：超过 retention_days 天未修改的目录将被删除。
+    受保护目录（node_modules/browser_profile 等）不会被删除。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, functools.partial(cleanup_workdir, retention_days=retention_days, dry_run=dry_run)
+    )

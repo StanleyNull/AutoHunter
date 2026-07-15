@@ -65,6 +65,10 @@ class WorkerConfig(BaseModel):
     prompt_version: str = os.environ.get("WORKER_PROMPT_VERSION", "legacy")
     # 工作目录根
     work_root: str = os.environ.get("WORKER_WORK_ROOT", "/tmp/autohunter/work")
+    # 工作目录自动清理：超过此天数未修改的目标目录将被删除（0=不清理）
+    work_retention_days: int = int(os.environ.get("WORKER_WORK_RETENTION_DAYS", "7"))
+    # 自动清理检查间隔（小时）
+    work_cleanup_interval_hours: int = int(os.environ.get("WORKER_WORK_CLEANUP_INTERVAL_HOURS", "6"))
 
     def rounds_for(self, src_type: str | None) -> tuple[int, int]:
         """按 src_type 返回 (max_rounds, soft_rounds)。企业模式给更大深挖预算。"""

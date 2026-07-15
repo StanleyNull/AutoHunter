@@ -263,6 +263,10 @@ export const api = {
   testFOFA: () => req("POST", "/api/settings/test/fofa"),
   testSSH: () => req("POST", "/api/settings/test/ssh"),
   testEngine: (engineName) => req("POST", `/api/settings/test/engine/${engineName}`),
+  // 工作目录管理
+  workdirStats: () => req("GET", "/api/settings/workdir/stats"),
+  workdirCleanup: (retentionDays, dryRun = false) =>
+    req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: dryRun })}`),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit, opts = {}) =>

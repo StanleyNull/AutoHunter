@@ -29,6 +29,7 @@ from app.orchestrator import manager
 from app.settings_service import init_settings_cache
 from app.security import SECURITY_HEADERS, auth_enabled, protected_path, request_allowed, resolve_role, token_from_headers
 from app.waf import WAF_BLOCK_MODE, inspect_request, waf_headers
+from app.workdir_cleanup import run_periodic_cleanup
 
 # Vite 构建产物目录（多阶段构建拷贝到此）
 WEB_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -106,6 +107,7 @@ async def lifespan(app: FastAPI):
     )
     asyncio.get_running_loop().set_default_executor(default_executor)
     lag_monitor = asyncio.create_task(_loop_lag_monitor())
+    cleanup_task = asyncio.create_task(run_periodic_cleanup())
     await init_db()
     await init_settings_cache()
     if not auth_enabled():
@@ -122,10 +124,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         lag_monitor.cancel()
-        try:
-            await lag_monitor
-        except asyncio.CancelledError:
-            pass
+        cleanup_task.cancel()
+        for t in (lag_monitor, cleanup_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         await manager.shutdown()
         default_executor.shutdown(wait=False, cancel_futures=True)
 
