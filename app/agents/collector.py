@@ -448,17 +448,10 @@ async def _fofa_collect(
 
     # 每日额度耗尽冷却检查：FOFA [820041] 等每日上限错误，每小时重试一次，
     # 12 次都卡才停任务（适合挂机过夜，等 FOFA 次日额度恢复自动继续）。
+    # 冷却期内静默跳过，不重复弹消息（初始检测已报告过，避免每轮刷屏）。
     daily_limit_until = float(cfg.get("daily_limit_until", 0))
     if daily_limit_until > time.monotonic():
-        remain_min = (daily_limit_until - time.monotonic()) / 60
-        dl_count = int(cfg.get("daily_limit_count", 0))
         cfg["collector_phase"] = "fofa_error"
-        await report(
-            "fofa_error",
-            f"{engine.display_name} 每日额度耗尽，{remain_min:.0f} 分钟后重试（第 {dl_count}/12 次）",
-            fofa_error="daily_limit_cooldown", cursor=cursor, cooldown_remaining_min=remain_min,
-            daily_limit_count=dl_count,
-        )
         task.fofa_config = {**cfg}
         return 0
 
