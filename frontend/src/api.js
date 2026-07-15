@@ -260,6 +260,9 @@ export const api = {
   runtimeLogStats: () => req("GET", "/api/runtime-logs/stats"),
   runtimeLogs: (level, agent, q, opts = {}) =>
     req("GET", `/api/runtime-logs${qs({ level, agent, q, ...opts })}`),
+  // 一键更新
+  checkUpdate: () => req("GET", "/api/update/check"),
+  runUpdate: () => req("POST", "/api/update/run"),
 };
 
 export function wsUrl(taskId) {

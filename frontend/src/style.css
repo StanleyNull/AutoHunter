@@ -1035,6 +1035,71 @@ main {
   bottom: calc(72px + env(safe-area-inset-bottom, 0px));
 }
 
+/* ---------- 版本更新区块 ---------- */
+.update-section {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px 18px;
+  background: color-mix(in oklch, var(--surface) 94%, var(--bg));
+}
+.update-section legend {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-bottom: 14px;
+}
+.update-section legend span { font-size: 15px; font-weight: 700; color: var(--ink); }
+.update-section legend small { font-size: 12px; color: var(--muted); }
+.update-body { display: flex; flex-direction: column; gap: 12px; }
+.btn-check {
+  align-self: flex-start;
+  padding: 8px 18px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--ink); font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all .2s;
+}
+.btn-check:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-check:disabled { opacity: .5; cursor: wait; }
+.update-error {
+  color: var(--danger); font-size: 13px;
+  background: color-mix(in oklch, var(--danger) 8%, transparent);
+  padding: 8px 12px; border-radius: 8px;
+}
+.update-uptodate {
+  color: var(--ok); font-size: 13px; font-weight: 500;
+}
+.update-info { display: flex; flex-direction: column; gap: 10px; }
+.update-version { display: flex; align-items: center; gap: 8px; font-family: "IBM Plex Mono", monospace; font-size: 13px; }
+.version-old { color: var(--muted); }
+.version-arrow { color: var(--muted); }
+.version-new { color: var(--ok); font-weight: 700; }
+.update-badge {
+  font-size: 11px; font-weight: 600; color: var(--warn);
+  background: color-mix(in oklch, var(--warn) 12%, transparent);
+  padding: 2px 8px; border-radius: 999px;
+}
+.update-latest-msg { font-size: 13px; color: var(--ink); }
+.update-files summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.update-files ul { margin: 6px 0 0; padding-left: 20px; font-size: 12px; color: var(--muted); max-height: 160px; overflow-y: auto; }
+.update-files li { font-family: "IBM Plex Mono", monospace; line-height: 1.8; }
+.update-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
+.update-actions button.primary { padding: 8px 20px; font-size: 13px; }
+.update-hint { font-size: 12px; color: var(--muted); }
+.update-actions.rebuild { flex-direction: column; align-items: stretch; gap: 8px; }
+.update-warn { font-size: 13px; color: var(--warn); }
+.rebuild-cmd {
+  font-family: "IBM Plex Mono", monospace; font-size: 12px;
+  background: var(--bg); border: 1px solid var(--border-soft);
+  border-radius: 8px; padding: 10px 12px; color: var(--ink);
+  white-space: pre-wrap; word-break: break-all;
+}
+.update-restarting { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 20px; }
+.update-restarting p { color: var(--muted); font-size: 14px; }
+.update-spinner {
+  width: 28px; height: 28px; border: 3px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ---------- 任务指挥台 ---------- */
 .mission-hero {
   position: relative; overflow: hidden;
