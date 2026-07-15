@@ -119,6 +119,9 @@ class ToolExecutor:
         # 全模式启用（登录后同样必须带登录态深入）。
         self._session_cookies: dict[str, str] = {}
         self._session_headers: dict[str, str] = {}
+        # 工作笔记：worker 用 update_notes 工具维护，每轮注入回 messages，
+        # 解决"历史压缩后忘了自己发现过什么"的连续性断裂问题。
+        self._worker_notes: str = ""
 
     def cancel_running(self) -> None:
         """协作取消：置取消信号 + 杀子进程。仅用于控制面真取消（pause/stop/超时）。
@@ -449,6 +452,33 @@ class ToolExecutor:
             }
         except Exception as e:
             return {"ok": False, "error": f"session_set 异常: {type(e).__name__}: {e}"}
+
+    # ---- 工作笔记（跨轮持久记忆）----
+    def update_notes(self, notes: str = "") -> dict[str, Any]:
+        """worker 更新工作笔记。笔记每轮注入回 messages，不受历史压缩影响。"""
+        self._worker_notes = (notes or "").strip()[:4000]
+        return {"ok": True, "notes_len": len(self._worker_notes)}
+
+    def session_status_block(self) -> str:
+        """生成当前会话态 + 工作笔记的摘要块，供 worker 每轮注入 messages。
+
+        这是连续性的核心：即使历史被压缩成摘要、即使过了 30 轮，worker 仍能
+        '看到'自己当前持有哪些 cookie/header（登录态不断）、以及自己记录的关键
+        进度（端点/凭据/已试方向/下一步计划），不会重复扫同一条路。
+        """
+        lines = ["# 当前状态（跨轮持久，每轮自动注入）"]
+        cookies = sorted(self._session_cookies.keys()) if self._session_cookies else []
+        headers = sorted(self._session_headers.keys()) if self._session_headers else []
+        if cookies or headers:
+            lines.append(f"- 会话态：持有 cookie {cookies}，鉴权头 {headers}（http_request 自动携带）")
+        else:
+            lines.append("- 会话态：暂无登录态（拿到凭证后用 session_set 登记）")
+        if self._worker_notes:
+            lines.append("- 工作笔记：")
+            lines.append(self._worker_notes)
+        else:
+            lines.append("- 工作笔记：（暂无。发现端点/凭据/token/突破口后用 update_notes 记录，否则跨轮会忘）")
+        return "\n".join(lines) + "\n\n"
 
     # ---- decode_transform ----
     def decode_transform(self, value: str = "", mode: str = "auto") -> dict[str, Any]:

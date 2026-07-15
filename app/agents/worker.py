@@ -223,6 +223,11 @@ class Worker:
                 if self._js_tool_enabled:
                     tools += JS_ANALYZER_TOOL_SCHEMAS
                 send_messages = compact_messages(messages, rounds)
+                # 每轮注入当前状态块（会话态 + 工作笔记）——临时消息，不存入 messages 历史，
+                # 避免累积膨胀；每轮新鲜生成，始终反映最新的 cookie/token/notes。
+                # 这是连续性的核心：即使旧历史被压缩成摘要，worker 仍能看到自己当前
+                # 持有哪些登录态、记录了哪些关键进度，不会跨轮"失忆"重复扫。
+                send_messages.append({"role": "user", "content": self.executor.session_status_block()})
                 msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
             except Exception as e:
                 self._emit("llm_error", error=str(e))
@@ -265,8 +270,8 @@ class Worker:
 
             if not tool_calls:
                 no_tool_rounds += 1
-                if no_tool_rounds >= 3:
-                    self._auto_finish("模型连续 3 轮没有调用工具或 finish，系统自动收敛。")
+                if no_tool_rounds >= 6:
+                    self._auto_finish("模型连续 6 轮没有调用工具或 finish，系统自动收敛。")
                     break
                 # 没有工具调用也没结束，提醒模型继续或收尾
                 messages.append({"role": "user", "content": "继续调用工具验证，或 finish。"})
@@ -305,6 +310,10 @@ class Worker:
                             "guidance": "不要重复触发同一异常。请换成最小可验证请求；若无明确路径就 finish(no_vuln)。",
                         }
                         self._emit("tool_exception", round=rounds, tool=name, error=str(e))
+                # 工具失败时注入针对性恢复提示，帮模型在同流里快速纠偏而非从头推理。
+                hint = self._recovery_hint(name, result)
+                if hint:
+                    result.setdefault("guidance", hint)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -334,14 +343,14 @@ class Worker:
                     consecutive_failures = 0
                     consecutive_blocked = 0
                     continue
-                if consecutive_arg_errors >= 2:
-                    self._auto_finish("连续 2 次工具参数错误，模型未修正，系统自动收敛。")
+                if consecutive_arg_errors >= 3:
+                    self._auto_finish("连续 3 次工具参数错误，模型未修正，系统自动收敛。")
                     break
                 if consecutive_network_failures >= 3:
                     self._auto_finish("连续 3 次网络/超时失败，目标当前不可稳定验证，系统自动收敛。")
                     break
-                if consecutive_failures >= 5:
-                    self._auto_finish("连续 5 次工具失败且无新证据，系统自动收敛。")
+                if consecutive_failures >= 8:
+                    self._auto_finish("连续 8 次工具失败且无新证据，系统自动收敛。")
                     break
 
             # 补齐所有未响应的 tool_call，保证消息历史合法（防 400）。
@@ -586,6 +595,10 @@ class Worker:
                 clear=bool(args.get("clear", False)),
             )
 
+        if name == "update_notes":
+            self._mark_tool_used(name, rnd)
+            return self.executor.update_notes(notes=args.get("notes", ""))
+
         if name == "report_intel":
             self._mark_tool_used(name, rnd)
             return self._report_intel(args)
@@ -697,6 +710,40 @@ class Worker:
             "error": f"{tool} 工具参数缺失：{missing}",
             "guidance": guidance,
         }
+
+    def _recovery_hint(self, tool: str, result: dict) -> str:
+        """工具失败时返回针对性恢复提示，帮模型在同流里快速纠偏而非从头推理。"""
+        if result.get("ok") is True or result.get("guidance"):
+            return ""
+        if tool == "http_request":
+            sc = result.get("status_code")
+            err = str(result.get("error", ""))
+            if sc == 401:
+                return "401 未授权：需要登录态。若已 session_set 过，可能 session 过期了——重新登录或换凭证；若本就是测未授权，401 说明接口有鉴权，换个不需要登录的入口或测越权。"
+            if sc == 403:
+                return "403 禁止：常见原因——路径不对(试目录爆破/换路径)、需要特定角色/IP、WAF 拦截(看响应体有无 WAF 特征，用 suggest_waf_bypass)、或缺少 CSRF token。换路径或换攻击面，别死磕同一个 403。"
+            if sc == 404:
+                return "404 不存在：路径不对。从 JS/首页/接口文档里重新找正确路径，或试常见变体(/api/v1/、/api/v2/、大小写、尾斜杠)。"
+            if sc in (500, 502, 503):
+                return f"{sc} 服务端错误：可能是 payload 触发了异常(注入/RCE 线索)或服务临时不可用。保留这个请求作为证据，换参数复现确认；若多次稳定 500 可作为注入/异常漏洞线索。"
+            if sc == 302:
+                loc = (result.get("response_headers", {}) or {}).get("Location", "")
+                return f"302 跳转到 {loc[:120]}：若是跳登录页说明需要登录态；若是跳 ticket/SSO 链，设 follow_redirects=true 跟完整个登录链。"
+            if "timed out" in err.lower() or "timeout" in err.lower():
+                return "请求超时：目标可能慢或不可达。换更小范围的请求、加大 timeout、或确认目标是否在线；连续超时就 finish。"
+            if "connection" in err.lower() or "refused" in err.lower() or "unreachable" in err.lower():
+                return "连接失败：目标可能下线/防火墙拦截/端口未开放。确认目标可达性(换个端口/协议)；不可达就 finish(no_vuln)。"
+        if tool == "run_shell":
+            rc = result.get("return_code")
+            if rc and rc != 0:
+                return f"命令退出码 {rc}：检查命令语法/参数/路径是否正确。换最小命令验证环境，别重复跑同一条失败的命令。"
+            if result.get("timed_out"):
+                return "命令超时：可能命令本身耗时(如 nmap 全端口)或挂起。换更小范围或加 timeout 参数；别重复跑超时命令。"
+            if result.get("blocked"):
+                return ""
+        if "参数" in str(result.get("error", "")) or "JSON" in str(result.get("error", "")):
+            return "参数格式错误：检查工具参数是否合法 JSON、必填字段是否齐全。对照工具 schema 修正后重试一次。"
+        return ""
 
     def _auto_finish(self, reason: str) -> None:
         verdict = "found" if self.findings else "no_vuln"

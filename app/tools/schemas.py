@@ -297,7 +297,21 @@ SESSION_TOOL_SCHEMAS = [
                 },
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_notes",
+            "description": "更新你的工作笔记（跨轮持久，不会被历史压缩丢掉，每轮自动注入给你）。发现关键信息就立刻记：已确认的端点/凭据/token/cookie、已试过但失败的方向、当前突破口、下一步计划。这是你跨轮'记得自己干了什么'的关键——不记就会重复扫同一条路。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "notes": {"type": "string", "description": "工作笔记内容。建议分块写：【已发现】端点/凭据/token/cookie；【已试失败】方向+原因；【当前突破口】；【下一步】计划。控制在 1500 字内。"},
+                },
+                "required": ["notes"],
+            },
+        },
+    },
 ]
 
 
