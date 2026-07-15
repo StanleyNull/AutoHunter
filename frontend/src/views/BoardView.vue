@@ -674,23 +674,34 @@ const totalTargets = computed(() =>
 const resolvedTargets = computed(() =>
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
 );
-const progressPct = computed(() =>
-  totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0
+// 搜集阶段：任务在跑但还没产出目标（FOFA 查询/过滤/探活期间）。
+// 这时主进度条按 0% 算会让人以为卡住了，改为反映搜集进度 + 不确定动画。
+const isCollecting = computed(() =>
+  task.value?.status === "running" && totalTargets.value === 0
 );
+const progressPct = computed(() => {
+  if (isCollecting.value) return collectorPct.value || 8; // 搜集阶段用搜集进度，最低 8% 不至于全空
+  return totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0;
+});
 const collectorCfg = computed(() => task.value?.fofa_config || {});
 const collectorVisible = computed(() => {
   // 过滤/入队完成后（phase=dispatch）自动隐藏，不再占位。
   if (collectorCfg.value.collector_phase === "dispatch") return false;
+  // 搜集阶段（running + 还没目标）即使没收到 collector_phase 事件也立即显示，
+  // 消除"启动后空窗期体感空闲"的问题。
+  if (isCollecting.value) return true;
   return !!(collectorCfg.value.collector_phase || collectorCfg.value.collector_phase_text);
 });
 const collectorText = computed(() =>
-  collectorCfg.value.collector_phase_text || phaseLabel(collectorCfg.value.collector_phase) || "正在跑过滤器阶段"
+  collectorCfg.value.collector_phase_text ||
+  phaseLabel(collectorCfg.value.collector_phase) ||
+  (isCollecting.value ? "正在初始化搜集引擎…" : "正在跑过滤器阶段")
 );
 const collectorMeta = computed(() => {
   const total = Number(collectorCfg.value.last_target_filter_total || 0);
   const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
   if (total > 0) return `过滤器 ${done}/${total}`;
-  return phaseLabel(collectorCfg.value.collector_phase);
+  return phaseLabel(collectorCfg.value.collector_phase) || (isCollecting.value ? "初始化中" : "");
 });
 const collectorPct = computed(() => {
   const phase = collectorCfg.value.collector_phase || "";
@@ -886,8 +897,8 @@ function parseEventTs(ts) {
       </div>
       <div class="mission-side">
         <div class="progress-ring">
-          <b>{{ progressPct }}%</b>
-          <span>处置进度</span>
+          <b>{{ (isCollecting && !collectorCfg.collector_phase) ? '…' : progressPct + '%' }}</b>
+          <span>{{ isCollecting ? "搜集进度" : "处置进度" }}</span>
         </div>
         <div class="mission-actions" v-if="!readonly">
           <button @click="openEdit">编辑参数</button>
@@ -897,7 +908,7 @@ function parseEventTs(ts) {
         </div>
         <div v-else class="mission-actions readonly-hint">{{ authRoleRef === 'readonly' ? "只读模式" : "未认证" }}</div>
       </div>
-      <div class="mission-progress"><i :style="{ transform: `scaleX(${progressPct / 100})` }"></i></div>
+      <div class="mission-progress" :class="{ indeterminate: isCollecting }"><i :style="{ transform: `scaleX(${progressPct / 100})` }"></i></div>
     </div>
 
     <!-- 单站协作态势：三阶段流水线（侦察→主题深挖→定向追打），体现同站多路线协同 -->

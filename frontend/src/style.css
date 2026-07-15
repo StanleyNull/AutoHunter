@@ -1114,6 +1114,17 @@ main {
   display: block; height: 100%; width: 100%; transform-origin: left;
   background: var(--accent); transition: transform .45s ease;
 }
+/* 搜集阶段不确定动画：还没产出目标时进度条流动，明确"在干活不是卡住" */
+.mission-progress.indeterminate i {
+  animation: mission-indeterminate 1.6s ease-in-out infinite;
+  background: var(--info);
+}
+@keyframes mission-indeterminate {
+  0%   { transform: scaleX(0); transform-origin: left; }
+  45%  { transform: scaleX(0.35); transform-origin: left; }
+  55%  { transform: scaleX(0.35); transform-origin: right; }
+  100% { transform: scaleX(0); transform-origin: right; }
+}
 .collector-stage {
   background: color-mix(in oklch, var(--surface) 92%, var(--bg));
   border: 1px solid var(--border);

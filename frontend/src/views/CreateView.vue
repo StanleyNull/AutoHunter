@@ -30,6 +30,7 @@ const inherited = reactive({
   concurrency: 3,
 });
 const isSiteMode = computed(() => form.target_source === "site");
+const isFofaMode = computed(() => form.target_source === "fofa");
 
 // 粗略识别用户是否在方向说明里给了登录凭据（账号密码 / Cookie / Token）。
 // 命中即默认帮用户勾上「跳过入口盘点」——有凭据可直接登录进系统，泛侦察费 token。
@@ -38,6 +39,7 @@ const looksHasCreds = computed(() => {
   return /(账号|帐号|账户|用户名|user(name)?|密码|pass(word|wd)?|cookie|token|authorization|bearer|jsessionid|session|登录态|凭据|凭证)/i.test(t);
 });
 watch([() => form.fofa_query, isSiteMode], () => {
+  // 只在用户没手动调过开关时，才自动跟随「是否检测到凭据」。
   if (isSiteMode.value && !form.skip_recon_touched) {
     form.skip_site_recon = looksHasCreds.value;
   }
@@ -147,8 +149,8 @@ onMounted(async () => {
       <label v-else>目标相关信息 / 协作重点 / 已有凭据
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写：重点方向、后台位置、以及【已有的登录凭据】。给了凭据 Agent 会先在前台测，再登录进系统内部深挖（越权/敏感数据/上传/写操作）。&#10;例：后台在 /admin，重点测 API、越权、上传。&#10;已有账号：test / Test@123&#10;或登录态：Cookie: JSESSIONID=xxxx（或 Authorization: Bearer xxxx）"></textarea>
       </label>
-      <label>{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
-        <textarea v-model="form.manual_targets" rows="3" :placeholder="isSiteMode ? 'https://target.example.com/' : 'http://target.example.com/'"></textarea>
+      <label v-if="!isFofaMode">{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
+        <textarea v-model="form.manual_targets" rows="3" :placeholder="isSiteMode ? 'https://target.example.com/' : 'http://211.84.165.243/'"></textarea>
       </label>
       <label v-if="isSiteMode" class="check-line">
         <input type="checkbox" v-model="form.skip_site_recon" @change="form.skip_recon_touched = true" />
