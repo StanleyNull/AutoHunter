@@ -32,7 +32,7 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 # 一遇写锁立刻 SQLITE_BUSY）。24x7 下 orchestrator 写事件 + N 个 heartbeat +
 # API 读 + worker 落库高并发，这几项是缓解锁竞争性价比最高的优化。
 _CONNECT_PRAGMAS = (
-    "PRAGMA busy_timeout=5000;",          # 写锁最多等 5s 再报错，吸收瞬时竞争
+    "PRAGMA busy_timeout=15000;",         # 写锁最多等 15s 再报错，吸收高并发竞争
     "PRAGMA synchronous=NORMAL;",         # WAL 下安全，显著降低写延迟
     "PRAGMA foreign_keys=ON;",
     "PRAGMA cache_size=-64000;",          # 约 64MB page cache，减少看板/列表热读扫盘
