@@ -50,6 +50,72 @@ async function runEngineTest(engineName) {
   }
 }
 
+// ---- 一键更新 ----
+const updateState = reactive({
+  checking: false,
+  info: null,       // check_update 返回
+  updating: false,
+  restarting: false,
+  error: "",
+  supported: true,   // 后端是否注册了 update 路由（原版不注册 → 隐藏整个区块）
+});
+
+async function checkUpdate() {
+  updateState.checking = true;
+  updateState.error = "";
+  updateState.info = null;
+  try {
+    updateState.info = await api.checkUpdate();
+    if (updateState.info?.error && /非 git|无法/.test(updateState.info.error)) {
+      updateState.supported = false;
+    }
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (/404|not found/i.test(msg)) { updateState.supported = false; }
+    else { updateState.error = msg.replace(/^\d+\s*/, ""); }
+  } finally {
+    updateState.checking = false;
+  }
+}
+
+async function runUpdate() {
+  if (!confirm("确认更新？服务会自动重启，进行中的任务会优雅暂停。")) return;
+  updateState.updating = true;
+  updateState.error = "";
+  try {
+    const r = await api.runUpdate();
+    if (r.ok) {
+      updateState.restarting = true;
+      pollHealth();
+    } else {
+      updateState.error = r.error || "更新失败";
+      if (r.command) updateState.info = { ...updateState.info, rebuild_command: r.command };
+    }
+  } catch (e) {
+    updateState.error = String(e.message || e).replace(/^\d+\s*/, "");
+  } finally {
+    updateState.updating = false;
+  }
+}
+
+function pollHealth() {
+  let attempts = 0;
+  const timer = setInterval(async () => {
+    attempts++;
+    try {
+      const r = await fetch("/health");
+      if (r.ok) {
+        clearInterval(timer);
+        updateState.restarting = false;
+        toast("更新完成，服务已重启 🎉");
+        updateState.info = null;
+        load();
+      }
+    } catch {}
+    if (attempts > 60) { clearInterval(timer); updateState.restarting = false; updateState.error = "重启超时，请手动刷新页面"; }
+  }, 3000);
+}
+
 const form = reactive({
   base_url: "",
   api_key: "",
@@ -209,6 +275,8 @@ async function save() {
 onMounted(() => {
   load();
   loadWorkdirStats();
+  // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
+  checkUpdate();
 });
 
 async function loadWorkdirStats() {
@@ -557,6 +625,52 @@ function removePricingRow(idx) {
         </div>
       </form>
     </div>
+
+    <!-- 一键更新（后端未注册 update 路由时自动隐藏，如原版 rsync 部署） -->
+    <section v-if="updateState.supported" class="settings-block update-section">
+      <legend>
+        <span>版本更新</span>
+        <small>从 GitHub 拉取最新代码并自动重启</small>
+      </legend>
+      <div v-if="updateState.restarting" class="update-restarting">
+        <div class="update-spinner"></div>
+        <p>服务正在重启，自动重连中…</p>
+      </div>
+      <div v-else class="update-body">
+        <button class="btn-check" @click="checkUpdate" :disabled="updateState.checking">
+          {{ updateState.checking ? "检测中…" : "检查更新" }}
+        </button>
+        <div v-if="updateState.error" class="update-error">{{ updateState.error }}</div>
+        <div v-if="updateState.info?.update_available" class="update-info">
+          <div class="update-version">
+            <span class="version-old">{{ updateState.info.current_commit }}</span>
+            <span class="version-arrow">→</span>
+            <span class="version-new">{{ updateState.info.latest_commit }}</span>
+            <span class="update-badge">落后 {{ updateState.info.commits_behind }} 个提交</span>
+          </div>
+          <div class="update-latest-msg">{{ updateState.info.latest_message }}</div>
+          <details class="update-files">
+            <summary>变更文件 ({{ updateState.info.changed_files?.length || 0 }})</summary>
+            <ul>
+              <li v-for="f in updateState.info.changed_files" :key="f">{{ f }}</li>
+            </ul>
+          </details>
+          <div v-if="updateState.info.hot_updateable" class="update-actions">
+            <button class="primary" @click="runUpdate" :disabled="updateState.updating">
+              {{ updateState.updating ? "更新中…" : "一键更新并重启" }}
+            </button>
+            <span class="update-hint">仅后端代码变更，可热更新（git pull + 自动重启）</span>
+          </div>
+          <div v-else class="update-actions rebuild">
+            <p class="update-warn">⚠ 本次更新包含前端/Dockerfile 变更，需在服务器执行完整重建：</p>
+            <code class="rebuild-cmd">{{ updateState.info.rebuild_command || 'git pull && docker compose up -d --build' }}</code>
+          </div>
+        </div>
+        <div v-else-if="updateState.info && !updateState.info.update_available && !updateState.info.error" class="update-uptodate">
+          ✓ 已是最新版本（{{ updateState.info.current_commit }}）
+        </div>
+      </div>
+    </section>
 
     <div v-if="toastMsg" class="toast settings-toast">{{ toastMsg }}</div>
   </section>

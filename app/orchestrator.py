@@ -558,6 +558,19 @@ class TaskRunner:
                 await self.pause(reason)
                 return
 
+            # FOFA 每日额度耗尽，连续 12 次（约 12 小时）未恢复 → 自动暂停任务。
+            # 适合挂机过夜：额度恢复则自动继续搜集；12 小时都没恢复才停。
+            if (task.fofa_config or {}).get("daily_limit_exhausted"):
+                dl_count = int((task.fofa_config or {}).get("daily_limit_count", 0))
+                last_err = (task.fofa_config or {}).get("last_fofa_error", "")
+                reason = f"FOFA 每日额度耗尽，连续 {dl_count} 次（约 {dl_count} 小时）未恢复，已自动暂停任务"
+                task.status = "paused"
+                await session.commit()
+                await self._log(session, "orchestrator", "auto_paused", f"{reason}（最后错误：{last_err}）",
+                                daily_limit_count=dl_count, fofa_error=last_err)
+                await self.pause(reason)
+                return
+
             if added:
                 fc = task.fofa_config or {}
                 cur_q = fc.get("current_query", "")

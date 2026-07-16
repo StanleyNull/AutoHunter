@@ -304,6 +304,9 @@ export const api = {
   dailyOverview: (month) => req("GET", `/api/stats/daily-overview${qs({ month })}`),
   // 数据库连接池状态
   poolStats: () => req("GET", "/api/stats/pool"),
+  // 一键更新
+  checkUpdate: () => req("GET", "/api/update/check"),
+  runUpdate: () => req("POST", "/api/update/run"),
 };
 
 export function wsUrl(taskId) {

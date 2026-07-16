@@ -1199,25 +1199,17 @@ const resolvedTargets = computed(() =>
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
 );
 const pendingInputCount = computed(() => stats.value.pending_input ?? 0);
-const progressPct = computed(() =>
-  totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0
-);
 const collectorCfg = computed(() => task.value?.fofa_config || {});
-const collectorVisible = computed(() => {
-  // 搜集终态自动隐藏进度条，不再占位：
-  // FOFA 入队完成（dispatch）、证书透明度搜集完成（ct_done）/ 无根域名（ct_no_domains）。
+// 搜集阶段判定：搜集器还在跑（有 phase 且未到 dispatch）就视为搜集中，
+// 即使已有部分目标入队。这样搜集+处置并行期主进度条保持不确定动画，
+// 不会因 totalTargets 分批增长而导致 resolved/total 进度倒退。
+// 手动/单站模式无搜集器 phase，首批目标入队后即切到确定性进度。
+const isCollecting = computed(() => {
+  if (task.value?.status !== "running") return false;
   const phase = collectorCfg.value.collector_phase;
-  if (phase === "dispatch" || phase === "ct_done" || phase === "ct_no_domains") return false;
-  return !!(collectorCfg.value.collector_phase || collectorCfg.value.collector_phase_text);
-});
-const collectorText = computed(() =>
-  collectorCfg.value.collector_phase_text || phaseLabel(collectorCfg.value.collector_phase) || "正在跑过滤器阶段"
-);
-const collectorMeta = computed(() => {
-  const total = Number(collectorCfg.value.last_target_filter_total || 0);
-  const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
-  if (total > 0) return `过滤器 ${done}/${total}`;
-  return phaseLabel(collectorCfg.value.collector_phase);
+  if (phase && phase !== "dispatch") return true;    // 搜集器在跑
+  if (!phase && totalTargets.value === 0) return true; // 初始化（还没收到 phase）
+  return false;
 });
 const collectorPct = computed(() => {
   const phase = collectorCfg.value.collector_phase || "";
@@ -1235,6 +1227,30 @@ const collectorPct = computed(() => {
   if (phase === "ct_enqueue") return 80;
   if (phase === "ct_done") return 100;
   return 25;
+});
+const progressPct = computed(() => {
+  if (isCollecting.value) return collectorPct.value || 8;
+  return totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0;
+});
+const collectorVisible = computed(() => {
+  // 搜集终态自动隐藏进度条：FOFA 入队完成（dispatch）、
+  // 证书透明度搜集完成（ct_done）/ 无根域名（ct_no_domains）。
+  if (["dispatch", "ct_done", "ct_no_domains"].includes(collectorCfg.value.collector_phase)) return false;
+  // 搜集阶段即使没收到 collector_phase 事件也立即显示，
+  // 消除"启动后空窗期体感空闲"的问题。
+  if (isCollecting.value) return true;
+  return !!(collectorCfg.value.collector_phase || collectorCfg.value.collector_phase_text);
+});
+const collectorText = computed(() =>
+  collectorCfg.value.collector_phase_text ||
+  phaseLabel(collectorCfg.value.collector_phase) ||
+  (isCollecting.value ? "正在初始化搜集引擎…" : "正在跑过滤器阶段")
+);
+const collectorMeta = computed(() => {
+  const total = Number(collectorCfg.value.last_target_filter_total || 0);
+  const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
+  if (total > 0) return `过滤器 ${done}/${total}`;
+  return phaseLabel(collectorCfg.value.collector_phase) || (isCollecting.value ? "初始化中" : "");
 });
 function phaseLabel(phase) {
   return ({
@@ -1535,8 +1551,8 @@ function fmtTime(iso) {
       </div>
       <div class="mission-side">
         <div class="progress-ring">
-          <b>{{ progressPct }}%</b>
-          <span>处置进度</span>
+          <b>{{ (isCollecting && !collectorCfg.collector_phase) ? '…' : progressPct + '%' }}</b>
+          <span>{{ isCollecting ? "搜集进度" : "处置进度" }}</span>
         </div>
         <div class="mission-actions" v-if="!readonly">
           <button @click="openEdit">编辑参数</button>
@@ -1549,7 +1565,7 @@ function fmtTime(iso) {
         </div>
         <div v-else class="mission-actions readonly-hint">{{ authRoleRef === 'readonly' ? "只读模式" : "未认证" }}</div>
       </div>
-      <div class="mission-progress"><i :style="{ transform: `scaleX(${progressPct / 100})` }"></i></div>
+      <div class="mission-progress" :class="{ indeterminate: isCollecting }"><i :style="{ transform: `scaleX(${progressPct / 100})` }"></i></div>
     </div>
 
     <!-- 单站协作态势：三阶段流水线（侦察→主题深挖→定向追打），体现同站多路线协同 -->
