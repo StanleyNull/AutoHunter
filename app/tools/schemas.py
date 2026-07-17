@@ -230,13 +230,13 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "finish",
-            "description": "结束对当前目标的挖掘。所有该挖的都挖完了，或确认无漏洞时调用。IP 被 WAF 封禁且交叉验证确认时也调用（verdict=ip_banned，目标将在后续代理模式下复测）。目标需要用户提供凭证/完成注册才能继续时调用 verdict=needs_auth（需附带 auth_assessment）。",
-            "parameters": {
+           "name": "finish",
+            "description": "结束对当前目标的挖掘。所有该挖的都挖完了，或确认无漏洞时调用。IP 被 WAF 封禁时：先尝试 enable_proxy_mode() 切代理继续测；仅当代理不可用或代理也连不上目标时才调用 verdict=ip_banned（目标将在后续重测阶段代理复测）。目标需要用户提供凭证/完成注册才能继续时调用 verdict=needs_auth（需附带 auth_assessment）。",
+           "parameters": {
                 "type": "object",
                 "properties": {
-                    "verdict": {"type": "string", "enum": ["found", "no_vuln", "ip_banned", "needs_auth"], "description": "found=至少提交过一个漏洞；no_vuln=确认无漏洞；ip_banned=确认 IP 被 WAF 封禁（需先用代理交叉验证）；needs_auth=目标有攻击面但需要用户提供凭证/完成注册才能继续深入"},
-                    "summary": {"type": "string", "description": "本次挖掘总结：测了哪些面、为什么是这个结论"},
+                    "verdict": {"type": "string", "enum": ["found", "no_vuln", "ip_banned", "needs_auth"], "description": "found=至少提交过一个漏洞；no_vuln=确认无漏洞；ip_banned=已尝试 enable_proxy_mode 后代理仍不可达（或无代理配置），确认 IP 被封；needs_auth=目标有攻击面但需要用户提供凭证/完成注册才能继续深入"},
+                   "summary": {"type": "string", "description": "本次挖掘总结：测了哪些面、为什么是这个结论"},
                     "deepen_lead": {
                         "type": "string",
                         "description": (
@@ -361,6 +361,17 @@ SESSION_TOOL_SCHEMAS = [
     },
 ]
 
+
+PROXY_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "enable_proxy_mode",
+            "description": "切换为代理模式：后续 http_request 自动通过 SSH 代理发送，无需手动 ssh curl。当你交叉验证确认本地 IP 被目标 WAF 封禁时（用代理发干净 GET 返回 200 而本地 403）调用此工具而非 finish(ip_banned)，然后继续用 http_request 正常挖掘——上下文、会话态、已发现线索全部保留。若代理不可用或代理也连不上目标，再调用 finish(verdict=ip_banned)。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+]
 
 REVIEWER_TOOL_SCHEMAS = [
     {
@@ -652,3 +663,4 @@ ESCALATE_TOOL_SCHEMAS = _compact_descriptions(ESCALATE_TOOL_SCHEMAS)
 COLLECTOR_QUERY_SCHEMAS = _compact_descriptions(COLLECTOR_QUERY_SCHEMAS)
 COLLECTOR_EDU_SCHEMAS = _compact_descriptions(COLLECTOR_EDU_SCHEMAS)
 KNOWLEDGE_TOOL_SCHEMAS = _compact_descriptions(KNOWLEDGE_TOOL_SCHEMAS)
+PROXY_TOOL_SCHEMAS = _compact_descriptions(PROXY_TOOL_SCHEMAS)

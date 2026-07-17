@@ -2082,6 +2082,8 @@ class TaskRunner:
                 st["action"] = f"LLM 异常: {data.get('error','')}"
             elif kind == "worker_auto_finish":
                 st["action"] = f"自动收敛: {data.get('summary','')}"
+            elif kind == "proxy_mode_enabled":
+                st["action"] = f"🔀 已切换代理模式（{len(data.get('servers', []))}台代理可用）"
             elif kind == "finding_submitted":
                 st["findings"] = st.get("findings", 0) + 1
                 st["action"] = f"🎯 发现漏洞: {data.get('title','')}"
@@ -2856,7 +2858,7 @@ class TaskRunner:
                                 level="warn", target_id=target_id, verdict="dead", findings=0)
             elif verdict == "ip_banned":
                 await self._log(session, "worker", "target_ip_banned",
-                                f"目标 {tgt.host} 确认 IP 被 WAF 封禁，等待首轮完成后代理复测",
+                                f"目标 {tgt.host} 确认 IP 被 WAF 封禁（代理亦不可达或未配置），等待重测阶段代理复测",
                                 level="warn", target_id=target_id, verdict="ip_banned", findings=0)
             elif verdict == "needs_auth":
                 assessment = result.get("auth_assessment") or {}

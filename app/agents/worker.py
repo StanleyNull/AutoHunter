@@ -24,6 +24,7 @@ from app.tools.executor import ToolExecutor
 from app.tools.schemas import (
     JS_ANALYZER_TOOL_SCHEMAS,
     KNOWLEDGE_TOOL_SCHEMAS,
+    PROXY_TOOL_SCHEMAS,
     SESSION_TOOL_SCHEMAS,
     TOOL_SCHEMAS,
 )
@@ -89,6 +90,8 @@ class Worker:
         self._reported_intel: list[dict] = []
         # 单站协作覆盖记录（API/入口/测试项摘要），由编排层写入事件流供后续 worker 复用。
         self._reported_coverage: list[dict] = []
+        # SSH 代理是否可用（run() 启动时缓存，控制 PROXY_TOOL_SCHEMAS 开放）
+        self._proxy_available = False
 
     def _emit(self, kind: str, **data: Any) -> None:
         self.on_event(kind, data)
@@ -206,6 +209,14 @@ class Worker:
         return "\n".join(lines) + "\n\n"
 
     def run(self) -> WorkerResult:
+        from app.settings_service import resolve_proxy_config
+        self._proxy_available = resolve_proxy_config().available
+        # IP 封禁复测：启动即开启代理模式，http_request 全程自动走 SSH 代理
+        if self._proxy_available and self.deepen_context and self.deepen_context.get("ip_ban_retest"):
+            _pre = self.executor.enable_proxy_mode()
+            if _pre.get("ok"):
+                self._emit("proxy_mode_enabled", round=0,
+                            servers=_pre.get("proxy_servers", []), source="ip_ban_retest")
         if self.deepen_context:
             user_content = self._intel_block() + self._cas_sso_block() + self._duplicate_block() + self._build_proxy_block() + self._deepen_brief()
             self._emit("worker_start", target=self.target, mode="deepen", prompt_version=self.prompt_version)
@@ -245,6 +256,9 @@ class Worker:
                     tools = [t for t in tools if t.get("function", {}).get("name") != "fofa_lookup"]
                 # 会话保持工具全模式开放：拿到凭证登录后固化登录态再深挖。
                 tools += SESSION_TOOL_SCHEMAS
+                # 代理切换工具：仅当 SSH 代理已配置时开放，IP 被封时切代理继续测
+                if self._proxy_available:
+                    tools += PROXY_TOOL_SCHEMAS
                 if self._js_tool_enabled:
                     tools += JS_ANALYZER_TOOL_SCHEMAS
                 # 人工知识库工具：仅在第二次深挖且工具轮数超过10轮时解锁
@@ -487,47 +501,37 @@ class Worker:
             return ""
         servers = proxy_config.server_list
         key_path = proxy_config.ssh_key_path
-        # 取第一台作为示例
+        # 取第一台作为交叉验证示例
         srv = servers[0]
-        # 解析 user@host:port
         if ":" in srv.split("@")[-1]:
             user_host, port = srv.rsplit(":", 1)
         else:
             user_host, port = srv, "22"
-
         ssh_cmd = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p {port} {user_host}"
-
-        # 提取子域名作为远程服务器上的工作目录名
-        target_host = urlparse(self.target if "://" in self.target else f"http://{self.target}").netloc.lower()
-        # 去掉端口部分
-        target_host = target_host.split(":")[0]
-        remote_work_dir = f"/tmp/{target_host}"
 
         lines = [
             "\n# 代理服务器（IP 封禁时使用）",
             f"可用代理: {', '.join(servers)}",
-            f"SSH 连接命令: {ssh_cmd} \"命令\"",
-            f"远程工作目录: {remote_work_dir}（首次使用前先创建：{ssh_cmd} \"mkdir -p {remote_work_dir}\"）",
-            "重要：在代理服务器上产生的所有文件（curl 输出、脚本、临时文件等）必须放在上述远程工作目录下，禁止在 ~ 或其他目录创建文件。",
+            f"SSH 连接命令（交叉验证用）: {ssh_cmd} \"命令\"",
             "",
-            "使用场景：",
-            "1. 当你连续收到 403/WAF 拦截且怀疑是 IP 被封时，用代理发一个干净 GET 交叉验证：",
+            "IP 封禁处理流程：",
+            "1. 当你连续收到 403/WAF 拦截且怀疑是 IP 被封时，先用代理发一个干净 GET 交叉验证：",
             f'   run_shell: {ssh_cmd} "curl -s -o /dev/null -w \'%{{http_code}}\\n\' \'目标URL\'"',
-            "   若代理返回 200 而你本地 403 → IP 被封，调用 finish(verdict=ip_banned)",
-            "2. 若确认 IP 封禁后需继续测试（复测模式），所有 HTTP 请求改为：",
-            f'   run_shell: {ssh_cmd} "curl -s -k -X METHOD \'URL\' -H \'Header: Value\' -d \'data\'"',
-            "   用代理 curl 的输出作为你的 http_request 替代",
-            f"   如需保存输出到文件，使用 {remote_work_dir}/ 作为路径前缀，例如：",
-            f'   run_shell: {ssh_cmd} "curl -s -k \'URL\' -o {remote_work_dir}/resp.html"',
+            "2. 若代理返回 200/正常响应而你本地 403 → 确认 IP 被封。",
+            "   此时调用 enable_proxy_mode()，后续所有 http_request 将自动通过代理发送。",
+            "   切换后继续用 http_request 正常挖掘——上下文、已登录会话、已发现线索全部保留。",
+            "3. 若 enable_proxy_mode 失败（无代理配置），或代理请求也持续连不上目标，",
+            "   再调用 finish(verdict=ip_banned) 等待后续重测。",
+            "",
+            "重要：enable_proxy_mode 切换后不要再手动用 ssh curl，直接调 http_request 即可。",
             "",
         ]
 
-        # 如果是 IP 封禁复测模式，强调必须全程用代理
+        # IP 封禁复测模式：proxy_mode 已在 run() 启动时预开启
         if self.deepen_context and self.deepen_context.get("ip_ban_retest"):
-            lines.append("!! 本次为 IP 封禁复测：你的本机 IP 已确认被目标 WAF 封禁。")
-            lines.append("所有对目标的请求必须通过上述 SSH 代理执行，不要直接用 http_request。")
-            lines.append("用 run_shell + ssh curl 替代所有 http_request 调用。")
-            lines.append(f"所有在代理服务器上产生的文件必须放在 {remote_work_dir}/ 下。")
+            lines.append("!! 本次为 IP 封禁复测：代理模式已自动开启。")
+            lines.append("所有 http_request 自动走 SSH 代理，直接用 http_request 正常挖掘即可。")
+            lines.append("无需手动 ssh curl；若代理请求也持续失败，调用 finish(verdict=ip_banned)。")
             lines.append("")
 
         return "\n".join(lines)
@@ -746,6 +750,14 @@ class Worker:
         if name == "check_duplicate_finding":
             self._mark_tool_used(name, rnd)
             return self._check_duplicate(args)
+
+        if name == "enable_proxy_mode":
+            self._mark_tool_used(name, rnd)
+            result = self.executor.enable_proxy_mode()
+            if result.get("ok"):
+                self._emit("proxy_mode_enabled", round=rnd,
+                            servers=result.get("proxy_servers", []))
+            return result
 
         if name == "finish":
             premature = self._premature_finish_reason(args, rnd)

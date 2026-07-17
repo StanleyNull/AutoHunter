@@ -32,6 +32,11 @@ _FOFA_LOOKUP_MAX_SIZE = 30
 # 企业 session cookie jar 上限，防异常站点塞爆内存。
 _SESSION_MAX_COOKIES = 50
 _SESSION_MAX_HEADERS = 30
+# 代理服务器被标记为不健康后的冷却时间（秒）。冷却结束后重新纳入轮询候选。
+# 轮询策略：每次请求后轮转到下一台健康代理，分散流量降低单 IP 被目标 WAF 封禁概率。
+_PROXY_UNHEALTHY_COOLDOWN = int(os.environ.get("PROXY_UNHEALTHY_COOLDOWN", "60"))
+# 连续失败多少次才标记不健康（避免单次网络抖动误杀）。
+_PROXY_FAIL_THRESHOLD = 2
 
 # 单目标工作目录落地日志体积上限（字节）。24x7 防撞盘：超限后停止写新日志文件，
 # 仍把截断输出回传给 LLM，不影响挖掘，只是不再落地完整证据。
@@ -124,6 +129,14 @@ class ToolExecutor:
         # 解决"历史压缩后忘了自己发现过什么"的连续性断裂问题。
         self._worker_notes: str = ""
 
+        # 代理模式：本地 IP 被目标 WAF 封禁后，http_request 透明改走 SSH 代理，
+        # 保留同一 worker 的上下文与会话态（cookie jar 原地延续），无需重派。
+        self.proxy_mode = False
+        self._proxy_config = None
+        self._proxy_server_idx = 0
+        # 代理服务器健康表：{server: {"failures": int, "last_fail": float, "healthy": bool}}
+        # 轮询时跳过不健康的服务器（冷却期过后自动恢复），分散流量降低封禁概率。
+        self._proxy_health: dict[str, dict] = {}
     def cancel_running(self) -> None:
         """协作取消：置取消信号 + 杀子进程。仅用于控制面真取消（pause/stop/超时）。
 
@@ -284,6 +297,11 @@ class ToolExecutor:
         follow_redirects: bool = False,
         timeout: int = 20,
     ) -> dict[str, Any]:
+        if self.proxy_mode:
+            return self._http_request_via_proxy(
+                url=url, method=method, headers=headers, data=data,
+                json_body=json_body, follow_redirects=follow_redirects, timeout=timeout,
+            )
         # LLM 可能把 headers 传成非 dict 形态（list["K: V"] / "K: V\nK2: V2" / None），
         # 直接喂给 dict()/httpx 会抛 "dictionary update sequence element..." 崩掉整个 agent。
         # 这里统一规范化成 dict，容错所有 agent 的 http_request 调用。
@@ -346,6 +364,277 @@ class ToolExecutor:
         if session_updated:
             result["session_cookies_updated"] = session_updated
         return result
+
+    # ---- 代理模式（IP 封禁时透明走 SSH 代理）----
+    def enable_proxy_mode(self) -> dict[str, Any]:
+        """切换为代理模式：后续 http_request 自动经 SSH 代理发送。
+
+        worker 交叉验证确认本地 IP 被目标 WAF 封禁后调用。切换后 http_request
+        透明走代理，LLM 无需改用 run_shell+ssh curl，上下文与会话态原地保留。
+        """
+        from app.settings_service import resolve_proxy_config
+        cfg = resolve_proxy_config()
+        if not cfg.available:
+            return {
+                "ok": False,
+                "error": "无可用代理服务器，无法切换代理模式",
+                "guidance": "未配置 SSH 代理。调用 finish(verdict=ip_banned) 将目标标记为 IP 封禁，等待后续重测。",
+            }
+        self._proxy_config = cfg
+        self.proxy_mode = True
+        return {
+            "ok": True,
+            "message": "已切换到代理模式，后续 http_request 将自动通过 SSH 代理发送。"
+                        "多台代理自动轮询分发，降低单 IP 被封概率。"
+                        "继续用 http_request 正常测试即可，无需手动 ssh curl。",
+            "proxy_servers": cfg.server_list,
+            "guidance": "现在所有 http_request 自动走代理。继续正常挖掘；"
+                        "若代理请求也持续失败（所有代理服务器不可达），再调用 finish(verdict=ip_banned)。",
+        }
+
+    def _http_request_via_proxy(
+        self,
+        url: str,
+        method: str = "GET",
+        headers: Optional[dict[str, str]] = None,
+        data: Optional[str] = None,
+        json_body: Optional[Any] = None,
+        follow_redirects: bool = False,
+        timeout: int = 20,
+    ) -> dict[str, Any]:
+        """通过 SSH 代理发送 HTTP 请求，返回与 http_request 一致的结果结构。
+
+        用 curl -D /dev/stderr -o /dev/stdout -w 把响应头(body 前的 stderr)和
+        响应体(stdout)分离，尾部追加状态码标记。多台代理服务器按轮询+健康度策略
+        自动分发：每次请求后轮转到下一台健康代理（分散流量降低单 IP 被封概率），
+        某台连续失败则标记不健康并冷却跳过，全部不可达才报失败。
+        """
+        cfg = self._proxy_config
+        if not cfg or not cfg.available:
+            return {"ok": False, "error": "代理模式未启用或无可用代理", "url": url}
+
+        headers = _normalize_headers(headers)
+        merged_headers, session_applied = self._apply_session(headers)
+
+        # 请求体序列化
+        body_data: Optional[str] = None
+        if data is not None:
+            body_data = str(data)
+        elif json_body is not None:
+            import json as _json
+            body_data = _json.dumps(json_body, ensure_ascii=False)
+            if not any(k.lower() == "content-type" for k in merged_headers):
+                merged_headers["Content-Type"] = "application/json"
+
+        method_up = method.upper()
+        servers = list(cfg.server_list)
+        key_path = cfg.ssh_key_path
+        last_error = ""
+
+        # 轮询+健康度：_pick_proxy_servers 返回健康代理优先的轮序，
+        # 每次成功后轮转到下一台，分散流量；连续失败的自动冷却跳过。
+        for srv in self._pick_proxy_servers(servers):
+            if ":" in srv.split("@")[-1]:
+                user_host, port = srv.rsplit(":", 1)
+            else:
+                user_host, port = srv, "22"
+
+            # 构造远程 curl 命令：头→stderr，体+状态码标记→stdout
+            curl_parts = ["curl", "-s", "-S", "-k", "--connect-timeout", "8"]
+            if follow_redirects:
+                curl_parts.append("-L")
+            curl_parts += [
+                "--max-time", str(int(timeout)),
+                "-D", "/dev/stderr", "-o", "/dev/stdout",
+                "-w", r"\n<<<HTTP_STATUS:%{http_code}>>>",
+                "-X", method_up,
+            ]
+            for k, v in merged_headers.items():
+                curl_parts += ["-H", f"{k}: {v}"]
+            if body_data is not None:
+                curl_parts += ["-d", body_data]
+            curl_parts.append(url)
+
+            remote_cmd = " ".join(shlex.quote(p) for p in curl_parts)
+            ssh_cmd = [
+                "ssh", "-i", key_path,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "-p", port, user_host,
+                remote_cmd,
+            ]
+
+            try:
+                result = subprocess.run(
+                    ssh_cmd, capture_output=True, timeout=timeout + 15,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = f"代理 {srv} 超时"
+                self._mark_proxy_unhealthy(srv)
+                continue
+            except Exception as e:
+                last_error = f"代理 {srv} 异常: {e}"
+                self._mark_proxy_unhealthy(srv)
+                continue
+
+            out = (result.stdout or b"").decode("utf-8", "replace")
+            err = (result.stderr or b"").decode("utf-8", "replace")
+
+            # 解析状态码标记
+            marker = "<<<HTTP_STATUS:"
+            pos = out.rfind(marker)
+            status_code = 0
+            body_text = out
+            if pos >= 0:
+                end = out.find(">>>", pos)
+                if end > pos:
+                    code_str = out[pos + len(marker):end].strip()
+                    if code_str.isdigit():
+                        status_code = int(code_str)
+                    body_text = out[:pos].rstrip("\n")
+
+            if status_code == 0:
+                # 连接失败（curl 未拿到任何 HTTP 响应）→ 换下一台代理
+                last_error = f"代理 {srv} 连接失败: {err[:200]}"
+                self._mark_proxy_unhealthy(srv)
+                continue
+
+            # 成功：标记健康 + 轮转到下一台代理（分散流量，降低单 IP 被封概率）
+            self._mark_proxy_healthy(srv)
+            self._proxy_server_idx = (servers.index(srv) + 1) % len(servers)
+
+            resp_headers, redirect_chain, session_updated = self._parse_proxy_headers(err)
+
+            # 截断响应体（与本地 http_request 一致的上限）
+            truncated = False
+            if len(body_text) > _HTTP_MAX_BYTES:
+                body_text = (
+                    body_text[:_HTTP_MAX_BYTES]
+                    + f"\n\n...[响应超过 {_HTTP_MAX_BYTES} 字节，已截断以保护内存]..."
+                )
+                truncated = True
+            body_out = _truncate(body_text)
+
+            # 构造取证用原始请求行
+            raw_req_lines = [f"{method_up} {url} HTTP/1.1"]
+            for k, v in merged_headers.items():
+                raw_req_lines.append(f"{k}: {v}")
+            if body_data is not None:
+                raw_req_lines.append("")
+                raw_req_lines.append(body_data[:512])
+            raw_req = "\n".join(raw_req_lines)
+
+            result_dict: dict[str, Any] = {
+                "ok": True,
+                "status_code": status_code,
+                "url": url,
+                "response_headers": resp_headers,
+                "body": body_out,
+                "body_len": len(body_text),
+                "body_truncated": truncated,
+                "raw_request": _truncate(raw_req, 1536),
+                "via_proxy": True,
+                "proxy_server": srv,
+            }
+            if redirect_chain:
+                result_dict["redirect_chain"] = redirect_chain
+            if session_applied:
+                result_dict["session_applied"] = session_applied
+            if session_updated:
+                result_dict["session_cookies_updated"] = session_updated
+            return result_dict
+
+        # 所有代理服务器都不可达
+        return {
+            "ok": False,
+            "error": f"所有代理服务器均不可达: {last_error}",
+            "url": url,
+            "via_proxy": True,
+            "guidance": "所有代理服务器都无法连接目标。若目标本身存活（探活服务器可达），"
+                        "调用 finish(verdict=ip_banned) 等待后续重测。",
+        }
+
+    def _pick_proxy_servers(self, servers: list[str]) -> list[str]:
+        """返回按轮询+健康度排序的代理服务器候选列表。
+
+        健康的服务器优先、按当前轮转索引排列；不健康的排后（冷却期过后自动恢复）。
+        全部不健康时返回全部（兜底：仍然尝试，成功则恢复健康）。
+        """
+        now = time.time()
+        healthy: list[str] = []
+        unhealthy: list[str] = []
+        n = len(servers)
+        for offset in range(n):
+            idx = (self._proxy_server_idx + offset) % n
+            srv = servers[idx]
+            h = self._proxy_health.get(srv)
+            if h and not h.get("healthy", True):
+                # 冷却期结束 → 恢复健康
+                if (now - h.get("last_fail", 0)) >= _PROXY_UNHEALTHY_COOLDOWN:
+                    h["healthy"] = True
+                    h["failures"] = 0
+            if self._proxy_health.get(srv, {}).get("healthy", True):
+                healthy.append(srv)
+            else:
+                unhealthy.append(srv)
+        # 健康优先；全不健康时兜底尝试全部
+        return healthy + unhealthy
+
+    def _mark_proxy_healthy(self, server: str) -> None:
+        """代理请求成功：重置失败计数，标记健康。"""
+        h = self._proxy_health.get(server)
+        if h:
+            h["failures"] = 0
+            h["healthy"] = True
+
+    def _mark_proxy_unhealthy(self, server: str) -> None:
+        """代理请求失败：累计失败次数，超过阈值则标记不健康（冷却期内跳过）。"""
+        h = self._proxy_health.setdefault(
+            server, {"failures": 0, "last_fail": 0, "healthy": True}
+        )
+        h["failures"] = h.get("failures", 0) + 1
+        h["last_fail"] = time.time()
+        if h["failures"] >= _PROXY_FAIL_THRESHOLD:
+            h["healthy"] = False
+
+    def _parse_proxy_headers(self, raw: str) -> tuple[dict[str, str], list[str], list[str]]:
+        """解析 curl -D 输出的响应头流，返回 (最终响应头, 重定向状态码链, 更新的cookie名)。
+
+        curl -D /dev/stderr 把每个响应（含重定向中间跳）的头块依次写入 stderr，
+        块间以空行分隔。取最后一个块作为最终响应头；遍历所有块的 Set-Cookie 吸收进 session。
+        """
+        resp_headers: dict[str, str] = {}
+        redirect_chain: list[str] = []
+        updated: list[str] = []
+        norm = raw.replace("\r\n", "\n").replace("\r", "\n")
+        blocks = [b for b in norm.split("\n\n") if b.strip()]
+        for block in blocks:
+            lines = block.strip().split("\n")
+            if not lines:
+                continue
+            # 状态行 HTTP/x.y CODE TEXT
+            first = lines[0]
+            parts = first.split(" ", 2)
+            if len(parts) >= 2 and parts[0].upper().startswith("HTTP"):
+                redirect_chain.append(parts[1])
+            hdrs: dict[str, str] = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if not k:
+                        continue
+                    hdrs[k] = v
+                    if k.lower() == "set-cookie":
+                        cv = v.split(";")[0].strip()
+                        if "=" in cv:
+                            cn, cval = cv.split("=", 1)
+                            self._put_cookie(cn.strip(), cval.strip(), updated)
+            if hdrs:
+                resp_headers = hdrs
+        return resp_headers, redirect_chain, updated
 
     # ---- 会话状态管理（全模式）----
     def _apply_session(self, headers: Optional[dict[str, str]]) -> tuple[dict[str, str], list[str]]:
