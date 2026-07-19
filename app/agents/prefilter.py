@@ -62,11 +62,11 @@ def should_skip(host: str, url: str) -> tuple[bool, str]:
     return skip, reason
 
 
-def should_skip_ex(host: str, url: str) -> tuple[bool, str, dict]:
+def should_skip_ex(host: str, url: str, timeout: float | None = None) -> tuple[bool, str, dict]:
     """同 should_skip，但额外返回首页探测信息(供评分复用，避免重复发包)。"""
     if is_cdn_host(host):
         return True, "CDN/对象存储/静态托管域名", {}
-    info = probe(url)
+    info = probe(url, timeout) if timeout is not None else probe(url)
     if not info["alive"]:
         return True, "死链/连接超时/无响应", info
     # 5xx 暂时挂了，跳过本轮（不彻底淘汰，可后续重试）

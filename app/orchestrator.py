@@ -132,6 +132,12 @@ QUEUE_LOW_SUCCESS_SCORE_THRESHOLD = float(os.environ.get("QUEUE_LOW_SUCCESS_SCOR
 QUEUE_TRANSIENT_PREFILTER_COOLDOWN = float(os.environ.get("QUEUE_TRANSIENT_PREFILTER_COOLDOWN", "900"))
 QUEUE_DISPATCH_CANDIDATE_LIMIT = max(30, int(os.environ.get("QUEUE_DISPATCH_CANDIDATE_LIMIT", "120")))
 QUEUE_LIVENESS_BATCH_SIZE = max(1, int(os.environ.get("QUEUE_LIVENESS_BATCH_SIZE", "24")))
+# 重测 Phase1 探活超时：重测目标本就是曾死链/超时的资产，用更短 timeout 快速判定
+# 「这次缓过来了没」。能通的目标通常 < 1s 响应，短 timeout 只会更快淘汰真死链。
+# 本机探活走 prefilter.probe（httpx），服务器探活走 SSH curl。
+RETEST_LOCAL_TIMEOUT = float(os.environ.get("RETEST_LOCAL_TIMEOUT", "4"))
+RETEST_SERVER_TIMEOUT = float(os.environ.get("RETEST_SERVER_TIMEOUT", "5"))
+RETEST_SSH_CONNECT_TIMEOUT = float(os.environ.get("RETEST_SSH_CONNECT_TIMEOUT", "3"))
 
 _LOW_SUCCESS_SCORE_MARKERS = (
     "pure_frontend", "pure_marketing_site", "static_assets", "data_display_platform",
@@ -1121,11 +1127,11 @@ class TaskRunner:
         return 1
 
     @staticmethod
-    def _retest_probe_local(url: str, host: str, timeout: float = 6.0) -> dict:
+    def _retest_probe_local(url: str, host: str, timeout: float = RETEST_LOCAL_TIMEOUT) -> dict:
         """本机 HTTP 探活（不经过代理）。"""
         urls = _probe_urls(url, host)
         for probe_url in urls:
-            skip, reason, info = prefilter.should_skip_ex(host, probe_url)
+            skip, reason, info = prefilter.should_skip_ex(host, probe_url, timeout=timeout)
             if not skip:
                 return {"alive": True, "url": probe_url, "status": info.get("status", 0)}
             # 非死链的 skip（CDN/5xx/静态）说明目标存活
@@ -1134,7 +1140,7 @@ class TaskRunner:
         return {"alive": False, "url": urls[0] if urls else (url or host)}
 
     @staticmethod
-    def _retest_probe_via_server(url: str, server: str, ssh_key_path: str, timeout: float = 8.0) -> dict:
+    def _retest_probe_via_server(url: str, server: str, ssh_key_path: str, timeout: float = RETEST_SERVER_TIMEOUT) -> dict:
         """通过指定 SSH 服务器探活。"""
         if ":" in server.split("@")[-1]:
             user_host, port = server.rsplit(":", 1)
@@ -1146,14 +1152,14 @@ class TaskRunner:
             "ssh", "-i", ssh_key_path,
             "-o", "StrictHostKeyChecking=no",
             "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=5",
+            "-o", f"ConnectTimeout={int(RETEST_SSH_CONNECT_TIMEOUT)}",
             "-p", port, user_host,
             curl_cmd,
         ]
         try:
             result = subprocess.run(
                 ssh_cmd, capture_output=True, text=True,
-                timeout=timeout + 10,
+                timeout=timeout + RETEST_SSH_CONNECT_TIMEOUT + 2,
             )
             status_code = (result.stdout or "").strip().strip("'")
             if status_code.isdigit():
