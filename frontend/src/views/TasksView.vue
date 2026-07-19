@@ -25,6 +25,27 @@ const pageSize = ref(taskListState.hasSavedState ? taskListState.pageSize : 20);
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const filterBy = ref("all");         // all | review_archived | discarded | pending_reg
 
+// 日历筛选：点击日历统计卡片后激活，按 task_id 精确过滤任务列表
+// { date, category, label, count, taskIds } | null
+const calendarFilter = ref(null);
+
+function applyCalendarFilter(payload) {
+  // 同一卡片再次点击 -> 取消筛选
+  if (calendarFilter.value &&
+      calendarFilter.value.date === payload.date &&
+      calendarFilter.value.category === payload.category) {
+    calendarFilter.value = null;
+  } else {
+    calendarFilter.value = payload;
+  }
+  page.value = 0;
+}
+
+function clearCalendarFilter() {
+  calendarFilter.value = null;
+  page.value = 0;
+}
+
 const filteredTasks = computed(() => {
   let list = tasks.value;
   const q = searchQuery.value.trim().toLowerCase();
@@ -41,6 +62,11 @@ const filteredTasks = computed(() => {
     list = list.filter((t) => (t.pending_discarded > 0));
   } else if (filterBy.value === "pending_reg") {
     list = list.filter((t) => (t.pending_input ?? 0) > 0);
+  }
+  // 日历筛选：精确按 task_id 过滤（与上面的 pending 计数筛选可叠加）
+  if (calendarFilter.value) {
+    const idSet = new Set(calendarFilter.value.taskIds);
+    list = list.filter((t) => idSet.has(t.id));
   }
   const sorted = [...list];
   if (sortBy.value === "pinyin") {
@@ -159,6 +185,27 @@ function onSaved() {
 // ===== 批量暂停/启动 =====
 const batchBusy = ref(false);
 const batchMsg = ref("");
+// ===== 单任务启动/暂停（列表内快捷操作） =====
+const busyTaskId = ref(null);   // 正在操作的某个任务 id（防重复点击）
+const actionMsg = ref("");      // 单任务操作结果反馈
+
+async function ctl(task, action) {
+  if (busyTaskId.value) return;
+  busyTaskId.value = task.id;
+  actionMsg.value = "";
+  try {
+    await api[action](task.id);
+    actionMsg.value = action === "start"
+      ? `已启动「${task.name}」`
+      : action === "pause" ? `已暂停「${task.name}」` : "操作完成";
+    await load();
+  } catch (e) {
+    actionMsg.value = `操作失败：${e.message || e}`;
+  } finally {
+    busyTaskId.value = null;
+    setTimeout(() => (actionMsg.value = ""), 3000);
+  }
+}
 
 async function batchPause() {
   batchBusy.value = true;
@@ -264,7 +311,7 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
         </router-link>
       </div>
       <div class="batch-bar">
-        <span v-if="batchMsg" class="batch-msg">{{ batchMsg }}</span>
+        <span v-if="batchMsg || actionMsg" class="batch-msg">{{ batchMsg || actionMsg }}</span>
         <div class="toolbar-spacer"></div>
         <button v-if="writable" class="batch-btn batch-pause" :disabled="batchBusy" @click="batchPause">
           {{ batchBusy ? "处理中…" : "全部暂停" }}
@@ -274,7 +321,16 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
         </button>
       </div>
     </header>
-    <DailyCalendar />
+    <DailyCalendar :active-filter="calendarFilter" @select="applyCalendarFilter" />
+    <div v-if="calendarFilter" class="calendar-filter-banner">
+      <span class="cfb-label">
+        日历筛选：{{ calendarFilter.date }} · {{ calendarFilter.label }}
+        <em class="cfb-count">{{ calendarFilter.count }} 项</em>
+      </span>
+      <span class="cfb-sep">|</span>
+      <span class="cfb-match">匹配 {{ totalFiltered }} 个任务</span>
+      <button class="cfb-clear" type="button" @click="clearCalendarFilter">清除筛选 ×</button>
+    </div>
     <div v-if="initialLoading" class="task-list">
       <div v-for="n in 4" :key="n" class="task-card skeleton-task" aria-hidden="true">
         <div class="task-card-main">
@@ -333,6 +389,12 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
         <div class="task-card-side">
           <time class="meta task-time">{{ t.created_at.slice(0, 19).replace("T", " ") }}</time>
           <div v-if="writable" class="task-actions">
+            <button class="mini-action primary" type="button"
+              :disabled="busyTaskId === t.id || t.status === 'running'"
+              @click.stop="ctl(t, 'start')">启动</button>
+            <button class="mini-action" type="button"
+              :disabled="busyTaskId === t.id || t.status !== 'running'"
+              @click.stop="ctl(t, 'pause')">暂停</button>
             <button class="mini-action" type="button" @click.stop="openEdit(t)">编辑参数</button>
             <button class="mini-action danger" type="button" @click.stop="askDelete(t)">删除</button>
           </div>
@@ -378,3 +440,47 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
     </div>
   </section>
 </template>
+
+<style scoped>
+/* 日历筛选激活横幅：点击日历统计卡片后显示 */
+.calendar-filter-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--accent-bg, rgba(79, 140, 255, 0.08));
+  border: 1px solid var(--accent, #4f8cff);
+  border-radius: var(--radius, 8px);
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.cfb-label { font-weight: 600; }
+.cfb-count {
+  font-style: normal;
+  color: var(--accent, #4f8cff);
+  margin-left: 4px;
+  font-weight: 700;
+}
+.cfb-sep { color: var(--faint); }
+.cfb-match { color: var(--muted); }
+
+.cfb-clear {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--ink-2);
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cfb-clear:hover {
+  background: var(--surface-2);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+</style>

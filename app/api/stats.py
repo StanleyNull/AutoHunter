@@ -132,6 +132,52 @@ async def daily_stats(
     )
     archived_count = (await session.execute(archived_q)).scalar() or 0
 
+    # 各分类对应的 task_id 集合：供前端点击日历统计卡片后筛选任务列表
+    # user_reviews 三状态共用一次查询，按 user_status 分桶收集 distinct task_id
+    user_status_tasks_q = (
+        select(Review.user_status, Review.task_id)
+        .join(Finding, Review.finding_id == Finding.id)
+        .where(_cst_date_from_utc(Finding.created_at) == date)
+        .where(Review.verdict == "accepted")
+    )
+    user_status_task_ids = {"pending": set(), "passed": set(), "rejected": set()}
+    for row in (await session.execute(user_status_tasks_q)).all():
+        status, tid = row[0], row[1]
+        if status in user_status_task_ids and tid:
+            user_status_task_ids[status].add(tid)
+
+    # 已提交对应的 task_id 集合
+    submitted_tasks_q = (
+        select(Review.task_id)
+        .join(Finding, Review.finding_id == Finding.id)
+        .where(_cst_date_from_utc(Finding.created_at) == date)
+        .where(Review.verdict == "accepted")
+        .where(Review.submitted == True)  # noqa: E712
+        .distinct()
+    )
+    submitted_task_ids = [r[0] for r in (await session.execute(submitted_tasks_q)).all() if r[0]]
+
+    # 通杀列对应的 task_id 集合
+    ks_tasks_q = (
+        select(Killsweep.task_id)
+        .where(_cst_date_from_utc(Killsweep.created_at) == date)
+        .where(Killsweep.is_killsweep == True)  # noqa: E712
+        .distinct()
+    )
+    killsweep_task_ids = [r[0] for r in (await session.execute(ks_tasks_q)).all() if r[0]]
+
+    # AI 未采纳对应的 task_id 集合
+    archived_tasks_q = (
+        select(Finding.task_id)
+        .join(Review, Review.finding_id == Finding.id)
+        .where(_cst_date_from_utc(Finding.created_at) == date)
+        .where(Review.verdict.in_(["ignored", "deepen"]))
+        .where(Review.user_status == "pending")
+        .where(Finding.status != "superseded")
+        .distinct()
+    )
+    archived_task_ids = [r[0] for r in (await session.execute(archived_tasks_q)).all() if r[0]]
+
     # 2) Token 成本：从 token_usage_daily 表读取，按模型合并（跨任务聚合）
     token_q = text(
         "SELECT model, SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_hit_tokens), "
@@ -152,14 +198,14 @@ async def daily_stats(
         pricing = pricing_config.get(model, {}) if model else {}
         cost = _calc_cost(pt, ct, cht, pricing)
         by_model.append({
-            "model": model,
-            "prompt_tokens": pt,
-            "completion_tokens": ct,
-            "cache_hit_tokens": cht,
-            "cache_miss_tokens": cmt,
-            "requests": req,
-            "cost": cost,
-            "pricing": pricing,
+           "model": model,
+           "prompt_tokens": pt,
+           "completion_tokens": ct,
+           "cache_hit_tokens": cht,
+           "cache_miss_tokens": cmt,
+           "requests": req,
+           "cost": cost,
+           "pricing": pricing,
         })
         total_cost += cost
         total_prompt += pt
@@ -187,6 +233,15 @@ async def daily_stats(
         },
         "killsweep": killsweep_count,
         "archived": archived_count,
+        # 各分类对应的 task_id 列表：前端点击日历统计卡片后按 task_id 过滤任务列表
+        "task_ids": {
+            "pending": sorted(user_status_task_ids.get("pending", set())),
+            "passed": sorted(user_status_task_ids.get("passed", set())),
+            "rejected": sorted(user_status_task_ids.get("rejected", set())),
+            "submitted": submitted_task_ids,
+            "killsweep": killsweep_task_ids,
+            "archived": archived_task_ids,
+        },
         "token_usage": {
             "total_cost": round(total_cost, 4),
             "total_prompt_tokens": total_prompt,

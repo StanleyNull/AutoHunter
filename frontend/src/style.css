@@ -687,6 +687,16 @@ main {
 .mini-action:disabled { opacity: 0.55; cursor: not-allowed; }
 /* 任务卡片操作按钮：编辑参数 / 删除 横向并排 */
 .task-actions { display: flex; align-items: center; gap: 8px; }
+/* 启动按钮：主题色实心，与详情页 button.primary 风格一致 */
+.mini-action.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600;
+}
+.mini-action.primary:hover {
+  background: var(--accent-ink); border-color: var(--accent-ink);
+}
+.mini-action.primary:disabled { opacity: 0.45; }
+/* 卡片内按钮较多时允许换行，避免溢出 */
+.task-actions { flex-wrap: wrap; justify-content: flex-end; }
 /* 删除确认弹窗 */
 .modal-mask {
   position: fixed; inset: 0; z-index: var(--z-drawer);

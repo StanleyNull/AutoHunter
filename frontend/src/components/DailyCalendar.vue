@@ -2,6 +2,16 @@
 import { ref, computed, onMounted, watch } from "vue";
 import { api, authReadyRef, loadAuthRole } from "../api.js";
 
+const props = defineProps({
+  // 当前激活的日历筛选：{ date, category } 或 null。用于高亮被点击的统计卡片。
+  activeFilter: { type: Object, default: null },
+});
+
+const emit = defineEmits([
+  // 点击统计卡片时触发，payload: { date, category, label, count, taskIds }
+  "select",
+]);
+
 const now = new Date();
 const viewYear = ref(now.getFullYear());
 const viewMonth = ref(now.getMonth()); // 0-based
@@ -10,6 +20,47 @@ const overview = ref({ month: "", days: [] });
 const detail = ref(null);
 const loadingOverview = ref(false);
 const loadingDetail = ref(false);
+
+// 统计卡片定义：category -> { label, cssClass, path }
+// count 取值路径：user_reviews.* 或顶层字段（killsweep/archived）
+const STAT_CARDS = [
+  { category: "pending",   label: "待复审",   cssClass: "warn",   path: ["user_reviews", "pending"] },
+  { category: "passed",    label: "已通过",   cssClass: "ok",     path: ["user_reviews", "passed"] },
+  { category: "submitted", label: "已提交",   cssClass: "info",   path: ["user_reviews", "submitted"] },
+  { category: "killsweep", label: "通杀列",   cssClass: "",       path: ["killsweep"] },
+  { category: "rejected",  label: "已驳回",   cssClass: "danger", path: ["user_reviews", "rejected"] },
+  { category: "archived",  label: "AI未采纳", cssClass: "danger", path: ["archived"] },
+];
+
+function statValue(card) {
+  if (!detail.value) return 0;
+  let v = detail.value;
+  for (const k of card.path) v = v?.[k];
+  return Number(v || 0);
+}
+
+function statEnabled(card) {
+  return statValue(card) > 0;
+}
+
+function isActiveCard(card) {
+  return (
+    props.activeFilter &&
+    props.activeFilter.date === selectedDate.value &&
+    props.activeFilter.category === card.category
+  );
+}
+
+function clickStat(card) {
+  if (!statEnabled(card)) return;
+  emit("select", {
+    date: selectedDate.value,
+    category: card.category,
+    label: card.label,
+    count: statValue(card),
+    taskIds: detail.value?.task_ids?.[card.category] || [],
+  });
+}
 
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 const MONTH_NAMES = ["一月", "二月", "三月", "四月", "五月", "六月",
@@ -215,29 +266,16 @@ onMounted(async () => {
         </div>
 
         <div class="dcp-stat-grid">
-          <div class="dcp-stat warn">
-            <span class="dcp-stat-val">{{ detail.user_reviews.pending }}</span>
-            <span class="dcp-stat-label">待复审</span>
-          </div>
-          <div class="dcp-stat ok">
-            <span class="dcp-stat-val">{{ detail.user_reviews.passed }}</span>
-            <span class="dcp-stat-label">已通过</span>
-          </div>
-          <div class="dcp-stat info">
-            <span class="dcp-stat-val">{{ detail.user_reviews.submitted }}</span>
-            <span class="dcp-stat-label">已提交</span>
-          </div>
-          <div class="dcp-stat">
-            <span class="dcp-stat-val">{{ detail.killsweep }}</span>
-            <span class="dcp-stat-label">通杀列</span>
-          </div>
-          <div class="dcp-stat danger">
-            <span class="dcp-stat-val">{{ detail.user_reviews.rejected }}</span>
-            <span class="dcp-stat-label">已驳回</span>
-          </div>
-          <div class="dcp-stat danger">
-            <span class="dcp-stat-val">{{ detail.archived }}</span>
-            <span class="dcp-stat-label">AI未采纳</span>
+          <div
+            v-for="card in STAT_CARDS"
+            :key="card.category"
+            class="dcp-stat"
+            :class="[card.cssClass, { clickable: statEnabled(card), active: isActiveCard(card) }]"
+            :title="statEnabled(card) ? `点击筛选：${card.label}（${statValue(card)} 项关联的任务）` : ''"
+            @click="clickStat(card)"
+          >
+            <span class="dcp-stat-val">{{ statValue(card) }}</span>
+            <span class="dcp-stat-label">{{ card.label }}</span>
           </div>
         </div>
 
@@ -444,6 +482,27 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.dcp-stat.clickable {
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+}
+
+.dcp-stat.clickable:hover {
+  background: var(--surface-3);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.dcp-stat.active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--accent-bg);
+}
+
+.dcp-stat.clickable:active {
+  transform: translateY(0);
 }
 
 .dcp-stat-val {
