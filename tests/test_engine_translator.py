@@ -23,7 +23,7 @@ class TranslatorTests(unittest.TestCase):
     def test_quake_domain_and_and(self):
         q = fofa_to_quake('title="统一身份认证" && domain=".edu.cn"')
         self.assertIn('title:"统一身份认证"', q)
-        self.assertIn('domain:".edu.cn"', q)
+        self.assertIn('domain:"edu.cn"', q)
         self.assertIn(" AND ", q)
         self.assertNotIn("hostname", q)
 
@@ -37,6 +37,11 @@ class TranslatorTests(unittest.TestCase):
         self.assertIn('domain.suffix="example.com"', q)
         self.assertIn('port="443"', q)
         self.assertIn("&&", q)
+
+    def test_domain_dot_stripped(self):
+        self.assertIn('domain.suffix="edu.cn"', fofa_to_hunter('domain=".edu.cn"'))
+        self.assertIn('hostname:"edu.cn"', fofa_to_shodan('domain=".edu.cn"'))
+        self.assertIn('domain:"edu.cn"', fofa_to_zoomeye('domain=".edu.cn"'))
 
     def test_zoomeye_fofa_like(self):
         q = fofa_to_zoomeye('title="cisco vpn" && country="CN"')
