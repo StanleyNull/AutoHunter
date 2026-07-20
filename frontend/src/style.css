@@ -409,6 +409,7 @@ main {
 .skeleton-card,
 .skeleton-worker,
 .skeleton-line,
+.skeleton-task,
 .skeleton-hard {
   position: relative; overflow: hidden;
   background: color-mix(in oklch, var(--surface-2) 82%, var(--bg));
@@ -419,6 +420,7 @@ main {
 .skeleton-card::after,
 .skeleton-worker::after,
 .skeleton-line::after,
+.skeleton-task::after,
 .skeleton-hard::after,
 .sk-bar::after {
   content: "";
@@ -442,9 +444,11 @@ main {
 .skeleton-line { height: 14px; border-radius: 7px; margin-bottom: 8px; }
 .skeleton-line:nth-child(odd) { width: 92%; }
 .skeleton-line:nth-child(even) { width: 78%; }
-/* 骨架任务卡：完全复用 .task-card 的盒模型（padding/border/radius/flex 布局），
-   内部用 .sk-bar 占位条镜像真实文字行，保证加载前后高度一致、不抖动。仅去掉交互。 */
-.skeleton-task { cursor: default; pointer-events: none; margin-bottom: 10px; }
+/* 骨架任务卡：复用 .task-card 盒模型；保留 min-height 防止空壳塌成矮条。 */
+.skeleton-task {
+  cursor: default; pointer-events: none; margin-bottom: 10px;
+  min-height: 92px; border-radius: var(--radius);
+}
 .skeleton-task:hover { border-color: var(--border); background: var(--surface); }
 .sk-bar {
   position: relative; overflow: hidden; display: inline-block;
@@ -458,6 +462,7 @@ main {
 /* 骨架 query 占位：撑满 2 行(与真实 .task-query min-height 对齐)，两条模拟两行文字。 */
 .sk-query-wrap {
   display: flex; flex-direction: column; justify-content: center; gap: 5px;
+  min-height: 2.8em;
 }
 .sk-query { width: 88%; height: 12px; }
 .sk-query.short { width: 62%; }
