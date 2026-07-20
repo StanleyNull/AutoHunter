@@ -26,7 +26,7 @@ _SELF_DESTRUCT_PATTERNS = [
     # 篡改系统认证/配置
     r">\s*/etc/(passwd|shadow|sudoers|hosts)\b",
     r"\bchmod\s+-R\s+000\s+/\b",
-    # pip install 会破坏运行时的危险包（pyppeteer/selenium/undetected-chromedriver
+    # pip install 安装会破坏运行时的危险包（pyppeteer/selenium/undetected-chromedriver
     # 依赖无约束的旧版 websockets，会将其降级到 <13，导致 uvicorn 崩溃）
     r"\bpip3?\s+install\b.*\b(pyppeteer|selenium|undetected[_-]chromedriver)\b",
     r"\bpython3?\s+-m\s+pip\s+install\b.*\b(pyppeteer|selenium|undetected[_-]chromedriver)\b",

@@ -33,6 +33,7 @@ class CreateTaskRequest(BaseModel):
     src_type: str = "edusrc"
     vuln_types: list[str] = Field(default_factory=list)
     src_rules: str = ""
+    cas_sso_config: str = ""
     target_source: str = "fofa"
     engine: str = ""                                           # 搜索引擎：fofa/quake/hunter/...
     fofa_query: str = ""
@@ -41,6 +42,8 @@ class CreateTaskRequest(BaseModel):
     fofa_config: FofaConfigDTO = Field(default_factory=FofaConfigDTO)
     engine_config: EngineConfigDTO = Field(default_factory=EngineConfigDTO)  # 引擎 Key/URL
     concurrency: int = 3
+    enable_worker_fofa_lookup: bool = True     # Worker 挖掘时是否允许调用 fofa_lookup
+    enable_killsweep_fofa_search: bool = True   # 通杀分析时是否允许调用 fofa_search
 
 
 class PartialModelConfigDTO(BaseModel):
@@ -69,6 +72,7 @@ class UpdateTaskRequest(BaseModel):
     src_type: Optional[str] = None
     vuln_types: Optional[list[str]] = None
     src_rules: Optional[str] = None
+    cas_sso_config: Optional[str] = None
     target_source: Optional[str] = None
     engine: Optional[str] = None                                 # 切换引擎
     fofa_query: Optional[str] = None
@@ -77,6 +81,8 @@ class UpdateTaskRequest(BaseModel):
     fofa_config: Optional[PartialFofaConfigDTO] = None
     engine_config: Optional[PartialEngineConfigDTO] = None
     concurrency: Optional[int] = None
+    enable_worker_fofa_lookup: Optional[bool] = None
+    enable_killsweep_fofa_search: Optional[bool] = None
 
 
 class TaskStats(BaseModel):
@@ -85,6 +91,7 @@ class TaskStats(BaseModel):
     done: int = 0
     dead: int = 0
     skipped: int = 0
+    pending_input: int = 0   # 需要用户提供凭证/完成注册的目标
     findings_total: int = 0
     pending_review: int = 0
     accepted: int = 0
@@ -95,6 +102,7 @@ class TaskStats(BaseModel):
     submit_ready: int = 0
     rejected: int = 0
     archived: int = 0
+    discarded: int = 0  # AI 已作废（superseded 且用户未处理）
 
 
 class TaskResponse(BaseModel):
@@ -108,15 +116,29 @@ class TaskResponse(BaseModel):
     fofa_query: str
     concurrency: int
     src_rules: str = ""
+    cas_sso_config: str = ""
     manual_targets: list[str] = Field(default_factory=list)
     model_config_data: dict = Field(default_factory=dict)
     fofa_config: dict = Field(default_factory=dict)
     engine_config: dict = Field(default_factory=dict)
+    enable_worker_fofa_lookup: bool = True
+    enable_killsweep_fofa_search: bool = True
     llm_usage: dict = Field(default_factory=dict)
+    llm_cost: float = 0.0
     created_at: str
     updated_at: str
     stats: Optional[TaskStats] = None
     pending_user_review: int = 0
+    # AI 未采纳归档数（ignored/deepen 且用户未处理）——任务卡片绿点用，列表接口轻量填充
+    pending_archived: int = 0
+    # AI 已作废数（superseded 且用户未处理）——任务卡片灰点用，列表接口轻量填充
+    pending_discarded: int = 0
+    # 待注册(pending_input)目标数——任务列表"待注册"筛选用，列表接口轻量填充
+    pending_input: int = 0
+    # 失败目标重测是否进行中——任务列表卡片黄色边框用
+    retest_active: bool = False
+    # 处置进度（已完成目标数/总目标数*100，四舍五入）——任务列表卡片进度条用
+    progress_pct: int = 0
 
 
 class LLMSettingsDTO(BaseModel):
@@ -147,8 +169,23 @@ class DefaultsSettingsDTO(BaseModel):
     engine: Optional[str] = None
 
 
+class ProxySettingsDTO(BaseModel):
+    ssh_servers: Optional[str] = None
+    ssh_key_path: Optional[str] = None
+    probe_servers: Optional[str] = None
+
+
+class ModelPricingDTO(BaseModel):
+    """单个模型的计价（单位：元/百万Token）。"""
+    input: Optional[float] = None
+    output: Optional[float] = None
+    cache_hit: Optional[float] = None
+
+
 class SettingsUpdateRequest(BaseModel):
     llm: Optional[LLMSettingsDTO] = None
     fofa: Optional[FofaSettingsDTO] = None
     engines: Optional[dict[str, EngineSettingsDTO]] = None   # 按引擎名索引
     defaults: Optional[DefaultsSettingsDTO] = None
+    proxy: Optional[ProxySettingsDTO] = None
+    pricing: Optional[dict[str, ModelPricingDTO]] = None     # {model_name: {input, output, cache_hit}}

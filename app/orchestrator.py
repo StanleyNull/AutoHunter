@@ -11,12 +11,14 @@ import contextlib
 import hashlib
 import logging
 import os
+import subprocess
 import threading
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +45,7 @@ from app.settings_service import (
     llm_client_for_task,
     resolve_fofa_base_url,
     resolve_fofa_key,
+    resolve_proxy_config,
     resolve_worker_prompt_version,
 )
 from app.schemas import Finding as FindingSchema
@@ -129,6 +132,12 @@ QUEUE_LOW_SUCCESS_SCORE_THRESHOLD = float(os.environ.get("QUEUE_LOW_SUCCESS_SCOR
 QUEUE_TRANSIENT_PREFILTER_COOLDOWN = float(os.environ.get("QUEUE_TRANSIENT_PREFILTER_COOLDOWN", "900"))
 QUEUE_DISPATCH_CANDIDATE_LIMIT = max(30, int(os.environ.get("QUEUE_DISPATCH_CANDIDATE_LIMIT", "120")))
 QUEUE_LIVENESS_BATCH_SIZE = max(1, int(os.environ.get("QUEUE_LIVENESS_BATCH_SIZE", "24")))
+# 重测 Phase1 探活超时：重测目标本就是曾死链/超时的资产，用更短 timeout 快速判定
+# 「这次缓过来了没」。能通的目标通常 < 1s 响应，短 timeout 只会更快淘汰真死链。
+# 本机探活走 prefilter.probe（httpx），服务器探活走 SSH curl。
+RETEST_LOCAL_TIMEOUT = float(os.environ.get("RETEST_LOCAL_TIMEOUT", "4"))
+RETEST_SERVER_TIMEOUT = float(os.environ.get("RETEST_SERVER_TIMEOUT", "5"))
+RETEST_SSH_CONNECT_TIMEOUT = float(os.environ.get("RETEST_SSH_CONNECT_TIMEOUT", "3"))
 
 _LOW_SUCCESS_SCORE_MARKERS = (
     "pure_frontend", "pure_marketing_site", "static_assets", "data_display_platform",
@@ -266,12 +275,69 @@ def _probe_urls(url: str, host: str) -> list[str]:
     return urls
 
 
-def _probe_target_liveness(url: str, host: str, timeout: float) -> dict:
+def _probe_via_ssh_proxy(url: str, proxy_config, timeout: float) -> dict:
+    """通过 SSH 代理探活，防止 WAF 封本地 IP 导致误判不可达。
+
+    本机 IP 被目标 WAF 封禁时，本地 HTTP 请求会被丢包/重置/超时，
+    导致 _probe_target_liveness 误判目标不可达。此时通过 SSH 代理
+    发一个干净的 curl 请求交叉验证：代理能通说明目标本身存活，
+    本地不通是 IP 层面的问题。
+    """
+    servers = proxy_config.server_list
+    if not servers:
+        return {"alive": False, "reason": "无可用代理服务器"}
+
+    srv = servers[0]
+    key_path = proxy_config.ssh_key_path
+    # 解析 user@host:port
+    if ":" in srv.split("@")[-1]:
+        user_host, port = srv.rsplit(":", 1)
+    else:
+        user_host, port = srv, "22"
+
+    curl_cmd = (
+        f"curl -s -o /dev/null -w '%{{http_code}}' -m {int(timeout)} -k '{url}'"
+    )
+    ssh_cmd = [
+        "ssh", "-i", key_path,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        "-p", port, user_host,
+        curl_cmd,
+    ]
+
+    try:
+        result = subprocess.run(
+            ssh_cmd, capture_output=True, text=True,
+            timeout=timeout + 10,  # SSH 连接开销
+        )
+        status_code = (result.stdout or "").strip().strip("'")
+        if status_code.isdigit():
+            code = int(status_code)
+            if 0 < code < 500:
+                return {"alive": True, "url": url, "status": code, "skip": False}
+            if code >= 500:
+                return {
+                    "alive": True, "url": url, "status": code,
+                    "skip": True, "reason": f"服务异常({code})",
+                }
+        # curl 无输出 = 连接失败
+        err = (result.stderr or "")[:200]
+        return {"alive": False, "reason": f"代理探活失败：{err}"}
+    except subprocess.TimeoutExpired:
+        return {"alive": False, "reason": "代理探活超时"}
+    except Exception as exc:
+        return {"alive": False, "reason": f"代理探活异常：{str(exc)[:180]}"}
+
+
+def _probe_target_liveness(url: str, host: str, timeout: float, proxy_config=None) -> dict:
     """同步派发前预筛，给 run_in_executor 调用。
 
     - 任意可访问 HTTP 响应都算 alive；
     - prefilter 判定的 CDN/静态/5xx 等返回 skip=True，不交给 worker 消耗 token；
-    - http/https 都不通才 alive=False。
+    - http/https 都不通才 alive=False；
+    - 本地探活失败时，若配置了 SSH 代理，通过代理交叉验证防止 WAF 封 IP 误判。
     """
     urls = _probe_urls(url, host)
     skipped: list[dict] = []
@@ -296,6 +362,15 @@ def _probe_target_liveness(url: str, host: str, timeout: float) -> dict:
                 "skip": True,
                 "reason": reason,
             }
+
+    # 所有本地探活 URL 都失败了，尝试通过 SSH 代理交叉验证
+    if proxy_config and proxy_config.available:
+        probe_url = urls[0] if urls else (url or host)
+        proxy_result = _probe_via_ssh_proxy(probe_url, proxy_config, timeout)
+        if proxy_result.get("alive"):
+            proxy_result["via_proxy"] = True
+            return proxy_result
+
     return {
         "alive": False,
         "url": urls[0] if urls else (url or host),
@@ -401,6 +476,20 @@ class TaskRunner:
             recovered=recovered, killed=killed,
         )
 
+        # 重测状态恢复：worker 可能已死，重置 testing → idle
+        task = await session.get(Task, self.task_id)
+        if task and task.retest_state:
+            state = task.retest_state
+            if state.get("current_step") == "testing":
+                state["current_step"] = "idle"
+                state["current_id"] = None
+                await self._log(
+                    session, "orchestrator", "retest_recover",
+                    "重测状态恢复：worker 已死，重置为 idle 等待重新取目标",
+                    level="info",
+                )
+            await session.commit()
+
     async def run_forever(self) -> None:
         async with SessionLocal() as session:
             await self.recover(session)
@@ -427,7 +516,26 @@ class TaskRunner:
     async def _tick(self) -> None:
         async with SessionLocal() as session:
             task = await session.get(Task, self.task_id)
-            if not task or task.status in ("paused", "stopped"):
+            if not task:
+                return
+            if task.status == "stopped":
+                # 停止：清除重测状态（完全重置）
+                if task.retest_state:
+                    task.retest_state = None
+                    await session.commit()
+                return
+            if task.status == "paused":
+                # 暂停：保留 retest_state，恢复后从断点继续休眠/重测
+                # 仅重置 testing → idle（worker 已被 pause 取消，恢复后重新取目标）
+                if task.retest_state and task.retest_state.get("current_step") == "testing":
+                    task.retest_state["current_step"] = "idle"
+                    task.retest_state["current_id"] = None
+                    await self._retest_save(session, task)
+                    await self._log(
+                        session, "orchestrator", "retest_paused",
+                        "任务暂停，重测进度已保留（恢复后从断点继续）",
+                        level="info",
+                    )
                 return
             self._is_enterprise = is_enterprise_src(task.src_type)
 
@@ -510,6 +618,13 @@ class TaskRunner:
             # 空闲、实际还有目标虚挂，直到 reclaim(最多 ~150s)才回收——保持 running 更真实。
             inflight = await self._count_inflight(session)
             busy = bool(self._active_workers) or inflight > 0
+
+            # 5. 失败目标自动重测：首轮目标全部完成且无活跃 worker 时，启动重测生命周期
+            if queued == 0 and not busy:
+                retest_active = await self._retest_tick(session, task)
+                if retest_active:
+                    queued = 1  # 保持 running，不进 idle
+
             if queued == 0 and not busy and task.status == "running":
                 if task.status != "idle":
                     task.status = "idle"
@@ -534,6 +649,531 @@ class TaskRunner:
                 Target.task_id == self.task_id,
                 Target.status.in_(("assigned", "scanning")))
         )).scalar() or 0
+
+    # ===== 失败目标自动重测生命周期 =====
+    # 匹配失败 dead_reason 的关键词（与 reset-failed API 保持一致）
+    _RETEST_DEAD_PATTERNS = ("探活失败", "死链", "连接超时", "系统自动收敛", "连续")
+    # 有代理模式递增休眠时长（小时）
+    _RETEST_SLEEP_HOURS = [4, 8, 24]
+
+    @staticmethod
+    async def _retest_save(session: AsyncSession, task: Task) -> None:
+        """标记 retest_state 为脏并提交。SQLAlchemy 不自动检测 JSON 字段的原地修改。"""
+        flag_modified(task, "retest_state")
+        await session.commit()
+
+    async def _retest_tick(self, session: AsyncSession, task: Task) -> int:
+        """重测生命周期入口。返回 >0 表示重测进行中（不进 idle），0 表示无需重测。"""
+        state = task.retest_state
+
+        # 无状态 → 尝试启动
+        if not state:
+            return await self._retest_start(session, task)
+
+        phase = state.get("phase", "")
+
+        # 已完成 → 清理
+        if phase == "done":
+            task.retest_state = None
+            await self._retest_save(session, task)
+            return 0
+
+        # 休眠中 → 检查唤醒 + 30 分钟日志
+        if phase in ("phase3_sleep", "noproxy_sleep"):
+            return await self._retest_sleep(session, task, state)
+
+        # 活跃阶段 → 执行一步
+        if phase in ("phase1", "phase2", "noproxy_round"):
+            return await self._retest_step(session, task, state)
+
+        return 0
+
+    async def _retest_start(self, session: AsyncSession, task: Task) -> int:
+        """收集失败目标，初始化重测状态。"""
+        from sqlalchemy import func
+
+        # 查询匹配失败模式的 dead 目标
+        dead_targets = (await session.execute(
+            select(Target).where(
+                Target.task_id == self.task_id,
+                Target.status == "dead",
+            )
+        )).scalars().all()
+
+        eligible = []
+        for tgt in dead_targets:
+            reason = (tgt.dead_reason or "")
+            if not any(p in reason for p in self._RETEST_DEAD_PATTERNS):
+                continue
+            if (tgt.deepen_count or 0) >= DEEPEN_CAP:
+                continue
+            eligible.append(tgt.id)
+
+        if not eligible:
+            return 0
+
+        proxy_available = resolve_proxy_config().available
+        mode = "proxy" if proxy_available else "noproxy"
+        phase = "phase1" if proxy_available else "noproxy_round"
+
+        task.retest_state = {
+            "mode": mode,
+            "phase": phase,
+            "remaining_ids": eligible,
+            "total": len(eligible),
+            "unreachable_ids": [],  # noproxy 模式专用
+            "current_id": None,
+            "current_step": "idle",
+            "sleep_until": None,
+            "sleep_round": 0,
+            "last_log_at": None,
+        }
+        await self._log(
+            session, "orchestrator", "retest_start",
+            f"开始重测 {len(eligible)} 个失败目标（{'有' if proxy_available else '无'}代理模式）",
+            level="info", phase=phase, target_count=len(eligible),
+        )
+        await self._retest_save(session, task)
+        return 1
+
+    async def _retest_step(self, session: AsyncSession, task: Task, state: dict) -> int:
+        """串行探活+测试的单步执行。每次 tick 调用一次。"""
+        step = state.get("current_step", "idle")
+        current_id = state.get("current_id")
+
+        # --- idle: 取下一个目标 ---
+        if step == "idle":
+            if not state.get("remaining_ids"):
+                # 本阶段全部处理完 → 阶段转换
+                return await self._retest_phase_transition(session, task, state)
+
+            current_id = state["remaining_ids"][0]
+            state["current_id"] = current_id
+            phase = state.get("phase")
+
+            # Phase 2: 直接派 worker（ip_banned 目标已确认需要代理测试）
+            if phase == "phase2":
+                tgt = await session.get(Target, current_id)
+                if not tgt or tgt.status != "ip_banned":
+                    state["remaining_ids"].remove(current_id)
+                    state["current_id"] = None
+                    await self._retest_save(session, task)
+                    return 1
+                tgt.status = "queued"
+                tgt.verdict = ""
+                tgt.retry_count = 0
+                tgt.deepen_context = {
+                    "directive": "IP 封禁复测：你的 IP 被目标 WAF 封禁，必须全程通过 SSH 代理发送请求。",
+                    "ip_ban_retest": True,
+                    "source": "ip_ban_retest",
+                }
+                tgt.last_error = "IP 封禁复测：切换代理模式"
+                tgt.dead_reason = ""
+                await self._retest_save(session, task)
+                self._spawn_worker(task, tgt)
+                state["current_step"] = "testing"
+                await self._retest_save(session, task)
+                return 1
+
+            # Phase 1 / noproxy_round: 需要探活
+            # 暂停恢复后，目标可能已被正常调度处理（状态不再是 dead），跳过
+            tgt = await session.get(Target, current_id)
+            if not tgt or tgt.status != "dead":
+                state["remaining_ids"].remove(current_id)
+                state["current_id"] = None
+                await self._retest_save(session, task)
+                return 1
+            state["current_step"] = "probing"
+            await self._retest_save(session, task)
+            return 1
+
+        # --- probing: 探活 ---
+        if step == "probing":
+            tgt = await session.get(Target, current_id) if current_id else None
+            if not tgt:
+                if current_id and current_id in state.get("remaining_ids", []):
+                    state["remaining_ids"].remove(current_id)
+                state["current_id"] = None
+                state["current_step"] = "idle"
+                await self._retest_save(session, task)
+                return 1
+
+            loop = asyncio.get_running_loop()
+            proxy_cfg = resolve_proxy_config()
+            phase = state.get("phase")
+
+            # 本机探活
+            probe_result = await loop.run_in_executor(
+                COLLECTOR_IO_EXECUTOR,
+                lambda: self._retest_probe_local(tgt.url, tgt.host),
+            )
+
+            if probe_result.get("alive"):
+                # 本机可达 → 入队测试
+                tgt.status = "queued"
+                tgt.verdict = ""
+                tgt.assigned_worker = ""
+                tgt.heartbeat_at = None
+                tgt.dead_reason = ""
+                tgt.last_error = ""
+                tgt.retry_count = 0
+                tgt.ip_ban_confirmed = False
+                tgt.deepen_context = None
+                tgt.priority_score = (tgt.priority_score or 0) + 50.0
+                tgt.priority_reason = "[重测] 探活成功，重新入队测试"
+                await self._retest_save(session, task)
+                self._spawn_worker(task, tgt)
+                state["current_step"] = "testing"
+                await self._retest_save(session, task)
+                return 1
+
+            # 本机不可达
+            if phase == "noproxy_round":
+                # 无代理模式：保留到 unreachable_ids，下轮再试
+                state.setdefault("unreachable_ids", []).append(current_id)
+                state["remaining_ids"].remove(current_id)
+                state["current_id"] = None
+                state["current_step"] = "idle"
+                await self._retest_save(session, task)
+                return 1
+
+            # 有代理模式：依次尝试探活服务器 → 测试服务器
+            ssh_key_path = proxy_cfg.ssh_key_path
+            probe_urls = _probe_urls(tgt.url, tgt.host)
+            probe_url = probe_urls[0] if probe_urls else (tgt.url or tgt.host)
+
+            # 先探活服务器，再测试服务器
+            all_servers = list(proxy_cfg.probe_server_list) + list(proxy_cfg.server_list)
+            server_reachable = False
+            for srv in all_servers:
+                srv_result = await loop.run_in_executor(
+                    COLLECTOR_IO_EXECUTOR,
+                    lambda s=srv: self._retest_probe_via_server(probe_url, s, ssh_key_path),
+                )
+                if srv_result.get("alive"):
+                    server_reachable = True
+                    break
+
+            if server_reachable:
+                # 服务器可达 → 标记 ip_banned
+                tgt.status = "ip_banned"
+                tgt.ip_ban_confirmed = True
+                tgt.assigned_worker = ""
+                tgt.heartbeat_at = None
+                tgt.dead_reason = ""
+                tgt.last_error = "重测探活：本机不可达但服务器可达，标记 IP 封禁"
+                await self._log(
+                    session, "orchestrator", "retest_ip_banned",
+                    f"重测探活：{tgt.host} 本机不可达但服务器可达，标记 IP 封禁",
+                    level="warn", target_id=current_id,
+                )
+            else:
+                # 全部不可达 → 标记 dead
+                tgt.status = "dead"
+                tgt.assigned_worker = ""
+                tgt.heartbeat_at = None
+                tgt.dead_reason = "本机和所有服务器均探活失败，确定服务不可达"
+                await self._log(
+                    session, "orchestrator", "retest_dead",
+                    f"重测探活：{tgt.host} 本机和所有服务器均不可达，标记 dead",
+                    level="warn", target_id=current_id,
+                )
+
+            if current_id in state.get("remaining_ids", []):
+                state["remaining_ids"].remove(current_id)
+            state["current_id"] = None
+            state["current_step"] = "idle"
+            await self._retest_save(session, task)
+            return 1
+
+        # --- testing: 等待 worker 完成 ---
+        if step == "testing":
+            if current_id and current_id in self._active_workers:
+                return 1  # worker 仍在运行，等下次 tick
+            # worker 已完成
+            state["current_step"] = "idle"
+            state["current_id"] = None
+            # 从 remaining 移除（已处理完）
+            if current_id and current_id in state.get("remaining_ids", []):
+                state["remaining_ids"].remove(current_id)
+            await self._retest_save(session, task)
+            return 1
+
+        return 1
+
+    async def _retest_phase_transition(self, session: AsyncSession, task: Task, state: dict) -> int:
+        """本阶段全部目标处理完后的阶段转换。"""
+        mode = state.get("mode")
+        phase = state.get("phase")
+
+        if mode == "noproxy":
+            # 无代理模式：检查不可达目标
+            unreachable = state.get("unreachable_ids", [])
+            if not unreachable:
+                # 全部测完，无残留
+                state["phase"] = "done"
+                await self._log(session, "orchestrator", "retest_done",
+                                "无代理重测完成，所有失败目标已处理",
+                                level="info")
+                await self._retest_save(session, task)
+                return 1
+
+            # 有不可达目标 → 检查轮次
+            sleep_round = state.get("sleep_round", 0)
+            if sleep_round >= 2:
+                # 已完成 3 轮（round 0, 1, 2）→ 标记 dead
+                for tid in unreachable:
+                    tgt = await session.get(Target, tid)
+                    if tgt:
+                        tgt.status = "dead"
+                        tgt.assigned_worker = ""
+                        tgt.heartbeat_at = None
+                        tgt.dead_reason = "重测3轮仍不可达，确定服务不可达"
+                state["phase"] = "done"
+                await self._log(session, "orchestrator", "retest_done",
+                                f"无代理重测3轮结束，{len(unreachable)} 个目标标记 dead",
+                                level="warn", dead_count=len(unreachable))
+                await self._retest_save(session, task)
+                return 1
+
+            # 进入休眠
+            wake_at = datetime.now(CST) + timedelta(hours=4)
+            state["phase"] = "noproxy_sleep"
+            state["sleep_until"] = wake_at.isoformat()
+            state["last_log_at"] = None
+            await self._log(session, "orchestrator", "retest_sleep",
+                            f"第{sleep_round + 1}轮重测完成，{len(unreachable)} 个不可达目标，"
+                            f"休眠4h，预计第{sleep_round + 2}轮将在 {self._retest_fmt(wake_at)} 开始",
+                            level="info", sleep_until=state["sleep_until"])
+            await self._retest_save(session, task)
+            return 1
+
+        # 有代理模式
+        if phase == "phase1":
+            # Phase 1 完成 → 查询所有 ip_banned 目标（包括 Phase 1 中新产生的）
+            banned = (await session.execute(
+                select(Target).where(
+                    Target.task_id == self.task_id,
+                    Target.status == "ip_banned",
+                )
+            )).scalars().all()
+
+            if banned:
+                state["phase"] = "phase2"
+                state["remaining_ids"] = [t.id for t in banned]
+                state["current_id"] = None
+                state["current_step"] = "idle"
+                await self._log(session, "orchestrator", "retest_phase2",
+                                f"Phase 1 完成，{len(banned)} 个 IP 封禁目标进入 Phase 2 服务器测试",
+                                level="info")
+                await self._retest_save(session, task)
+                return 1
+            else:
+                state["phase"] = "done"
+                await self._log(session, "orchestrator", "retest_done",
+                                "有代理重测完成，无 IP 封禁目标",
+                                level="info")
+                await self._retest_save(session, task)
+                return 1
+
+        if phase == "phase2":
+            # Phase 2 完成 → 查询仍为 ip_banned 的目标
+            still_banned = (await session.execute(
+                select(Target).where(
+                    Target.task_id == self.task_id,
+                    Target.status == "ip_banned",
+                )
+            )).scalars().all()
+
+            if not still_banned:
+                state["phase"] = "done"
+                await self._log(session, "orchestrator", "retest_done",
+                                "有代理重测完成，所有 IP 封禁目标已测完",
+                                level="info")
+                await self._retest_save(session, task)
+                return 1
+
+            # 有残留 ip_banned → 用探活服务器交叉验证
+            proxy_cfg = resolve_proxy_config()
+            probe_servers = proxy_cfg.probe_server_list or proxy_cfg.server_list
+            ssh_key_path = proxy_cfg.ssh_key_path
+
+            if probe_servers:
+                loop = asyncio.get_running_loop()
+                first_tgt = still_banned[0]
+                probe_urls = _probe_urls(first_tgt.url, first_tgt.host)
+                probe_url = probe_urls[0] if probe_urls else (first_tgt.url or first_tgt.host)
+
+                probe_reachable = False
+                for srv in probe_servers:
+                    srv_result = await loop.run_in_executor(
+                        COLLECTOR_IO_EXECUTOR,
+                        lambda s=srv: self._retest_probe_via_server(probe_url, s, ssh_key_path),
+                    )
+                    if srv_result.get("alive"):
+                        probe_reachable = True
+                        break
+
+                if not probe_reachable:
+                    # 探活服务器也不可达 → 全部标记 dead
+                    for tgt in still_banned:
+                        tgt.status = "dead"
+                        tgt.assigned_worker = ""
+                        tgt.heartbeat_at = None
+                        tgt.dead_reason = "本机和所有服务器均探活失败，确定服务不可达"
+                    state["phase"] = "done"
+                    await self._log(session, "orchestrator", "retest_done",
+                                    f"Phase 2 后探活服务器也不可达，{len(still_banned)} 个目标标记 dead",
+                                    level="warn", dead_count=len(still_banned))
+                    await self._retest_save(session, task)
+                    return 1
+
+            # 探活服务器可达 → 进入 Phase 3 休眠
+            sleep_round = state.get("sleep_round", 0)
+            if sleep_round >= len(self._RETEST_SLEEP_HOURS):
+                # 已超过最大休眠轮次 → 标记 dead
+                for tgt in still_banned:
+                    tgt.status = "dead"
+                    tgt.assigned_worker = ""
+                    tgt.heartbeat_at = None
+                    tgt.dead_reason = "重测休眠耗尽（4h→8h→24h），确定服务不可达"
+                state["phase"] = "done"
+                await self._log(session, "orchestrator", "retest_done",
+                                f"休眠轮次耗尽，{len(still_banned)} 个目标标记 dead",
+                                level="warn", dead_count=len(still_banned))
+                await self._retest_save(session, task)
+                return 1
+
+            sleep_hours = self._RETEST_SLEEP_HOURS[sleep_round]
+            wake_at = datetime.now(CST) + timedelta(hours=sleep_hours)
+            state["phase"] = "phase3_sleep"
+            state["sleep_until"] = wake_at.isoformat()
+            state["last_log_at"] = None
+            state["remaining_ids"] = [t.id for t in still_banned]
+            await self._log(session, "orchestrator", "retest_sleep",
+                            f"Phase 2 后 {len(still_banned)} 个目标仍 IP 封禁，"
+                            f"进入休眠 {sleep_hours}h，预计 {self._retest_fmt(wake_at)} 重新探活",
+                            level="info", sleep_until=state["sleep_until"])
+            await self._retest_save(session, task)
+            return 1
+
+        state["phase"] = "done"
+        await self._retest_save(session, task)
+        return 1
+
+    async def _retest_sleep(self, session: AsyncSession, task: Task, state: dict) -> int:
+        """休眠检查 + 30 分钟周期日志。"""
+        sleep_until_str = state.get("sleep_until")
+        if not sleep_until_str:
+            state["phase"] = "done"
+            await self._retest_save(session, task)
+            return 1
+
+        sleep_until = datetime.fromisoformat(sleep_until_str)
+        now = datetime.now(CST)
+
+        if now < sleep_until:
+            # 还在休眠 → 检查 30 分钟日志
+            last_log = state.get("last_log_at")
+            if last_log:
+                last_log_dt = datetime.fromisoformat(last_log)
+            else:
+                last_log_dt = None
+
+            if not last_log_dt or (now - last_log_dt).total_seconds() >= 1800:
+                mode = state.get("mode")
+                sleep_round = state.get("sleep_round", 0)
+                if mode == "noproxy":
+                    msg = (f"第{sleep_round + 1}轮重测休眠中，"
+                           f"预计第{sleep_round + 2}轮将在 {self._retest_fmt(sleep_until)} 开始")
+                else:
+                    msg = (f"IP封禁队列休眠中，预计启动时间 {self._retest_fmt(sleep_until)}")
+                await self._log(session, "orchestrator", "retest_sleep_log", msg, level="info")
+                state["last_log_at"] = now.isoformat()
+                await self._retest_save(session, task)
+            return 1
+
+        # 休眠时间到 → 唤醒
+        mode = state.get("mode")
+        sleep_round = state.get("sleep_round", 0)
+
+        if mode == "noproxy":
+            # 无代理模式唤醒 → 重新一轮
+            unreachable = state.get("unreachable_ids", [])
+            state["phase"] = "noproxy_round"
+            state["remaining_ids"] = list(unreachable)
+            state["unreachable_ids"] = []
+            state["current_id"] = None
+            state["current_step"] = "idle"
+            state["sleep_round"] = sleep_round + 1
+            state["sleep_until"] = None
+            await self._log(session, "orchestrator", "retest_wake",
+                            f"休眠结束，开始第{sleep_round + 2}轮重测，{len(state['remaining_ids'])} 个目标",
+                            level="info")
+            await self._retest_save(session, task)
+            return 1
+
+        # 有代理模式唤醒 → 从 Phase 1 重新开始
+        remaining = state.get("remaining_ids", [])
+        state["phase"] = "phase1"
+        state["current_id"] = None
+        state["current_step"] = "idle"
+        state["sleep_round"] = sleep_round + 1
+        state["sleep_until"] = None
+        await self._log(session, "orchestrator", "retest_wake",
+                        f"休眠结束，重新开始 Phase 1 探活，{len(remaining)} 个目标",
+                        level="info")
+        await self._retest_save(session, task)
+        return 1
+
+    @staticmethod
+    def _retest_probe_local(url: str, host: str, timeout: float = RETEST_LOCAL_TIMEOUT) -> dict:
+        """本机 HTTP 探活（不经过代理）。"""
+        urls = _probe_urls(url, host)
+        for probe_url in urls:
+            skip, reason, info = prefilter.should_skip_ex(host, probe_url, timeout=timeout)
+            if not skip:
+                return {"alive": True, "url": probe_url, "status": info.get("status", 0)}
+            # 非死链的 skip（CDN/5xx/静态）说明目标存活
+            if reason and reason != "死链/连接超时/无响应":
+                return {"alive": True, "url": probe_url, "status": info.get("status", 0)}
+        return {"alive": False, "url": urls[0] if urls else (url or host)}
+
+    @staticmethod
+    def _retest_probe_via_server(url: str, server: str, ssh_key_path: str, timeout: float = RETEST_SERVER_TIMEOUT) -> dict:
+        """通过指定 SSH 服务器探活。"""
+        if ":" in server.split("@")[-1]:
+            user_host, port = server.rsplit(":", 1)
+        else:
+            user_host, port = server, "22"
+
+        curl_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' -m {int(timeout)} -k '{url}'"
+        ssh_cmd = [
+            "ssh", "-i", ssh_key_path,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={int(RETEST_SSH_CONNECT_TIMEOUT)}",
+            "-p", port, user_host,
+            curl_cmd,
+        ]
+        try:
+            result = subprocess.run(
+                ssh_cmd, capture_output=True, text=True,
+                timeout=timeout + RETEST_SSH_CONNECT_TIMEOUT + 2,
+            )
+            status_code = (result.stdout or "").strip().strip("'")
+            if status_code.isdigit():
+                code = int(status_code)
+                if 0 < code < 500:
+                    return {"alive": True, "url": url, "status": code}
+            return {"alive": False}
+        except Exception:
+            return {"alive": False}
+
+    @staticmethod
+    def _retest_fmt(dt: datetime) -> str:
+        """格式化时间为 'M月d日 HH:MM'。"""
+        return f"{dt.month}月{dt.day}日 {dt:%H:%M}"
 
     async def _pop_queued(self, session: AsyncSession) -> Target | None:
         # 按 EduSRC 优先级评分降序派发：高价值目标先挖。
@@ -664,7 +1304,21 @@ class TaskRunner:
             alive_url = probe.get("url") or ""
             if alive_url and alive_url != target.url:
                 target.url = alive_url
+            # 本地探活失败但代理探活成功 → 本机 IP 疑似被封，标记代理模式
+            if probe.get("via_proxy"):
+                target.ip_ban_confirmed = True
+                target.deepen_context = {
+                    "directive": "本地 IP 疑似被 WAF 封禁（派发前探活本地不通、代理可达），全程通过 SSH 代理发送请求。",
+                    "ip_ban_retest": True,
+                    "source": "ip_ban_retest",
+                }
             await session.commit()
+            if probe.get("via_proxy"):
+                await self._log(
+                    session, "orchestrator", "target_revived_via_proxy",
+                    f"目标本地探活失败但代理可达，疑似 IP 被封，已标记代理模式派发",
+                    level="warn", target_id=target.id, host=target.host,
+                )
             if removed_unreachable:
                 await self._log(
                     session, "orchestrator", "target_unreachable",
@@ -731,6 +1385,8 @@ class TaskRunner:
                 pending.append((target.id, target.url, target.host))
 
         if pending:
+            from app.settings_service import resolve_proxy_config
+            proxy_config = resolve_proxy_config()
             sem = asyncio.Semaphore(max(1, QUEUE_LIVENESS_CONCURRENCY))
 
             async def one(target_id: str, url: str, host: str) -> tuple[str, dict]:
@@ -738,7 +1394,10 @@ class TaskRunner:
                     try:
                         res = await loop.run_in_executor(
                             COLLECTOR_IO_EXECUTOR,
-                            lambda: _probe_target_liveness(url, host, QUEUE_LIVENESS_TIMEOUT),
+                            lambda: _probe_target_liveness(
+                                url, host, QUEUE_LIVENESS_TIMEOUT,
+                                proxy_config=proxy_config,
+                            ),
                         )
                     except Exception as exc:
                         res = {
@@ -750,7 +1409,9 @@ class TaskRunner:
                     return target_id, res
 
             for target_id, res in await asyncio.gather(*(one(*item) for item in pending)):
-                if res.get("alive") and not res.get("skip"):
+                # 代理探活恢复的目标不缓存：缓存路径不含 via_proxy 标记，
+                # 重入队列时需重新探活以正确触发代理模式。
+                if res.get("alive") and not res.get("skip") and not res.get("via_proxy"):
                     self._queue_liveness_ok_until[target_id] = now + QUEUE_LIVENESS_CACHE_TTL
                 else:
                     self._queue_liveness_ok_until.pop(target_id, None)
@@ -1427,6 +2088,8 @@ class TaskRunner:
                 st["action"] = f"LLM 异常: {data.get('error','')}"
             elif kind == "worker_auto_finish":
                 st["action"] = f"自动收敛: {data.get('summary','')}"
+            elif kind == "proxy_mode_enabled":
+                st["action"] = f"🔀 已切换代理模式（{len(data.get('servers', []))}台代理可用）"
             elif kind == "finding_submitted":
                 st["findings"] = st.get("findings", 0) + 1
                 st["action"] = f"🎯 发现漏洞: {data.get('title','')}"
@@ -1468,11 +2131,13 @@ class TaskRunner:
             loop.call_soon_threadsafe(_do)
 
         deepen_context = None
+        deepen_count = 0
         target_meta: dict = {}
         duplicate_history: list[dict] = []
         src_type = "edusrc"
         fofa_key = ""
         fofa_base_url = ""
+        enable_worker_fofa_lookup = True
         async with SessionLocal() as session:
             tgt = await session.get(Target, target_id)
             task_obj = await session.get(Task, task_id)
@@ -1480,17 +2145,21 @@ class TaskRunner:
                 src_type = task_obj.src_type or "edusrc"
                 fofa_key = resolve_fofa_key(task_obj)
                 fofa_base_url = resolve_fofa_base_url(task_obj)
+                enable_worker_fofa_lookup = getattr(task_obj, 'enable_worker_fofa_lookup', True)
             if tgt:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
                 self._live[target_id]["score_reason"] = tgt.priority_reason
                 deepen_context = tgt.deepen_context or None
+                deepen_count = tgt.deepen_count or 0
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
                 target_meta = {
                     "school": tgt.school or "", "org": tgt.org or "",
                     "title": tgt.title or "", "is_edu": tgt.is_edu,
                     "source": tgt.source or "", "priority_reason": tgt.priority_reason or "",
                     "leaked_creds": tgt.leaked_creds or [],
+                    "user_credentials": tgt.user_credentials or None,
+                    "cas_sso_config": (task_obj.cas_sso_config if task_obj else "") or "",
                 }
                 try:
                     plan = playbook_router.route_target(
@@ -1555,7 +2224,9 @@ class TaskRunner:
                             duplicate_history=duplicate_history,
                             cancel_event=cancel_event, src_type=src_type,
                             fofa_key=fofa_key, fofa_base_url=fofa_base_url,
-                            prompt_version=prompt_version)
+                            prompt_version=prompt_version,
+                            enable_fofa_lookup=enable_worker_fofa_lookup,
+                            deepen_count=deepen_count)
             worker_holder["worker"] = worker
             try:
                 return worker.run().model_dump(mode="json")
@@ -2046,6 +2717,28 @@ class TaskRunner:
                 pass
             elif transient_llm_error:
                 pass
+            elif verdict == Verdict.needs_auth.value:
+                # 目标有攻击面但需要用户提供凭证/完成注册才能继续深入。
+                assessment = result.get("auth_assessment") or {}
+                reg_status = assessment.get("reg_status", "")
+                if reg_status == "not_registrable":
+                    # 不可注册（CAS/SSO/邮箱限制/邀请制等）→ 直接跳过，不进 pending_input
+                    tgt.status = "skipped"
+                    tgt.verdict = "needs_auth"
+                    tgt.auth_assessment = assessment
+                    tgt.assigned_worker = ""
+                    tgt.heartbeat_at = None
+                    tgt.last_error = ""
+                    tgt.dead_reason = assessment.get("block_reason", "")[:300] or "目标不可注册，无法获取登录态"
+                else:
+                    # 可注册但仅差验证码 → 等待用户提交凭证
+                    tgt.status = "pending_input"
+                    tgt.verdict = "needs_auth"
+                    tgt.auth_assessment = assessment
+                    tgt.assigned_worker = ""
+                    tgt.heartbeat_at = None
+                    tgt.last_error = ""
+                    tgt.dead_reason = ""
             elif verdict == Verdict.found.value or findings:
                 tgt.status = "done"
                 tgt.assigned_worker = ""
@@ -2103,6 +2796,13 @@ class TaskRunner:
                         if no_vuln_retry_reason else
                         (summary_text[:300] or "本轮确认无可利用漏洞，不再默认重试")
                     )
+            elif verdict == "ip_banned":
+                tgt.status = "ip_banned"
+                tgt.ip_ban_confirmed = True
+                tgt.assigned_worker = ""
+                tgt.heartbeat_at = None
+                tgt.last_error = (summary_text or "IP 被 WAF 封禁")[:500]
+                tgt.dead_reason = ""
             elif verdict == "timeout":
                 if tgt.retry_count < MAX_RETRY:
                     tgt.retry_count += 1
@@ -2162,6 +2862,22 @@ class TaskRunner:
                 await self._log(session, "worker", "target_done",
                                 f"目标 {tgt.host} 因 LLM 持续异常收敛置 dead（回队达上限 {MAX_TRANSIENT_LLM_REQUEUE} 次）",
                                 level="warn", target_id=target_id, verdict="dead", findings=0)
+            elif verdict == "ip_banned":
+                await self._log(session, "worker", "target_ip_banned",
+                                f"目标 {tgt.host} 确认 IP 被 WAF 封禁（代理亦不可达或未配置），等待重测阶段代理复测",
+                                level="warn", target_id=target_id, verdict="ip_banned", findings=0)
+            elif verdict == "needs_auth":
+                assessment = result.get("auth_assessment") or {}
+                reg_status = assessment.get("reg_status", "")
+                block_reason = assessment.get("block_reason", "")
+                if reg_status == "not_registrable":
+                    await self._log(session, "worker", "target_done",
+                                    f"目标 {tgt.host} 不可注册，已自动跳过：{block_reason or reg_status}",
+                                    level="info", target_id=target_id, verdict="skipped", findings=len(findings))
+                else:
+                    await self._log(session, "worker", "target_needs_auth",
+                                    f"目标 {tgt.host} 需要手动注册/提供凭证：{block_reason or reg_status}",
+                                    level="info", target_id=target_id, verdict="needs_auth", findings=len(findings))
             else:
                 await self._log(session, "worker", "target_done",
                                 f"目标 {tgt.host} 完成: {verdict}, {len(findings)} 个漏洞",
@@ -2414,6 +3130,7 @@ class TaskRunner:
             fofa_key = resolve_fofa_key(task)
             fofa_base_url = resolve_fofa_base_url(task)
             src_type = (task.src_type if task else "edusrc") or "edusrc"
+            enable_killsweep_fofa_search = getattr(task, 'enable_killsweep_fofa_search', True) if task else True
             finding_dict = {
                 "title": f.title, "vuln_type": f.vuln_type, "target_url": f.target_url,
                 "owner": f.owner, "description": f.description, "poc": f.poc,
@@ -2442,6 +3159,7 @@ class TaskRunner:
                 finding_dict, fofa_key, llm=llm, on_event=emit,
                 src_type=src_type, cancel_event=cancel_event,
                 fofa_base_url=fofa_base_url,
+                enable_fofa_search=enable_killsweep_fofa_search,
             )
             try:
                 return hunter.run().model_dump(mode="json")

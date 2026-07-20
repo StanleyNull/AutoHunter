@@ -7,10 +7,13 @@ venv/
 *.log
 findings/
 work/
+data/
 *.sqlite
 *.db
 !app/data_static/edu_ip.db
 .DS_Store
 web/dist/
+AGENTS.md
 frontend/node_modules/
 node_modules/
+.qoder/

@@ -18,11 +18,11 @@ DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 engine = create_async_engine(
     DATABASE_URL, echo=False, future=True,
     # 默认 QueuePool 只有 pool_size=5 + max_overflow=10 = 15 条连接。
-    # orchestrator 高并发时（多 worker × 心跳/落库/情报 + reviewer +
-    # killsweep + escalate + API/WebSocket），同时存活的 session 远超 15，
+    # orchestrator 高并发时（12 worker × 心跳/落库/情报 + 4 reviewer +
+    # 3 killsweep + 2 escalate + API/WebSocket），同时存活的 session 远超 15，
     # 导致连接获取超时。SQLite 是文件级 DB，连接创建开销极低，可以放心调大。
-    pool_size=20,
-    max_overflow=40,
+    pool_size=30,
+    max_overflow=60,
     pool_timeout=60,
 )
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -32,7 +32,7 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 # 一遇写锁立刻 SQLITE_BUSY）。24x7 下 orchestrator 写事件 + N 个 heartbeat +
 # API 读 + worker 落库高并发，这几项是缓解锁竞争性价比最高的优化。
 _CONNECT_PRAGMAS = (
-    "PRAGMA busy_timeout=5000;",          # 写锁最多等 5s 再报错，吸收瞬时竞争
+    "PRAGMA busy_timeout=15000;",         # 写锁最多等 15s 再报错，吸收高并发竞争
     "PRAGMA synchronous=NORMAL;",         # WAL 下安全，显著降低写延迟
     "PRAGMA foreign_keys=ON;",
     "PRAGMA cache_size=-64000;",          # 约 64MB page cache，减少看板/列表热读扫盘
@@ -74,8 +74,18 @@ _MIGRATIONS = [
     ("findings", "kill_chain", "JSON"),
     ("findings", "assistant_messages", "JSON DEFAULT '[]'"),
     ("killsweeps", "affected_table", "JSON DEFAULT '[]'"),
-    ("system_settings", "engines", "JSON DEFAULT '{}'"),
+    ("targets", "ip_ban_confirmed", "BOOLEAN DEFAULT 0"),
+    ("targets", "auth_assessment", "JSON"),
+    ("targets", "user_credentials", "JSON"),
+    ("targets", "assistant_messages", "JSON DEFAULT '[]'"),
     ("tasks", "engine", "VARCHAR(20) DEFAULT ''"),
+    ("system_settings", "engines", "JSON DEFAULT '{}'"),
+    ("system_settings", "proxy", "JSON DEFAULT '{}'"),
+    ("system_settings", "pricing", "JSON DEFAULT '{}'"),
+    ("tasks", "retest_state", "JSON"),
+    ("tasks", "enable_worker_fofa_lookup", "BOOLEAN DEFAULT 1"),
+    ("tasks", "enable_killsweep_fofa_search", "BOOLEAN DEFAULT 1"),
+    ("tasks", "cas_sso_config", "TEXT DEFAULT ''"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。
@@ -144,6 +154,9 @@ _SECONDARY_INDEXES = [
     # 看板历史回放：WHERE task_id=? ORDER BY id DESC LIMIT N。
     ("ix_task_events_task_id_id",
      "CREATE INDEX IF NOT EXISTS ix_task_events_task_id_id ON task_events(task_id, id)"),
+    # 人工知识库：按 enabled+doc_type 过滤 + hit_count 排序
+    ("ix_knowledge_enabled_type",
+     "CREATE INDEX IF NOT EXISTS ix_knowledge_enabled_type ON knowledge_docs(enabled, doc_type)"),
 ]
 
 # 废弃的残留列：老 schema 里是 NOT NULL 无默认值，新代码不再写入会导致 INSERT 失败。

@@ -46,6 +46,7 @@ const form = reactive({
   intent_mode: "",
   manual_targets: "",
   src_rules: "",
+  cas_sso_config: "",
   base_url: "",
   api_key: "",
   model: "",
@@ -55,6 +56,8 @@ const form = reactive({
   max_pages: 20,
   page_size: 100,
   concurrency: 3,
+  enable_worker_fofa_lookup: true,
+  enable_killsweep_fofa_search: true,
   skip_site_recon: false,
 });
 const original = reactive({
@@ -81,6 +84,7 @@ function fill(task) {
   form.intent_mode = fofaCfg.intent_mode || "";
   form.manual_targets = (task.manual_targets || []).join("\n");
   form.src_rules = task.src_rules || "";
+  form.cas_sso_config = task.cas_sso_config || "";
   form.base_url = modelCfg.base_url || "";
   form.api_key = "";
   form.model = modelCfg.model || "";
@@ -91,6 +95,8 @@ function fill(task) {
   form.page_size = fofaCfg.page_size ?? 100;
   form.skip_site_recon = !!fofaCfg.skip_site_recon;
   form.concurrency = task.concurrency || 3;
+  form.enable_worker_fofa_lookup = task.enable_worker_fofa_lookup ?? true;
+  form.enable_killsweep_fofa_search = task.enable_killsweep_fofa_search ?? true;
   original.base_url = form.base_url;
   original.model = form.model;
   original.prompt_version = form.prompt_version;
@@ -139,7 +145,10 @@ async function save() {
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
     src_rules: form.src_rules,
+    cas_sso_config: form.cas_sso_config,
     concurrency: parseInt(form.concurrency) || 3,
+    enable_worker_fofa_lookup: form.enable_worker_fofa_lookup,
+    enable_killsweep_fofa_search: form.enable_killsweep_fofa_search,
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   });
@@ -253,8 +262,18 @@ async function save() {
         </div>
       </details>
 
+      <details>
+        <summary>测绘工具开关</summary>
+        <label class="checkbox-row"><input type="checkbox" v-model="form.enable_worker_fofa_lookup" /> Worker 挖掘时 fofa_lookup（确认归属/探攻击面）</label>
+        <label class="checkbox-row"><input type="checkbox" v-model="form.enable_killsweep_fofa_search" /> 通杀分析时 fofa_search（圈定同款系统+统计规模）</label>
+        <p class="hint">关闭后可避免 Worker/通杀 Agent 自主调用 FOFA 消耗点数</p>
+      </details>
+
       <label>SRC 规则
         <textarea v-model="form.src_rules" rows="3"></textarea>
+      </label>
+      <label>CAS SSO 统一认证凭证（任务级，可留空）
+        <textarea v-model="form.cas_sso_config" rows="4" placeholder="填写后，本任务每个 Worker 在测试前都会收到这些凭证，可用于需要登录的目标。&#10;例：&#10;登录入口：https://cas.xxx.edu.cn/cas/login&#10;账号：2023xxxx&#10;密码：xxxxxx&#10;或 Cookie/Token：CASTGC=TGT-xxxx"></textarea>
       </label>
 
       <footer>
@@ -298,5 +317,25 @@ async function save() {
 .model-hint {
   color: var(--muted, #98a2b3);
   font-size: 11px;
+}
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted, #98a2b3);
+  cursor: pointer;
+  margin-top: 12px;
+}
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.hint {
+  color: var(--muted, #98a2b3);
+  font-size: 11px;
+  margin-top: 4px;
 }
 </style>

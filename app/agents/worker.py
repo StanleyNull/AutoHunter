@@ -23,6 +23,8 @@ from app.schemas import Finding, Verdict, WorkerResult
 from app.tools.executor import ToolExecutor
 from app.tools.schemas import (
     JS_ANALYZER_TOOL_SCHEMAS,
+    KNOWLEDGE_TOOL_SCHEMAS,
+    PROXY_TOOL_SCHEMAS,
     SESSION_TOOL_SCHEMAS,
     TOOL_SCHEMAS,
 )
@@ -54,6 +56,8 @@ class Worker:
         fofa_key: str = "",
         fofa_base_url: str = "",
         prompt_version: str | None = None,
+        enable_fofa_lookup: bool = True,
+        deepen_count: int = 0,
     ):
         self.target = target
         self.llm = llm or LLMClient()
@@ -61,6 +65,8 @@ class Worker:
         self.src_type = src_type
         self._enterprise = is_enterprise_src(src_type)
         self.prompt_version = normalize_worker_prompt_version(prompt_version or worker_config.prompt_version)
+        self._enable_fofa_lookup = enable_fofa_lookup
+        self._deepen_count = deepen_count
         self.executor = ToolExecutor(
             target, cancel_event=self.cancel_event,
             enterprise=self._enterprise, fofa_key=fofa_key, fofa_base_url=fofa_base_url,
@@ -84,6 +90,8 @@ class Worker:
         self._reported_intel: list[dict] = []
         # 单站协作覆盖记录（API/入口/测试项摘要），由编排层写入事件流供后续 worker 复用。
         self._reported_coverage: list[dict] = []
+        # SSH 代理是否可用（run() 启动时缓存，控制 PROXY_TOOL_SCHEMAS 开放）
+        self._proxy_available = False
 
     def _emit(self, kind: str, **data: Any) -> None:
         self.on_event(kind, data)
@@ -169,6 +177,21 @@ class Worker:
         lines.append("纪律：登录成功/CASTGC/session/个人中心本身不算洞；必须继续实证死规矩敏感数据、越权、敏感写操作、注入/上传 getshell 或具体业务系统危害。没实锤就写 deepen_lead；试 2-3 个高价值凭证失败就换攻击面；严禁改密。")
         return "\n".join(lines) + "\n\n"
 
+    def _cas_sso_block(self) -> str:
+        """任务级 CAS SSO 统一认证凭证：用户在任务配置中填写的全任务共享登录账号。"""
+        cfg = (self.target_meta or {}).get("cas_sso_config") or ""
+        if not cfg.strip():
+            return ""
+        lines = [
+            "# CAS SSO 统一认证凭证（任务级，适用本任务所有目标）",
+            "以下是用户授权你使用的统一身份认证账号，可在需要登录的目标上尝试。",
+            "先用 session_set 登记凭证，再登录后深挖；登录成功/CASTGC/session 本身不算洞，必须继续实证危害。",
+            "严禁修改任何账号密码。如果该凭证在当前目标上无法登录（认证失败/过期），跳过即可继续测无需认证的攻击面。",
+            "",
+            cfg.strip(),
+        ]
+        return "\n".join(lines) + "\n\n"
+
     def _duplicate_block(self) -> str:
         if not self.duplicate_history:
             return ""
@@ -186,13 +209,23 @@ class Worker:
         return "\n".join(lines) + "\n\n"
 
     def run(self) -> WorkerResult:
+        from app.settings_service import resolve_proxy_config
+        self._proxy_available = resolve_proxy_config().available
+        # IP 封禁复测：启动即开启代理模式，http_request 全程自动走 SSH 代理
+        if self._proxy_available and self.deepen_context and self.deepen_context.get("ip_ban_retest"):
+            _pre = self.executor.enable_proxy_mode()
+            if _pre.get("ok"):
+                self._emit("proxy_mode_enabled", round=0,
+                            servers=_pre.get("proxy_servers", []), source="ip_ban_retest")
         if self.deepen_context:
-            user_content = self._intel_block() + self._duplicate_block() + self._deepen_brief()
+            user_content = self._intel_block() + self._cas_sso_block() + self._duplicate_block() + self._build_proxy_block() + self._deepen_brief()
             self._emit("worker_start", target=self.target, mode="deepen", prompt_version=self.prompt_version)
         else:
             user_content = (
                 self._intel_block()
+                + self._cas_sso_block()
                 + self._duplicate_block()
+                + self._build_proxy_block()
                 + f"目标：{self.target}\n\n"
                 + "只挖此目标；自主侦察取证，结束调用 finish。"
             )
@@ -218,10 +251,20 @@ class Worker:
             try:
                 self._emit("llm_round_start", round=rounds)
                 tools = list(TOOL_SCHEMAS)
+                # fofa_lookup 被任务级开关禁用时从工具列表移除，LLM 不会看到它
+                if not self._enable_fofa_lookup:
+                    tools = [t for t in tools if t.get("function", {}).get("name") != "fofa_lookup"]
                 # 会话保持工具全模式开放：拿到凭证登录后固化登录态再深挖。
                 tools += SESSION_TOOL_SCHEMAS
+                # 代理切换工具：仅当 SSH 代理已配置时开放，IP 被封时切代理继续测
+                if self._proxy_available:
+                    tools += PROXY_TOOL_SCHEMAS
                 if self._js_tool_enabled:
                     tools += JS_ANALYZER_TOOL_SCHEMAS
+                # 人工知识库工具：仅在第二次深挖且工具轮数超过10轮时解锁
+                # 知识库仅作辅助，AI必须先依赖自身推理能力测试
+                if self._deepen_count >= 2 and rounds > 10:
+                    tools += KNOWLEDGE_TOOL_SCHEMAS
                 send_messages = compact_messages(messages, rounds)
                 # 每轮注入当前状态块（会话态 + 工作笔记）——临时消息，不存入 messages 历史，
                 # 避免累积膨胀；每轮新鲜生成，始终反映最新的 cookie/token/notes。
@@ -416,6 +459,7 @@ class Worker:
             rounds=rounds,
             error=None if self._finished else f"达到最大轮数 {max_rounds} 未主动结束",
             deepen_lead=(self._finished or {}).get("deepen_lead", ""),
+            auth_assessment=(self._finished or {}).get("auth_assessment"),
             reported_intel=self._reported_intel,
             reported_coverage=self._reported_coverage,
         )
@@ -449,6 +493,49 @@ class Worker:
             error="worker cancelled by task control",
         )
 
+    def _build_proxy_block(self) -> str:
+        """构建 SSH 代理信息块，注入 worker prompt。仅当代理配置可用时生成。"""
+        from app.settings_service import resolve_proxy_config
+        proxy_config = resolve_proxy_config()
+        if not proxy_config.available:
+            return ""
+        servers = proxy_config.server_list
+        key_path = proxy_config.ssh_key_path
+        # 取第一台作为交叉验证示例
+        srv = servers[0]
+        if ":" in srv.split("@")[-1]:
+            user_host, port = srv.rsplit(":", 1)
+        else:
+            user_host, port = srv, "22"
+        ssh_cmd = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p {port} {user_host}"
+
+        lines = [
+            "\n# 代理服务器（IP 封禁时使用）",
+            f"可用代理: {', '.join(servers)}",
+            f"SSH 连接命令（交叉验证用）: {ssh_cmd} \"命令\"",
+            "",
+            "IP 封禁处理流程：",
+            "1. 当你连续收到 403/WAF 拦截且怀疑是 IP 被封时，先用代理发一个干净 GET 交叉验证：",
+            f'   run_shell: {ssh_cmd} "curl -s -o /dev/null -w \'%{{http_code}}\\n\' \'目标URL\'"',
+            "2. 若代理返回 200/正常响应而你本地 403 → 确认 IP 被封。",
+            "   此时调用 enable_proxy_mode()，后续所有 http_request 将自动通过代理发送。",
+            "   切换后继续用 http_request 正常挖掘——上下文、已登录会话、已发现线索全部保留。",
+            "3. 若 enable_proxy_mode 失败（无代理配置），或代理请求也持续连不上目标，",
+            "   再调用 finish(verdict=ip_banned) 等待后续重测。",
+            "",
+            "重要：enable_proxy_mode 切换后不要再手动用 ssh curl，直接调 http_request 即可。",
+            "",
+        ]
+
+        # IP 封禁复测模式：proxy_mode 已在 run() 启动时预开启
+        if self.deepen_context and self.deepen_context.get("ip_ban_retest"):
+            lines.append("!! 本次为 IP 封禁复测：代理模式已自动开启。")
+            lines.append("所有 http_request 自动走 SSH 代理，直接用 http_request 正常挖掘即可。")
+            lines.append("无需手动 ssh curl；若代理请求也持续失败，调用 finish(verdict=ip_banned)。")
+            lines.append("")
+
+        return "\n".join(lines)
+
     def _deepen_brief(self) -> str:
         ctx = self.deepen_context or {}
         directive = ctx.get("directive", "").strip()
@@ -472,6 +559,26 @@ class Worker:
             "2. 打穿了（取到真实数据/造成实锤危害）就用 submit_finding 提交完整利用链 + 原始请求响应证据。",
             "3. 反复尝试确实打不穿、证明只是理论可能，就 finish(verdict=no_vuln) 并说明卡在哪，绝不交半成品。",
         ]
+        # 用户提交的凭证注入：当 deepen_context.source=user_credentials 时，在 brief 中附带用户凭证
+        user_creds = (self.target_meta or {}).get("user_credentials")
+        if user_creds:
+            cred_lines = ["", "# 用户提供的登录凭证（请先用 session_set 登记，再登录后深挖）"]
+            if user_creds.get("type") == "password":
+                cred_lines.append(f"账号：{user_creds.get('username', '')}")
+                cred_lines.append(f"密码：{user_creds.get('password', '')}")
+            elif user_creds.get("type") == "cookie":
+                cred_lines.append(f"Cookie/Token：{user_creds.get('cookie', '')}")
+            cred_lines.append("这是用户授权你使用的入场券，登录后继续实证危害才算出洞。不要修改任何账号密码。")
+            cred_lines.extend([
+                "",
+                "⚠️ 凭据失效处理（铁律）：",
+                "如果你尝试登录后发现用户提供的凭据已失效/过期/错误（登录返回认证失败、密码错误、账号不存在、Cookie/Token 无效等），",
+                "必须立即 finish(verdict=needs_auth) 并在 auth_assessment 中说明凭据失效原因（如 reg_status=registrable_verification_needed, block_reason 写清'用户提供的凭据无效：密码错误/Cookie 过期'等）。",
+                "绝对不要因为凭据失效就 finish(no_vuln)——凭据失效不代表目标无漏洞，只是当前凭据不可用，需要用户重新提供。",
+                "如果你在凭据失效后仍想尝试无需认证的攻击面，可以继续测，但最终 finish 时仍须用 needs_auth 而非 no_vuln，",
+                "以便目标回到 pending_input 等待用户提交新凭据。",
+            ])
+            parts += ["\n".join(cred_lines)]
         return "\n".join(parts)
 
     def _dispatch(self, name: str, args: dict, rnd: int) -> dict:
@@ -576,6 +683,9 @@ class Worker:
 
         if name == "fofa_lookup":
             self._mark_tool_used(name, rnd)
+            if not self._enable_fofa_lookup:
+                return {"ok": False, "error": "本任务已禁用 fofa_lookup 测绘工具。",
+                        "guidance": "改用 http_request 验证归属（看证书/页脚/备案），或联系管理员开启该开关。"}
             query = (args.get("query") or "").strip()
             if not query:
                 return self._tool_arg_error(
@@ -584,6 +694,32 @@ class Worker:
                 )
             self._emit("tool_fofa_lookup", round=rnd, query=query[:120])
             return self.executor.fofa_lookup(query=query, size=args.get("size", 10))
+
+        if name == "knowledge_lookup":
+            self._mark_tool_used(name, rnd)
+            # 双重检查触发约束（即使 schema 被注入也拦截）
+            if self._deepen_count < 2 or rnd <= 10:
+                return {
+                    "ok": False,
+                    "blocked": True,
+                    "error": "知识库工具尚未解锁：需要在第二次深挖且工具轮数超过10轮后才可使用。",
+                    "guidance": "继续用自身推理能力测试；知识库是辅助手段，不是首选工具。",
+                }
+            doc_id = (args.get("doc_id") or "").strip()
+            vuln_found = bool(args.get("vuln_found", False))
+            # 如果已提交 finding 或 deepen_context 有 vuln_type，视为已发现漏洞
+            if not vuln_found and (self.findings or (self.deepen_context or {}).get("vuln_type")):
+                vuln_found = True
+            vuln_type = (args.get("vuln_type") or "").strip()
+            if not vuln_type and self.findings:
+                vuln_type = self.findings[0].vuln_type
+            if not vuln_type and (self.deepen_context or {}).get("vuln_type"):
+                vuln_type = self.deepen_context["vuln_type"]
+            self._emit("tool_knowledge_lookup", round=rnd, doc_id=doc_id[:20],
+                       vuln_found=vuln_found, vuln_type=vuln_type[:40])
+            return self.executor.knowledge_lookup(
+                doc_id=doc_id, vuln_found=vuln_found, vuln_type=vuln_type,
+            )
 
         if name == "session_set":
             self._mark_tool_used(name, rnd)
@@ -615,6 +751,14 @@ class Worker:
             self._mark_tool_used(name, rnd)
             return self._check_duplicate(args)
 
+        if name == "enable_proxy_mode":
+            self._mark_tool_used(name, rnd)
+            result = self.executor.enable_proxy_mode()
+            if result.get("ok"):
+                self._emit("proxy_mode_enabled", round=rnd,
+                            servers=result.get("proxy_servers", []))
+            return result
+
         if name == "finish":
             premature = self._premature_finish_reason(args, rnd)
             if premature:
@@ -632,6 +776,7 @@ class Worker:
                 "verdict": args.get("verdict", "no_vuln"),
                 "summary": args.get("summary", ""),
                 "deepen_lead": (args.get("deepen_lead") or "").strip(),
+                "auth_assessment": args.get("auth_assessment") if args.get("verdict") == "needs_auth" else None,
             }
             self._emit("worker_finish", verdict=self._finished["verdict"],
                        summary=self._finished["summary"][:300],

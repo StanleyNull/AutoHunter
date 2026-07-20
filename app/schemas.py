@@ -22,6 +22,8 @@ class Verdict(str, Enum):
     found = "found"      # 挖到漏洞
     no_vuln = "no_vuln"  # 确认无漏洞
     error = "error"      # 出错
+    ip_banned = "ip_banned"  # 确认 IP 被目标 WAF 封禁
+    needs_auth = "needs_auth"  # 目标有攻击面但需要用户提供凭证/完成注册才能继续
 
 
 class SelfCheck(BaseModel):
@@ -74,8 +76,19 @@ class WorkerResult(BaseModel):
     rounds: int = 0
     error: Optional[str] = None
     deepen_lead: str = Field("", description="突破入口但未打穿时的定向深挖线索，触发自动回火再派一轮")
+    auth_assessment: Optional[dict] = Field(None, description="verdict=needs_auth 时的注册可行性评估，含 reg_status/block_reason 等")
     reported_intel: list[dict] = Field(default_factory=list, description="worker 主动上报的可复用情报，编排层落全局情报库")
     reported_coverage: list[dict] = Field(default_factory=list, description="单站协作覆盖记录，编排层写事件流供后续 worker 复用")
+
+
+class AuthAssessment(BaseModel):
+    """Worker 遇到注册/登录墙时的结构化判断，供编排器决策后续流程。"""
+    reg_status: str = Field("", description="registrable_verification_needed=仅差手机/邮箱验证码 / not_registrable=不可注册 / registrable_no_blocker=可注册无阻断")
+    block_reason: str = Field("", description="阻断原因，如'需要手机接收短信验证码'或'需要邮箱接收验证码'或'CAS/SSO 仅限校内师生'")
+    registration_url: str = Field("", description="注册页面 URL（如有）")
+    evidence_request: str = Field("", description="Worker 实际尝试注册/登录的 HTTP 请求响应摘要")
+    what_user_needs_to_provide: str = Field("", description="用户需要提供什么：账号密码 / Cookie / 完成注册后的登录态")
+    next_steps: str = Field("", description="拿到登录态后该测哪些接口/功能")
 
 
 class ReviewVerdict(str, Enum):

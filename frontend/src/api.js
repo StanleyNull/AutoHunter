@@ -225,14 +225,29 @@ export const api = {
   start: (id) => req("POST", `/api/tasks/${id}/start`),
   pause: (id) => req("POST", `/api/tasks/${id}/pause`),
   stop: (id) => req("POST", `/api/tasks/${id}/stop`),
+  resetProgress: (id) => req("POST", `/api/tasks/${id}/reset`),
+  resetFailedTargets: (id) => req("POST", `/api/tasks/${id}/reset-failed`),
+  collectTargets: (id) => req("POST", `/api/tasks/${id}/collect-targets`),
+  targets: (id, status, limit) => req("GET", `/api/tasks/${id}/targets${qs({ status, limit })}`),
+  targetDetail: (taskId, targetId) => req("GET", `/api/tasks/${taskId}/targets/${targetId}/detail`),
+  redigTarget: (taskId, targetId) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/redig`),
+  provideCredentials: (taskId, targetId, data) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/credentials`, data),
+  skipPendingTarget: (taskId, targetId) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/skip`),
+  targetAssistantStream: (taskId, targetId, message, onEvent) =>
+    streamSSE(`/api/tasks/${taskId}/targets/${targetId}/assistant/stream`, { message }, onEvent),
+  batchPause: () => req("POST", "/api/tasks/batch/pause"),
+  batchStart: () => req("POST", "/api/tasks/batch/start"),
   results: (id, conf, q) => req("GET", `/api/tasks/${id}/results${qs({ confidence: conf, q })}`),
-  reviewQueue: (id, q) => req("GET", `/api/tasks/${id}/review-queue${qs({ q })}`),
+  reviewQueue: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/review-queue${qs({ q, ...opts })}`),
   submitList: (id, submitted, q, opts = {}) =>
     req("GET", `/api/tasks/${id}/submit-list${qs({ submitted, q, ...opts })}`),
-  rejectedList: (id, q) => req("GET", `/api/tasks/${id}/rejected${qs({ q })}`),
+  rejectedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/rejected${qs({ q, ...opts })}`),
   archivedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/archived${qs({ q, ...opts })}`),
   restoreArchived: (id) => req("POST", `/api/results/${id}/restore`),
-  killsweeps: (id, q) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q })}`),
+  rejectArchived: (id) => req("POST", `/api/results/${id}/reject-archived`),
+  discardedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/discarded${qs({ q, ...opts })}`),
+  restoreDiscarded: (id) => req("POST", `/api/results/${id}/restore-discarded`),
+  killsweeps: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q, ...opts })}`),
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),
   finding: (id) => req("GET", `/api/findings/${id}`),
@@ -240,18 +255,42 @@ export const api = {
   reportAssistantStream: (id, message, onEvent) =>
     streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent),
   userReview: (id, data) => req("PATCH", `/api/results/${id}`, data),
-  deepen: (id, directive) => req("POST", `/api/results/${id}/deepen`, { directive }),
+  deepen: (id, directive, force = false) => req("POST", `/api/results/${id}/deepen`, { directive, force }),
   getSettings: () => req("GET", "/api/settings"),
   updateSettings: (data) => req("PUT", "/api/settings", data),
   listModels: (base_url, api_key) => req("POST", "/api/settings/models", { base_url, api_key }),
+  testLLM: () => req("POST", "/api/settings/test/llm"),
+  testFOFA: () => req("POST", "/api/settings/test/fofa"),
+  testSSH: () => req("POST", "/api/settings/test/ssh"),
+  testEngine: (engineName) => req("POST", `/api/settings/test/engine/${engineName}`),
+  // 工作目录管理
+  workdirStats: () => req("GET", "/api/settings/workdir/stats"),
+  workdirCleanup: (retentionDays, dryRun = false) =>
+    req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: dryRun })}`),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
-  intelList: (kind, confidence, q, limit) =>
-    req("GET", `/api/intel${qs({ kind, confidence, q, limit })}`),
+  intelList: (kind, confidence, q, limit, opts = {}) =>
+    req("GET", `/api/intel${qs({ kind, confidence, q, limit, ...opts })}`),
   previewIntelCurate: (limit) => req("GET", `/api/intel/curate${qs({ limit })}`),
   applyIntelCurate: (limit) => req("POST", `/api/intel/curate${qs({ limit })}`),
   deleteIntel: (id) => req("DELETE", `/api/intel/${id}`),
   clearIntel: (kind) => req("DELETE", `/api/intel${qs({ kind })}`),
+  // 人工知识库
+  knowledgeStats: () => req("GET", "/api/knowledge/stats"),
+  knowledgeList: (doc_type, enabled, q, limit, opts = {}) =>
+    req("GET", `/api/knowledge${qs({ doc_type, enabled, q, limit, ...opts })}`),
+  knowledgeGet: (id) => req("GET", `/api/knowledge/${id}`),
+  knowledgeCreate: (data) => req("POST", "/api/knowledge", data),
+  knowledgeBatchCreate: (docs) => req("POST", "/api/knowledge/batch", { docs }),
+  knowledgeUpdate: (id, data) => req("PUT", `/api/knowledge/${id}`, data),
+  knowledgeReprocess: (id) => req("POST", `/api/knowledge/${id}/reprocess`),
+  knowledgeDelete: (id) => req("DELETE", `/api/knowledge/${id}`),
+  knowledgeTags: () => req("GET", "/api/knowledge/tags/list"),
+  knowledgeCreateTag: (name) => req("POST", "/api/knowledge/tags", { name }),
+  knowledgeDeleteTag: (name) => req("DELETE", `/api/knowledge/tags/${encodeURIComponent(name)}`),
+  knowledgePendingTags: () => req("GET", "/api/knowledge/tags/pending"),
+  knowledgeApproveTag: (id) => req("POST", `/api/knowledge/tags/proposals/${id}/approve`),
+  knowledgeRejectTag: (id) => req("POST", `/api/knowledge/tags/proposals/${id}/reject`),
   // 全局漏洞库
   vulnStats: () => req("GET", "/api/vulns/stats"),
   vulns: (submitted, severity, q, opts = {}) =>
@@ -260,6 +299,11 @@ export const api = {
   runtimeLogStats: () => req("GET", "/api/runtime-logs/stats"),
   runtimeLogs: (level, agent, q, opts = {}) =>
     req("GET", `/api/runtime-logs${qs({ level, agent, q, ...opts })}`),
+  // 日历统计
+  dailyStats: (date) => req("GET", `/api/stats/daily${qs({ date })}`),
+  dailyOverview: (month) => req("GET", `/api/stats/daily-overview${qs({ month })}`),
+  // 数据库连接池状态
+  poolStats: () => req("GET", "/api/stats/pool"),
   // 一键更新
   checkUpdate: () => req("GET", "/api/update/check"),
   runUpdate: () => req("POST", "/api/update/run"),

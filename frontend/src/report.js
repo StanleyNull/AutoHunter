@@ -195,9 +195,202 @@ export function buildReportMd(f) {
 
 ## EDUSRC 自动填充 JSON
 
-> 可粘贴到 \`edusrc-tool\` 油猴脚本“导入报告”里；\`firm_id\` 默认为 0，提交前按 EDUSRC 单位搜索结果补全；\`company_id\` 未识别时默认为 3（其他厂商），不要写死具体开发商。
+> 可粘贴到 \`edusrc-tool\` 油猴脚本"导入报告"里；\`firm_id\` 默认为 0，提交前按 EDUSRC 单位搜索结果补全；\`company_id\` 未识别时默认为 3（其他厂商），不要写死具体开发商。
 
 \`\`\`\`json
 ${JSON.stringify(edusrcJson, null, 2)}
 \`\`\`\``;
+}
+
+/**
+ * 解析原始 HTTP 请求包，提取 method / path / headers / body。
+ * raw_request 格式："GET /path HTTP/1.1\nHost: ...\nHeader: val\n\nbody"
+ */
+function parseRawRequest(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const lines = text.split("\n");
+  const firstLine = lines[0] || "";
+  const m = firstLine.match(/^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(\S+)\s+HTTP\/[\d.]+/i);
+  if (!m) return null;
+  const method = m[1].toUpperCase();
+  const path = m[2];
+  const headers = {};
+  let body = "";
+  let bodyStart = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "") { bodyStart = i + 1; break; }
+    const idx = lines[i].indexOf(":");
+    if (idx > 0) {
+      const k = lines[i].slice(0, idx).trim();
+      const v = lines[i].slice(idx + 1).trim();
+      headers[k] = v;
+    }
+  }
+  if (bodyStart >= 0 && bodyStart < lines.length) {
+    body = lines.slice(bodyStart).join("\n").trim();
+  }
+  return { method, path, headers, body };
+}
+
+/**
+ * 从 finding 生成可执行的 Python PoC 脚本。
+ * 优先从 raw_request 解析出 requests 调用；无 raw_request 则用 poc 文本作注释。
+ */
+export function buildReportPy(f) {
+  const rv = f.review || {};
+  const sev = effectiveSeverity(f);
+  const title = eff(f, "title");
+  const poc = eff(f, "poc");
+  const steps = eff(f, "steps") || [];
+  const targetUrl = f.target_url || "";
+  const owner = (f.edu_school || "").trim() || f.owner || "-";
+
+  // 尝试解析 raw_request
+  const parsed = parseRawRequest(f.raw_request);
+
+  const headerLines = [
+    "#!/usr/bin/env python3",
+    '"""',
+    `漏洞 PoC 脚本 — AutoHunter 自动生成`,
+    "",
+    `标题: ${title}`,
+    `漏洞类型: ${f.vuln_type || "-"}`,
+    `目标: ${targetUrl}`,
+    `归属单位: ${owner}`,
+    `等级: ${sev}（score: ${rv.score ?? "-"}）`,
+    `信度: ${rv.confidence || "-"}`,
+    '"""',
+    "",
+    "import requests",
+    "import urllib3",
+    "import sys",
+    "",
+    "# 禁用 SSL 证书验证告警（测试环境）",
+    "urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)",
+    "",
+  ];
+
+  // 配置区
+  let configLines = [
+    "# ============ 目标配置 ============",
+  ];
+
+  let mainBody = "";
+
+  if (parsed) {
+    // 从 raw_request 构造 requests 脚本
+    const host = parsed.headers["Host"] || parsed.headers["host"] || "";
+    const scheme = targetUrl.startsWith("https") ? "https" : (host ? "http" : "http");
+    const baseUrl = `${scheme}://${host}`;
+    const fullUrl = host ? `${baseUrl}${parsed.path}` : targetUrl;
+
+    configLines.push(`BASE_URL = "${baseUrl}"`);
+    configLines.push(`TARGET_URL = "${fullUrl}"`);
+    configLines.push("");
+
+    // 构建 headers 字典
+    const headerDict = Object.entries(parsed.headers)
+      .filter(([k]) => k.toLowerCase() !== "host")
+      .map(([k, v]) => `    "${k}": ${JSON.stringify(v)}`)
+      .join(",\n");
+
+    configLines.push("# ============ 请求头 ============");
+    configLines.push(`HEADERS = {`);
+    if (headerDict) configLines.push(headerDict);
+    configLines.push("}");
+    configLines.push("");
+
+    if (parsed.body) {
+      configLines.push("# ============ 请求体 ============");
+      configLines.push(`BODY = ${JSON.stringify(parsed.body)}`);
+      configLines.push("");
+    }
+
+    // main 函数
+    mainBody = [
+      "def main():",
+      "    session = requests.Session()",
+      "    session.verify = False",
+      "",
+      `    print(f"[*] 目标: {TARGET_URL}")`,
+      `    print(f"[*] 方法: ${parsed.method}")`,
+      "",
+      `    resp = session.request(`,
+      `        method=${JSON.stringify(parsed.method)},`,
+      `        url=TARGET_URL,`,
+      `        headers=HEADERS,`,
+      parsed.body ? `        data=BODY,` : "",
+      "        timeout=20,",
+      "        allow_redirects=False,",
+      "    )",
+      "",
+      '    print(f"[+] 状态码: {resp.status_code}")',
+      '    print(f"[+] 响应长度: {len(resp.text)}")',
+      '    print("[+] 响应内容:")',
+      '    print(resp.text[:2000])',
+      "",
+      '    # 判断漏洞是否存在（根据实际响应特征修改）',
+      '    if resp.status_code == 200:',
+      '        print("[!] 漏洞验证成功")',
+      '    else:',
+      '        print("[-] 未检测到预期响应，请手动确认")',
+      "",
+    ].filter(Boolean).join("\n");
+  } else {
+    // 无 raw_request，使用 poc / steps 作为脚本
+    configLines.push(`TARGET_URL = "${targetUrl}"`);
+    configLines.push("");
+
+    const commentLines = [];
+    if (poc) {
+      commentLines.push("# ============ PoC（来自报告） ============");
+      poc.split("\n").forEach((line) => commentLines.push(`# ${line}`));
+      commentLines.push("");
+    }
+    if (steps.length) {
+      commentLines.push("# ============ 复现步骤 ============");
+      steps.forEach((s, i) => commentLines.push(`# ${i + 1}. ${s}`));
+      commentLines.push("");
+    }
+
+    mainBody = [
+      ...commentLines,
+      "def main():",
+      "    session = requests.Session()",
+      "    session.verify = False",
+      "",
+      `    print(f"[*] 目标: {TARGET_URL}")`,
+      '    print("[!] 请根据上方 PoC / 复现步骤手动构造请求")',
+      '    print("[!] 此脚本为框架模板，请填充实际请求逻辑")',
+      "",
+      "    # TODO: 根据 PoC 描述实现具体验证逻辑",
+      "    # 示例:",
+      '    # resp = session.get(TARGET_URL, timeout=20, verify=False)',
+      '    # print(f"状态码: {resp.status_code}")',
+      '    # print(resp.text[:2000])',
+      "    pass",
+      "",
+    ].join("\n");
+  }
+
+  const footerLines = [
+    "if __name__ == \"__main__\":",
+    "    try:",
+    "        main()",
+    "    except requests.exceptions.ConnectionError as e:",
+    '        print(f"[x] 连接失败: {e}")',
+    "        sys.exit(1)",
+    "    except KeyboardInterrupt:",
+    '        print("[x] 用户中断")',
+    "        sys.exit(0)",
+    "",
+  ];
+
+  return [...headerLines, ...configLines, mainBody, "", ...footerLines].join("\n");
+}
+
+/** 生成文件名 slug */
+export function reportSlug(f) {
+  return slugPart(`${f.vuln_type}-${eff(f, "title")}-${f.id || ""}`);
 }

@@ -237,13 +237,29 @@ async def get_finding(finding_id: str, session: AsyncSession = Depends(get_sessi
 
 @router.get("/tasks/{task_id}/review-queue")
 async def user_review_queue(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                            limit: int = Query(0, ge=0, le=500),
+                            offset: int = Query(0, ge=0),
                             session: AsyncSession = Depends(get_session)):
-    """用户复审队列：AI accepted 且用户尚未处理（pending）的漏洞。"""
+    """用户复审队列：AI accepted 且用户尚未处理（pending）的漏洞。
+    支持分页（limit/offset）：量大时前端一次拉 50 条、滚动加载更多。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.verdict == "accepted", Review.user_status == "pending"
     ).order_by(Review.score.desc())
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
     rows = (await session.execute(q)).all()
     out = [_finding_dict(f, r) for f, r in rows]
+    if search:
+        out = [d for d in out if _matches_query(d, search)]
+        if limit:
+            out = out[offset:offset + limit + 1]
+    if limit:
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
     return [d for d in out if _matches_query(d, search)]
 
 
@@ -280,13 +296,29 @@ async def submit_list(task_id: str, submitted: Optional[bool] = None,
 
 @router.get("/tasks/{task_id}/rejected")
 async def rejected_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                        limit: int = Query(0, ge=0, le=500),
+                        offset: int = Query(0, ge=0),
                         session: AsyncSession = Depends(get_session)):
-    """已驳回列表：用户复审判 rejected 的漏洞（可回看 / 恢复到复审队列）。"""
+    """已驳回列表：用户复审判 rejected 的漏洞（可回看 / 恢复到复审队列）。
+    支持分页（limit/offset）：量大时前端一次拉 50 条、滚动加载更多。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.user_status == "rejected"
     ).order_by(Review.user_reviewed_at.desc().nullslast(), Review.score.desc())
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
     rows = (await session.execute(q)).all()
     out = [_finding_dict(f, r) for f, r in rows]
+    if search:
+        out = [d for d in out if _matches_query(d, search)]
+        if limit:
+            out = out[offset:offset + limit + 1]
+    if limit:
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
     return [d for d in out if _matches_query(d, search)]
 
 
@@ -362,13 +394,132 @@ async def restore_archived(finding_id: str, session: AsyncSession = Depends(get_
     return {"ok": True, "id": finding_id}
 
 
+@router.post("/results/{finding_id}/reject-archived")
+async def reject_archived(finding_id: str, session: AsyncSession = Depends(get_session)):
+    """驳回 AI 未采纳（ignored/deepen）的归档漏洞，并级联驳回同目标下所有
+    superseded + user_status=pending 的已作废报告——防止驳回后同目标的旧深挖
+    报告冒到「AI 已作废」列表中造成重复处理。"""
+    r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "审核记录不存在")
+    if r.verdict not in ("ignored", "deepen"):
+        raise HTTPException(400, "该漏洞不在 AI 未采纳归档中，无需驳回")
+    f = await session.get(Finding, finding_id)
+    if not f:
+        raise HTTPException(404, "漏洞不存在")
+
+    # 1) 驳回当前报告
+    r.user_status = "rejected"
+    r.user_reviewed_at = _now()
+
+    # 2) 级联驳回同目标下 superseded + pending 的已作废报告
+    cascade_q = select(Review).join(Finding, Finding.id == Review.finding_id).where(
+        Finding.target_id == f.target_id,
+        Finding.task_id == f.task_id,
+        Finding.status == "superseded",
+        Review.user_status == "pending",
+        Finding.id != finding_id,
+    )
+    cascade_count = 0
+    for cr in (await session.execute(cascade_q)).scalars().all():
+        cr.user_status = "rejected"
+        cr.user_reviewed_at = _now()
+        cascade_count += 1
+
+    await session.commit()
+    return {"ok": True, "id": finding_id, "cascade_rejected": cascade_count}
+
+
+@router.get("/tasks/{task_id}/discarded")
+async def discarded_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                        limit: int = Query(0, ge=0, le=200),
+                        offset: int = Query(0, ge=0),
+                        session: AsyncSession = Depends(get_session)):
+    """AI 已作废归档：finding 状态为 superseded（深挖回炉后旧线索被让位）且用户未处理。
+    这些漏洞在深挖第二轮未确认后被放弃，但单独分析可能仍存在，供人工回看纠错。
+    可一键「恢复到复审」救回，或「驳回」永久放弃。
+
+    去重规则：
+    1. 同一目标若有多份 superseded 报告（多轮深挖），只保留最新的那一份。
+    2. 若同一目标已有非 superseded 的报告（第二轮通过/驳回/未采纳等），则不再展示其作废报告——
+       避免与其他列表中的报告重复出现。
+
+    支持分页（limit/offset）和搜索（q），与 /archived 接口协议一致。"""
+    # 查出此任务中所有有非 superseded 报告的 target_id
+    active_targets_q = select(Finding.target_id).where(
+        Finding.task_id == task_id,
+        Finding.status != "superseded",
+    ).distinct()
+    active_targets: set[str] = set()
+    for (tid,) in (await session.execute(active_targets_q)).all():
+        active_targets.add(tid)
+
+    q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
+        Finding.task_id == task_id,
+        Finding.status == "superseded",
+        Review.user_status == "pending",   # 用户已处理过的不再摆进来
+    ).order_by(Review.reviewed_at.desc().nullslast(), Review.score.desc())
+
+    def _to_dict(f, r):
+        d = _finding_dict(f, r)
+        d["archive_reason"] = "superseded"
+        d["archive_reason_text"] = "深挖回炉后被作废"
+        d["deepen_directive"] = r.deepen_directive or ""
+        return d
+
+    # 取全部后按 target_id 去重：跳过已有非 superseded 报告的目标，同一目标只保留最新的
+    rows = (await session.execute(q)).all()
+    seen_targets: set[str] = set()
+    all_items = []
+    for f, r in rows:
+        if f.target_id in active_targets:
+            continue  # 该目标已有更新的报告在其他列表中，不再展示作废版
+        if f.target_id in seen_targets:
+            continue
+        seen_targets.add(f.target_id)
+        all_items.append(_to_dict(f, r))
+
+    # 搜索过滤
+    if search and search.strip():
+        all_items = [d for d in all_items if _matches_query(d, search)]
+
+    if not limit:
+        return all_items
+
+    page = all_items[offset:offset + limit]
+    return {"items": page, "has_more": offset + limit < len(all_items),
+            "limit": limit, "offset": offset}
+
+
+@router.post("/results/{finding_id}/restore-discarded")
+async def restore_discarded(finding_id: str, session: AsyncSession = Depends(get_session)):
+    """把 AI 已作废（superseded）的漏洞救回复审队列：
+    verdict 改 accepted、user_status 置 pending、finding 状态改 reviewed，人工重新裁决。"""
+    r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "审核记录不存在")
+    f = await session.get(Finding, finding_id)
+    if not f or f.status != "superseded":
+        raise HTTPException(400, "该漏洞不在 AI 已作废归档中，无需恢复")
+    r.verdict = "accepted"
+    r.user_status = "pending"
+    prev_note = (r.reviewer_notes or "").rstrip()
+    r.reviewer_notes = (prev_note + "\n[人工恢复] 由 AI 已作废归档手动救回复审队列。").strip()
+    f.status = "reviewed"
+    await session.commit()
+    return {"ok": True, "id": finding_id}
+
+
 @router.get("/tasks/{task_id}/killsweeps")
 async def killsweep_list(task_id: str, only_hits: bool = True,
                          search: Optional[str] = Query(None, alias="q"),
+                         limit: int = Query(0, ge=0, le=500),
+                         offset: int = Query(0, ge=0),
                          session: AsyncSession = Depends(get_session)):
     """通杀列：人工复审通过后由通杀 Hunter 产出的可通杀候选。
 
     默认只返回 is_killsweep=true 的命中项，避免把不可通杀分析噪音摆到主列表里。
+    支持分页（limit/offset）：量大时前端一次拉 50 条、滚动加载更多。
     """
     q = (
         select(Killsweep, Finding.title)
@@ -378,6 +529,8 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
     if only_hits:
         q = q.where(Killsweep.is_killsweep == True)  # noqa: E712
     q = q.order_by(Killsweep.verified.desc(), Killsweep.asset_count.desc(), Killsweep.created_at.desc())
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
     rows = (await session.execute(q)).all()
     out = []
     for k, origin_title in rows:
@@ -404,6 +557,15 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
         }
         if _matches_query(item, search):
             out.append(item)
+    if search and limit:
+        out = out[offset:offset + limit + 1]
+    if limit:
+        return {
+            "items": out[:limit],
+            "has_more": len(out) > limit,
+            "limit": limit,
+            "offset": offset,
+        }
     return out
 
 
@@ -413,6 +575,7 @@ class UserReviewRequest(BaseModel):
     user_notes: Optional[str] = None
     user_edits: Optional[dict] = None        # {title, description, steps, poc, affected_scope, ...}
     submitted: Optional[bool] = None
+    skip_killsweep: Optional[bool] = None    # 通过时跳过通杀分析（明显无通杀的漏洞）
 
 
 class KillsweepInvalidRequest(BaseModel):
@@ -1013,6 +1176,9 @@ async def user_review(finding_id: str, req: UserReviewRequest,
             and previous_user_status != "passed"
             and r.verdict == "accepted"
         )
+        if trigger_killsweep and req.skip_killsweep:
+            trigger_killsweep = False
+            killsweep_skipped_reason = "用户选择跳过通杀分析"
         if trigger_killsweep and tgt and tgt.source == "killsweep":
             trigger_killsweep = False
             killsweep_skipped_reason = "该漏洞来自通杀验证目标，已断开通杀递归触发"
@@ -1038,13 +1204,15 @@ async def user_review(finding_id: str, req: UserReviewRequest,
 
 
 class DeepenRequest(BaseModel):
-    directive: str  # 人工附带的深挖指令：告诉 worker 这一轮去把什么打穿
+    directive: str   # 人工附带的深挖指令：告诉 worker 这一轮去把什么打穿
+    force: bool = False  # True 时绕过 DEEPEN_CAP，人工强制深挖（不计入自动管线限制）
 
 
 @router.post("/results/{finding_id}/deepen")
 async def user_deepen(finding_id: str, req: DeepenRequest,
                       session: AsyncSession = Depends(get_session)):
     """人工复审「继续深挖」：把该 finding 对应目标带定向指令重新入队，让 worker 再挖一轮。
+    force=True 时不受 DEEPEN_CAP 限制，适合人工判断后执意继续的场景。
     与 AI 审核打回深挖走同一套回炉逻辑（原 finding superseded + 目标拉到队首）。"""
     directive = (req.directive or "").strip()
     if not directive:
@@ -1054,16 +1222,17 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
         raise HTTPException(404, "漏洞不存在")
     r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
     tgt = await session.get(Target, f.target_id)
-    ok, suffix = apply_deepen(session, f, tgt, directive, source="user")
+    ok, suffix = apply_deepen(session, f, tgt, directive, source="user", force=req.force)
     if not ok:
         # 深挖失败：回滚一切改动，绝不把 user_status 污染成 deepening，
-        # 否则该漏洞会从复审/驳回列表消失又进不了深挖，变成查不到的"幽灵数据"。
+        # 否则该漏洞会从复审/驳回列表消失又进不了深挖，变成查不到的“幽灵数据”。
         await session.rollback()
         raise HTTPException(409, f"无法深挖：{suffix.strip(' →')}")
     if r:
-        # 把这次人工动作记到审核记录上：复审备注 + 标记非通过非驳回（已回炉，从复审/驳回列表移走）
+        # 深挖生效：把人工动作记到审核记录上，并从复审/归档列表移走
+        tag = "强制深挖" if req.force else "人工继续深挖"
         r.deepen_directive = directive
-        r.user_notes = ((r.user_notes or "") + f"\n[人工继续深挖] {directive}").strip()
+        r.user_notes = ((r.user_notes or "") + f"\n[{tag}] {directive}").strip()
         r.user_status = "deepening"
         r.user_reviewed_at = _now()
     await session.commit()

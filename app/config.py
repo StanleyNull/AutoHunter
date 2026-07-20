@@ -65,6 +65,10 @@ class WorkerConfig(BaseModel):
     prompt_version: str = os.environ.get("WORKER_PROMPT_VERSION", "legacy")
     # 工作目录根
     work_root: str = os.environ.get("WORKER_WORK_ROOT", "/tmp/autohunter/work")
+    # 工作目录自动清理：超过此天数未修改的目标目录将被删除（0=不清理）
+    work_retention_days: int = int(os.environ.get("WORKER_WORK_RETENTION_DAYS", "7"))
+    # 自动清理检查间隔（小时）
+    work_cleanup_interval_hours: int = int(os.environ.get("WORKER_WORK_CLEANUP_INTERVAL_HOURS", "6"))
 
     def rounds_for(self, src_type: str | None) -> tuple[int, int]:
         """按 src_type 返回 (max_rounds, soft_rounds)。企业模式给更大深挖预算。"""
@@ -82,5 +86,32 @@ class WorkerConfig(BaseModel):
         return min(value, cap) if cap > 0 else value
 
 
+class ProxyConfig(BaseModel):
+    """SSH 代理服务器配置（WAF IP 封禁时交叉检测 + 代理复测）。"""
+    # 格式: user@host:port（多台逗号分隔，简单轮询）
+    ssh_servers: str = os.environ.get("PROXY_SSH_SERVERS", "")
+    # SSH 私钥路径（容器内路径；私钥由 docker-compose.yml 挂载进来）
+    ssh_key_path: str = os.environ.get("PROXY_SSH_KEY_PATH", "/root/.ssh/id_ed25519")
+    # 专用探活服务器（不参与测试，仅用于探活交叉验证，避免 IP 被封）
+    probe_servers: str = os.environ.get("PROXY_PROBE_SERVERS", "")
+
+    @property
+    def available(self) -> bool:
+        return bool(self.ssh_servers.strip())
+
+    @property
+    def server_list(self) -> list[str]:
+        """返回 ['user@host:port', ...] 列表。支持逗号或换行分隔（多行文本框输入）。"""
+        raw = self.ssh_servers.replace("\n", ",").replace("\r", ",")
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+    @property
+    def probe_server_list(self) -> list[str]:
+        """专用探活服务器列表，格式同 server_list。"""
+        raw = self.probe_servers.replace("\n", ",").replace("\r", ",")
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+
 llm_config = LLMConfig()
 worker_config = WorkerConfig()
+proxy_config = ProxyConfig()

@@ -4,7 +4,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, canWrite, isReadonly } from "../api.js";
 import { copyText } from "../clipboard.js";
-import { buildEdusrcToolReport, buildReportMd, effectiveSeverity } from "../report.js";
+import { buildEdusrcToolReport, buildReportMd, buildReportPy, effectiveSeverity, reportSlug } from "../report.js";
 
 const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review
 const emit = defineEmits(["close", "updated", "toast"]);
@@ -16,6 +16,7 @@ const userSeverity = ref("");
 const userNotes = ref("");
 const deepenOpen = ref(false);
 const deepenText = ref("");
+const deepenCapHit = ref(false);  // 深挖次数达上限时展示强制入口
 const assistantText = ref("");
 const assistantBusy = ref(false);
 const assistantMessages = ref([]);
@@ -41,6 +42,7 @@ watch(() => props.findingId, async (id) => {
   editing.value = false;
   deepenOpen.value = false;
   deepenText.value = "";
+  deepenCapHit.value = false;
   assistantText.value = "";
   assistantBusy.value = false;
   const saved = f.value.assistant_messages;
@@ -80,27 +82,36 @@ async function saveEdits() {
   emit("updated");
 }
 
-async function decide(status) {
+async function decide(status, skipKillsweep = false) {
   const res = await api.userReview(f.value.id, {
     user_status: status, user_severity: userSeverity.value, user_notes: userNotes.value,
+    skip_killsweep: skipKillsweep,
   });
   emit("toast", status === "passed"
-    ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? "，已断开通杀递归" : ""}`
+    ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? `（${res.killsweep_skipped_reason}）` : ""}`
     : "已驳回");
   emit("updated");
   emit("close");
 }
 
-async function submitDeepen() {
+async function submitDeepen(force = false) {
   const d = deepenText.value.trim();
   if (!d) { emit("toast", "请先写一句深挖指令"); return; }
   try {
-    const r = await api.deepen(f.value.id, d);
+    const r = await api.deepen(f.value.id, d, force);
+    deepenCapHit.value = false;
     emit("toast", r.message || "已打回深挖，目标重新入队");
     emit("updated");
     emit("close");
   } catch (e) {
-    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+    const msg = String(e.message || e).replace(/^\d+\s*/, "");
+    // 409 + 次数上限：展示强制深挖入口，不关闭深挖框
+    if (msg.includes("次数已达上限") || msg.includes("上限")) {
+      deepenCapHit.value = true;
+      emit("toast", "深挖次数已达上限，可点击下方「强制深挖」绕过限制");
+    } else {
+      emit("toast", msg);
+    }
   }
 }
 
@@ -131,6 +142,44 @@ async function restoreArchived() {
   }
 }
 
+async function rejectArchived() {
+  // AI 未采纳驳回：走专用接口，级联驳回同目标的 superseded 报告，防止冒到"AI 已作废"。
+  try {
+    const res = await api.rejectArchived(f.value.id);
+    emit("toast", res.cascade_rejected
+      ? `已驳回（同时驳回 ${res.cascade_rejected} 份同目标的已作废报告）`
+      : "已驳回");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
+}
+
+async function restoreDiscarded() {
+  // AI 已作废（superseded）：走专用接口改 verdict + finding 状态才能真正进复审队列。
+  try {
+    await api.restoreDiscarded(f.value.id);
+    emit("toast", "已恢复到复审队列");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
+}
+
+async function rejectDiscarded() {
+  // AI 已作废驳回：直接设 user_status=rejected，从已作废列表移除。
+  try {
+    await api.userReview(f.value.id, { user_status: "rejected" });
+    emit("toast", "已驳回");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
+}
+
 function copyMd() {
   copyText(buildReportMd(f.value)).then(() => emit("toast", "报告已复制（Markdown）"))
     .catch(() => emit("toast", "复制失败，请使用导出按钮"));
@@ -139,6 +188,25 @@ function copyEdusrcJson() {
   const text = JSON.stringify(buildEdusrcToolReport(f.value), null, 2);
   copyText(text).then(() => emit("toast", "已复制 EduSRC 工具 JSON"))
     .catch(() => emit("toast", "复制失败，请使用导出按钮"));
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime || "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function downloadMd() {
+  if (!f.value) return;
+  downloadFile(`${reportSlug(f.value)}.md`, buildReportMd(f.value), "text/markdown;charset=utf-8");
+  emit("toast", "已下载 Markdown 报告");
+}
+function downloadPy() {
+  if (!f.value) return;
+  downloadFile(`${reportSlug(f.value)}.py`, buildReportPy(f.value), "text/x-python;charset=utf-8");
+  emit("toast", "已下载 PoC 脚本");
 }
 
 const TOOL_LABEL = { http_request: "HTTP 请求", run_shell: "执行命令" };
@@ -221,6 +289,8 @@ async function askAssistant(preset = "") {
     <div v-if="f" class="drawer-content">
       <div class="md-toolbar">
         <button class="copy" @click="copyMd">复制 Markdown</button>
+        <button class="copy" @click="downloadMd">下载 .md</button>
+        <button class="copy" @click="downloadPy">下载 .py</button>
         <button v-if="!isEnterprise" class="copy" @click="copyEdusrcJson">复制 EduSRC JSON</button>
         <button v-if="mode === 'review' && !readonly" @click="editing = !editing">{{ editing ? "预览" : "编辑内容" }}</button>
         <span class="sev-pill" :class="effSev">{{ effSev }}</span>
@@ -320,9 +390,13 @@ async function askAssistant(preset = "") {
           <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
           <textarea v-model="deepenText" rows="2"
             placeholder="例：用 config.js 里的 SECRET 对 /ashx 接口做 sha1 签名，越权调用取出他人数据并贴出响应"></textarea>
+          <div v-if="deepenCapHit" class="deepen-cap-warn">
+            ⚠ 深挖次数已达上限（自动化防护），人工确认后可强制继续，不受次数限制
+          </div>
           <div class="deepen-actions">
-            <button class="ghost" @click="deepenOpen = false">取消</button>
-            <button class="go" @click="submitDeepen">↻ 打回深挖并重新入队</button>
+            <button class="ghost" @click="deepenOpen = false; deepenCapHit = false">取消</button>
+            <button v-if="deepenCapHit" class="go force" @click="submitDeepen(true)">⚡ 强制深挖（绕过次数限制）</button>
+            <button v-else class="go" @click="submitDeepen()">↻ 打回深挖并重新入队</button>
           </div>
         </div>
         <div class="review-bar">
@@ -334,6 +408,7 @@ async function askAssistant(preset = "") {
           </div>
           <div class="rb-btns">
             <button class="deep" @click="deepenOpen = !deepenOpen">+ 继续深挖</button>
+            <button class="ok-soft" @click="decide('passed', true)">✓ 通过（跳过通杀）</button>
             <button class="ok" @click="decide('passed')">✓ 通过（进待提交）</button>
             <button class="no" @click="decide('rejected')">✕ 不通过</button>
           </div>
@@ -351,9 +426,13 @@ async function askAssistant(preset = "") {
           <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
           <textarea v-model="deepenText" rows="2"
             placeholder="例：用泄露的初始密码 123456 实际登录某个真实账号，证明能进系统拿到数据"></textarea>
+          <div v-if="deepenCapHit" class="deepen-cap-warn">
+            ⚠ 深挖次数已达上限（自动化防护），人工确认后可强制继续，不受次数限制
+          </div>
           <div class="deepen-actions">
-            <button class="ghost" @click="deepenOpen = false">取消</button>
-            <button class="go" @click="submitDeepen">↻ 打回深挖并重新入队</button>
+            <button class="ghost" @click="deepenOpen = false; deepenCapHit = false">取消</button>
+            <button v-if="deepenCapHit" class="go force" @click="submitDeepen(true)">⚡ 强制深挖（绕过次数限制）</button>
+            <button v-else class="go" @click="submitDeepen()">↻ 打回深挖并重新入队</button>
           </div>
         </div>
         <div class="review-bar">
@@ -370,16 +449,45 @@ async function askAssistant(preset = "") {
           <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
           <textarea v-model="deepenText" rows="2"
             placeholder="例：用泄露的初始密码 123456 实际登录某个真实账号，证明能进系统拿到数据"></textarea>
+          <div v-if="deepenCapHit" class="deepen-cap-warn">
+            ⚠ 深挖次数已达上限（自动化防护），人工确认后可强制继续，不受次数限制
+          </div>
           <div class="deepen-actions">
-            <button class="ghost" @click="deepenOpen = false">取消</button>
-            <button class="go" @click="submitDeepen">↻ 打回深挖并重新入队</button>
+            <button class="ghost" @click="deepenOpen = false; deepenCapHit = false">取消</button>
+            <button v-if="deepenCapHit" class="go force" @click="submitDeepen(true)">⚡ 强制深挖（绕过次数限制）</button>
+            <button v-else class="go" @click="submitDeepen()">↻ 打回深挖并重新入队</button>
           </div>
         </div>
         <div class="review-bar">
-          <span class="rb-hint">AI 未采纳，可救回复审或继续深挖</span>
+          <span class="rb-hint">AI 未采纳，可救回复审、继续深挖或驳回</span>
           <span class="grow"></span>
           <button class="deep" @click="deepenOpen = !deepenOpen">+ 继续深挖</button>
+          <button class="no" @click="rejectArchived">✕ 驳回</button>
           <button class="ok" @click="restoreArchived">↩ 恢复到复审队列</button>
+        </div>
+      </div>
+
+      <!-- AI 已作废操作栏（superseded 归档）：恢复走专用接口改 verdict + 状态，驳回直接设 rejected -->
+      <div v-if="mode === 'discarded' && !readonly" class="review-wrap">
+        <div v-if="deepenOpen" class="deepen-box">
+          <label>深挖指令（告诉 worker 这一轮去把什么打穿，越具体越好）</label>
+          <textarea v-model="deepenText" rows="2"
+            placeholder="例：用泄露的初始密码 123456 实际登录某个真实账号，证明能进系统拿到数据"></textarea>
+          <div v-if="deepenCapHit" class="deepen-cap-warn">
+            ⚠ 深挖次数已达上限（自动化防护），人工确认后可强制继续，不受次数限制
+          </div>
+          <div class="deepen-actions">
+            <button class="ghost" @click="deepenOpen = false; deepenCapHit = false">取消</button>
+            <button v-if="deepenCapHit" class="go force" @click="submitDeepen(true)">⚡ 强制深挖（绕过次数限制）</button>
+            <button v-else class="go" @click="submitDeepen()">↻ 打回深挖并重新入队</button>
+          </div>
+        </div>
+        <div class="review-bar">
+          <span class="rb-hint">AI 已作废，可救回复审、继续深挖或驳回</span>
+          <span class="grow"></span>
+          <button class="deep" @click="deepenOpen = !deepenOpen">+ 继续深挖</button>
+          <button class="no" @click="rejectDiscarded">✕ 驳回</button>
+          <button class="ok" @click="restoreDiscarded">↩ 恢复到复审队列</button>
         </div>
       </div>
     </div>

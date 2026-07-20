@@ -134,6 +134,7 @@ class KillsweepHunter:
         src_type: str = "edusrc",
         cancel_event: Optional[threading.Event] = None,
         fofa_base_url: str = "",
+        enable_fofa_search: bool = True,
     ):
         self.finding = finding
         self.fofa_key = fofa_key
@@ -144,6 +145,7 @@ class KillsweepHunter:
         self.on_event = on_event or (lambda kind, data: None)
         self._result: Optional[dict] = None
         self.src_type = src_type
+        self._enable_fofa_search = enable_fofa_search
 
     def _emit(self, kind: str, **data: Any) -> None:
         self.on_event(kind, data)
@@ -177,7 +179,11 @@ class KillsweepHunter:
             rounds += 1
             try:
                 send_messages = compact_messages(messages, rounds)
-                msg = self.llm.chat(send_messages, tools=KILLSWEEP_TOOL_SCHEMAS, tool_choice="auto")
+                tools = list(KILLSWEEP_TOOL_SCHEMAS)
+                # fofa_search 被任务级开关禁用时从工具列表移除
+                if not self._enable_fofa_search:
+                    tools = [t for t in tools if t.get("function", {}).get("name") != "fofa_search"]
+                msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
             except Exception as e:
                 self._emit("killsweep_error", error=str(e))
                 return KillsweepResult({"error": f"LLM 调用失败: {e}"})
@@ -220,6 +226,9 @@ class KillsweepHunter:
         if self.cancel_event.is_set():
             return {"ok": False, "cancelled": True, "error": "通杀分析已被取消"}
         if name == "fofa_search":
+            if not self._enable_fofa_search:
+                return {"ok": False, "error": "本任务已禁用 fofa_search 测绘工具。",
+                        "guidance": "无法圈定同款系统规模，可仅基于当前漏洞特征给出通杀判断（asset_count/edu_count 填 0）。"}
             q = args.get("query", "")
             edu = bool(args.get("edu_only", False))
             self._emit("killsweep_fofa", query=q, edu_only=edu)

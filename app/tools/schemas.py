@@ -230,13 +230,13 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "finish",
-            "description": "结束对当前目标的挖掘。所有该挖的都挖完了，或确认无漏洞时调用。",
-            "parameters": {
+           "name": "finish",
+            "description": "结束对当前目标的挖掘。所有该挖的都挖完了，或确认无漏洞时调用。IP 被 WAF 封禁时：先尝试 enable_proxy_mode() 切代理继续测；仅当代理不可用或代理也连不上目标时才调用 verdict=ip_banned（目标将在后续重测阶段代理复测）。目标需要用户提供凭证/完成注册才能继续时调用 verdict=needs_auth（需附带 auth_assessment）。",
+           "parameters": {
                 "type": "object",
                 "properties": {
-                    "verdict": {"type": "string", "enum": ["found", "no_vuln"], "description": "found=至少提交过一个漏洞；no_vuln=确认无漏洞"},
-                    "summary": {"type": "string", "description": "本次挖掘总结：测了哪些面、为什么是这个结论"},
+                    "verdict": {"type": "string", "enum": ["found", "no_vuln", "ip_banned", "needs_auth"], "description": "found=至少提交过一个漏洞；no_vuln=确认无漏洞；ip_banned=已尝试 enable_proxy_mode 后代理仍不可达（或无代理配置），确认 IP 被封；needs_auth=目标有攻击面但需要用户提供凭证/完成注册才能继续深入"},
+                   "summary": {"type": "string", "description": "本次挖掘总结：测了哪些面、为什么是这个结论"},
                     "deepen_lead": {
                         "type": "string",
                         "description": (
@@ -246,8 +246,55 @@ TOOL_SCHEMAS = [
                             "没有可深挖的明确线索就留空。这会触发系统自动再派一轮定向深挖。"
                         ),
                     },
+                    "auth_assessment": {
+                        "type": "object",
+                        "description": "verdict=needs_auth 时必填。注册可行性评估，基于你实际尝试注册/登录的 HTTP 证据填写。",
+                        "properties": {
+                            "reg_status": {"type": "string", "enum": ["registrable_verification_needed", "not_registrable", "registrable_no_blocker"], "description": "registrable_verification_needed=可注册但仅差手机短信验证码或邮箱验证码（用户可手动完成） / not_registrable=不可注册（CAS/SSO/邮箱域名限制/邀请制等） / registrable_no_blocker=可注册无阻断"},
+                            "block_reason": {"type": "string", "description": "阻断原因，如'需要手机接收短信验证码完成注册'或'需要邮箱接收验证码完成注册'或'CAS/SSO 仅限校内师生，无公开注册入口'"},
+                            "registration_url": {"type": "string", "description": "注册页面 URL（如有）"},
+                            "evidence_request": {"type": "string", "description": "你实际尝试注册/登录的 HTTP 请求响应摘要，作为判定证据"},
+                            "what_user_needs_to_provide": {"type": "string", "description": "用户需要提供什么：账号密码 / Cookie / 完成注册后的登录态"},
+                            "next_steps": {"type": "string", "description": "拿到登录态后该测哪些接口/功能"},
+                        },
+                        "required": ["reg_status", "block_reason", "evidence_request"],
+                    },
                 },
                 "required": ["verdict", "summary"],
+            },
+        },
+    },
+]
+
+
+KNOWLEDGE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_lookup",
+            "description": (
+                "查阅人工知识库中的安全测试技巧文档（渐进式披露）。"
+                "第一次调用：传 vuln_found 和 vuln_type 获取匹配文档的标题+摘要列表。"
+                "第二次调用：传 doc_id 获取某篇文档的完整原文。"
+                "知识库仅作辅助参考，你必须先依赖自身推理能力测试，不可一开始就依赖知识库。"
+                "知识库内容与你的判断冲突时，以你的独立分析为准。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_id": {
+                        "type": "string",
+                        "description": "获取完整原文时传文档ID（从第一次调用返回的列表中选取）",
+                    },
+                    "vuln_found": {
+                        "type": "boolean",
+                        "description": "是否已发现漏洞（已提交finding或确定存在漏洞时为true）",
+                    },
+                    "vuln_type": {
+                        "type": "string",
+                        "description": "当前发现的漏洞类型，如ssrf/sqli/rce/file_upload等，用于匹配相关技巧文档",
+                    },
+                },
             },
         },
     },
@@ -314,6 +361,17 @@ SESSION_TOOL_SCHEMAS = [
     },
 ]
 
+
+PROXY_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "enable_proxy_mode",
+            "description": "切换为代理模式：后续 http_request 自动通过 SSH 代理发送，无需手动 ssh curl。当你交叉验证确认本地 IP 被目标 WAF 封禁时（用代理发干净 GET 返回 200 而本地 403）调用此工具而非 finish(ip_banned)，然后继续用 http_request 正常挖掘——上下文、会话态、已发现线索全部保留。若代理不可用或代理也连不上目标，再调用 finish(verdict=ip_banned)。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+]
 
 REVIEWER_TOOL_SCHEMAS = [
     {
@@ -604,3 +662,5 @@ KILLSWEEP_TOOL_SCHEMAS = _compact_descriptions(KILLSWEEP_TOOL_SCHEMAS)
 ESCALATE_TOOL_SCHEMAS = _compact_descriptions(ESCALATE_TOOL_SCHEMAS)
 COLLECTOR_QUERY_SCHEMAS = _compact_descriptions(COLLECTOR_QUERY_SCHEMAS)
 COLLECTOR_EDU_SCHEMAS = _compact_descriptions(COLLECTOR_EDU_SCHEMAS)
+KNOWLEDGE_TOOL_SCHEMAS = _compact_descriptions(KNOWLEDGE_TOOL_SCHEMAS)
+PROXY_TOOL_SCHEMAS = _compact_descriptions(PROXY_TOOL_SCHEMAS)

@@ -12,6 +12,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+CST = timezone(timedelta(hours=8))  # 东八区（北京时间）
+
 
 def _uuid() -> str:
     return uuid.uuid4().hex
@@ -50,6 +52,7 @@ class Task(Base):
     src_type: Mapped[str] = mapped_column(String(20), default="edusrc")
     vuln_types: Mapped[list] = mapped_column(JSON, default=list)        # 选定漏洞类型
     src_rules: Mapped[str] = mapped_column(Text, default="")            # SRC 规则全文（审核用）
+    cas_sso_config: Mapped[str] = mapped_column(Text, default="")        # CAS SSO 统一认证凭证（任务级，每个 worker 都会收到）
     target_source: Mapped[str] = mapped_column(String(20), default="fofa")  # fofa / manual / both / site
     fofa_query: Mapped[str] = mapped_column(Text, default="")
     manual_targets: Mapped[list] = mapped_column(JSON, default=list)
@@ -57,8 +60,14 @@ class Task(Base):
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
+    # Worker 挖掘时是否允许调用 fofa_lookup（只读测绘确认归属/探攻击面）
+    enable_worker_fofa_lookup: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 通杀分析时是否允许调用 fofa_search（圈定同款系统+统计规模）
+    enable_killsweep_fofa_search: Mapped[bool] = mapped_column(Boolean, default=True)
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
+    # 失败目标自动重测状态机（idle 时触发，串行探活+测试+休眠），null=无重测
+    retest_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
@@ -100,6 +109,14 @@ class Target(Base):
     deepen_count: Mapped[int] = mapped_column(Integer, default=0)
     # 搜集阶段顺带查到的、过滤打分后的该域泄露凭证（喂给 worker 作额外攻击面）。
     leaked_creds: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # WAF IP 封禁确认标记：交叉验证后确认本机 IP 被目标 WAF 封禁
+    ip_ban_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # needs_auth 评估：Worker 判定目标需要用户提供凭证/完成注册时填写的结构化判断
+    auth_assessment: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 用户提交的凭证（账号密码或 Cookie/Token），由前端凭证表单提交
+    user_credentials: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 注册助手对话历史：[{role:'user'|'assistant', content:'...'}]，按 target 持久化
+    assistant_messages: Mapped[list] = mapped_column(JSON, default=list)
     assigned_worker: Mapped[str] = mapped_column(String(64), default="")
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -267,6 +284,63 @@ class Intel(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
 
+class KnowledgeDoc(Base):
+    """人工知识库文档（用户主动添加的安全测试技巧/漏洞利用经验）。
+
+    与 Intel（自动沉淀的结构化情报）互补：KnowledgeDoc 是用户编写的非结构化技巧文档，
+    通过渐进式披露供 Worker 在深挖阶段查阅。
+
+    doc_type:
+      - pre_vuln  (Type A) 漏洞前可读：如识别目标为XX OA系统时查阅已知漏洞
+      - post_vuln (Type B) 漏洞后可读：如确认SSRF后查阅盲转有回显技巧
+    tags: 二级标签（多选），包括漏洞类型(ssrf/sqli/rce等)和目标类型(OA/CMS/框架等)
+    """
+    __tablename__ = "knowledge_docs"
+    __table_args__ = (
+        Index("ix_knowledge_enabled_type", "enabled", "doc_type"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    title: Mapped[str] = mapped_column(String(500), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")             # AI生成的摘要
+    content: Mapped[str] = mapped_column(Text, default="")              # 完整原文
+    doc_type: Mapped[str] = mapped_column(String(20), default="pre_vuln")  # pre_vuln / post_vuln
+    tags: Mapped[list] = mapped_column(JSON, default=list)              # 二级标签
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)          # 被引用次数
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)       # 处理完成后自动启用
+    # pending / processing / ready / failed
+    processing: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class KnowledgeTag(Base):
+    """人工知识库标签池：固定标签制度，AI只能从此池中选择标签。"""
+    __tablename__ = "knowledge_tags"
+    __table_args__ = (
+        Index("ux_knowledge_tags_name", "name", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class KnowledgeTagProposal(Base):
+    """AI建议的新标签，需人工审核后才能加入标签池。"""
+    __tablename__ = "knowledge_tag_proposals"
+    __table_args__ = (
+        Index("ix_knowledge_tag_proposals_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(100))
+    source_doc_id: Mapped[str] = mapped_column(String(32), default="")  # 建议来源文档
+    # pending / approved / rejected
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
 class SystemSettings(Base):
     """全局系统配置（单行 id=global）。任务级配置可覆盖此处默认值。"""
     __tablename__ = "system_settings"
@@ -276,4 +350,29 @@ class SystemSettings(Base):
     fofa: Mapped[dict] = mapped_column(JSON, default=dict)      # key/max_pages/page_size/default_intent_mode
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
+    proxy: Mapped[dict] = mapped_column(JSON, default=dict)     # ssh_servers/ssh_key_path（WAF IP 封禁代理复测）
+    pricing: Mapped[dict] = mapped_column(JSON, default=dict)   # {model_name: {input, output, cache_hit}} 单位:元/百万Token
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class TokenUsageDaily(Base):
+    """按天聚合的 Token 用量持久化表（CST 日期 + 任务 + 模型维度）。
+
+    每次 LLM 调用后增量 upsert，进程重启不丢数据。
+    成本在查询时按 pricing 配置实时计算，不预存——用户改单价后历史成本自动重算。
+    """
+    __tablename__ = "token_usage_daily"
+    __table_args__ = (
+        Index("ux_token_usage_daily", "date", "task_id", "model", unique=True),
+        Index("ix_token_usage_daily_date", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[str] = mapped_column(String(10))              # YYYY-MM-DD（CST）
+    task_id: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(100), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_hit_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_miss_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    requests: Mapped[int] = mapped_column(Integer, default=0)
