@@ -501,6 +501,7 @@ main {
   }
   .skeleton-board .skeleton-panel { padding: 12px; border-radius: 14px; }
   .skeleton-worker { height: 82px; margin-bottom: 8px; }
+  .skeleton-task { min-height: 88px; border-radius: 14px; }
   .skeleton-hard { min-height: 78px; border-radius: 13px; }
 }
 
