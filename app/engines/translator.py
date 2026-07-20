@@ -1,154 +1,197 @@
-"""FOFA 语法解析器：将 FOFA 查询语法解析为结构化中间表示，再翻译成各引擎语法。"""
+"""FOFA 语法解析器：将 FOFA 查询语法解析为结构化中间表示，再翻译成各引擎原生语法。
+
+产品约定：任务框统一按 FOFA 语法书写；collector 在调用非 FOFA 引擎前必须走本模块翻译。
+若输入本身不像 FOFA（解析不到 field= / != / =~ 条件），则原样透传，避免误伤用户原生语法。
+"""
 from __future__ import annotations
 
 import re
 from typing import Any
 
 
-# ── FOFA 词法分析 ─────────────────────────────────────────────
-
-class FofaToken:
-    """单个 FOFA 查询条件。"""
-    def __init__(self, field: str, op: str, value: str):
-        self.field = field.lower().strip()   # title, body, domain, host, ip, port, org, ...
-        self.op = op                          # = , !=, =~, !=~
-        self.value = value.strip().strip('"').strip("'")
-
-    def __repr__(self) -> str:
-        return f"{self.field}{self.op}\"{self.value}\""
+# field 操作符 value；value 可为双引号 / 单引号 / 无空格裸值
+_TOKEN_RE = re.compile(
+    r'([a-zA-Z_][\w.]*)\s*(!=~|!=|=~|==|=)\s*'
+    r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s&|()]+)'
+)
 
 
-class FofaGroup:
-    """一组用 && 或 || 连接的 FOFA 条件。"""
-    def __init__(self):
-        self.tokens: list[FofaToken | FofaGroup] = []
-        self.op: str = "&&"  # 连接符
+def parse_fofa_query(query: str) -> tuple[list[dict[str, str]], list[str]]:
+    """解析 FOFA 风格条件，保留条件之间的 && / ||。
 
-
-def _tokenize_fofa(query: str) -> list[dict[str, Any]]:
-    """将 FOFA 查询拆分成条件列表。
-    
-    返回 [{field, op, value}, ...]。
-    不处理嵌套括号（简单展平），适用于常见 FOFA 语法。
+    返回 (tokens, joins)：
+      tokens: [{field, op, value}, ...]
+      joins:  长度 len(tokens)-1，元素为 '&&' 或 '||'
     """
-    q = query.strip()
+    q = (query or "").strip()
     if not q:
-        return []
+        return [], []
 
-    results = []
-    # 提取所有 field="value" / field!="value" / field=~"value" 模式
-    pattern = r'([a-zA-Z_][\w.]*)\s*([!]?=~?|!=)\s*((?:"[^"]*"|\'[^\']*\'))'
-    for m in re.finditer(pattern, q):
-        field = m.group(1)
-        op = m.group(2)
-        value = m.group(3).strip('"').strip("'")
-        results.append({"field": field, "op": op, "value": value})
+    matches = list(_TOKEN_RE.finditer(q))
+    if not matches:
+        return [], []
 
-    return results
+    tokens: list[dict[str, str]] = []
+    joins: list[str] = []
+    for i, m in enumerate(matches):
+        raw_val = m.group(3)
+        if (raw_val.startswith('"') and raw_val.endswith('"')) or (
+            raw_val.startswith("'") and raw_val.endswith("'")
+        ):
+            value = raw_val[1:-1].replace(r"\"", '"').replace(r"\'", "'").replace(r"\\", "\\")
+        else:
+            value = raw_val
+        tokens.append({
+            "field": m.group(1).lower().strip(),
+            "op": m.group(2),
+            "value": value,
+        })
+        if i > 0:
+            between = q[matches[i - 1].end(): m.start()]
+            joins.append("||" if "||" in between else "&&")
+    return tokens, joins
 
 
-# ── 各引擎翻译 ────────────────────────────────────────────────
+def _join_parts(parts: list[str], joins: list[str], and_word: str, or_word: str) -> str:
+    if not parts:
+        return ""
+    out = [parts[0]]
+    for i, part in enumerate(parts[1:]):
+        op = joins[i] if i < len(joins) else "&&"
+        out.append(f" {or_word if op == '||' else and_word} ")
+        out.append(part)
+    return "".join(out)
 
-# FOFA 字段 → Quake 字段映射
+
+def _eq_ops(op: str) -> bool:
+    return op in ("=", "==", "=~")
+
+
+def _neq_ops(op: str) -> bool:
+    return op in ("!=", "!=~")
+
+
+# ── Quake ────────────────────────────────────────────────────
+# 官方 DSL：field:value / field:"value"，逻辑 AND / OR / NOT
+# domain 是独立字段（勿映射成 hostname）；protocol → service.name
 _FOFA_TO_QUAKE = {
     "title": "title",
     "body": "body",
-    "domain": "hostname",
+    "domain": "domain",
     "host": "hostname",
     "ip": "ip",
     "port": "port",
     "org": "org",
-    "protocol": "transport",
-    "server": "service.name",
-    "country": "location.country_code",
-    "city": "location.city",
-    "header": "service.response_header",
-    "app": "service.product_name",
-    "os": "service.os",
-    "cert.subject.org": "certificate.subject_org",
-    # 以下字段 Quake 不直接支持，用近似字段
-    "icon_hash": "",
-    "after": "",
-    "before": "",
+    "protocol": "service",
+    "server": "server",
+    "country": "country",
+    "city": "city",
+    "header": "headers",
+    "app": "app",
+    "os": "os",
+    "cert": "cert",
+    "cert.subject": "cert",
+    "cert.subject.cn": "cert",
+    "cert.subject.org": "cert",
+    "icon_hash": "favicon",
+    "icp": "icp",
+    "base_protocol": "transport",
 }
 
 
 def fofa_to_quake(query: str) -> str:
-    """将 FOFA 语法翻译为 360 Quake 语法。"""
-    tokens = _tokenize_fofa(query)
+    tokens, joins = parse_fofa_query(query)
     if not tokens:
         return query
 
-    parts = []
-    for t in tokens:
-        f = _FOFA_TO_QUAKE.get(t["field"], t["field"])
-        if not f:
+    parts: list[str] = []
+    kept_joins: list[str] = []
+    for i, t in enumerate(tokens):
+        f = _FOFA_TO_QUAKE.get(t["field"])
+        if f is None:
+            # 未知字段：尽量透传字段名（Quake 也可能认识）
+            f = t["field"]
+        if f == "":
             continue
-        op = t["op"]
-        v = t["value"]
+        op, v = t["op"], t["value"]
         if t["field"] == "port":
-            v = v.lstrip("0") or "0"
-            parts.append(f"{f}:{v}")
-        elif t["field"] in ("domain",):
-            # FOFA domain 是后缀匹配；Quake hostname 不支持 *. 通配符，直接裸值
-            parts.append(f"{f}:{v}")
-        elif op in ("=", "=~"):
-            parts.append(f'{f}:"{v}"')
-        elif op == "!=":
-            parts.append(f'NOT {f}:"{v}"')
+            v = (v.lstrip("0") or "0")
+            piece = f"{f}:{v}"
+        elif t["field"] in ("ip",) and "/" not in v:
+            piece = f"{f}:\"{v}\"" if _eq_ops(op) else f"NOT {f}:\"{v}\""
+        elif _eq_ops(op):
+            piece = f'{f}:"{v}"'
+        elif _neq_ops(op):
+            piece = f'NOT {f}:"{v}"'
+        else:
+            continue
+        if parts:
+            kept_joins.append(joins[i - 1] if i - 1 < len(joins) else "&&")
+        parts.append(piece)
+    return _join_parts(parts, kept_joins, "AND", "OR") or query
 
-    q = " AND ".join(parts) if parts else query
-    q = re.sub(r'\s*&&\s*', ' AND ', q)
-    q = re.sub(r'\s*\|\|\s*', ' OR ', q)
-    return q
 
-
-# FOFA 字段 → Hunter 字段映射
+# ── Hunter (鹰图) ─────────────────────────────────────────────
+# 语法接近 FOFA：field="value"，&& / ||；常用 web.title / domain.suffix
 _FOFA_TO_HUNTER = {
     "title": "web.title",
     "body": "web.body",
-    "domain": "domain",
-    "host": "host",
+    "domain": "domain.suffix",
+    "host": "domain",
     "ip": "ip",
     "port": "port",
-    "org": "org",
+    "org": "ip.company",
     "protocol": "protocol",
-    "server": "web.server",
+    "server": "header.server",
     "country": "ip.country",
     "city": "ip.city",
     "app": "web.app",
-    "header": "web.header",
-    "cert.subject.org": "cert.subject",
+    "header": "header",
+    "os": "os",
+    "cert": "cert",
+    "cert.subject": "cert.subject",
+    "cert.subject.cn": "cert.subject",
+    "cert.subject.org": "cert.subject_org",
+    "icon_hash": "web.icon",
+    "icp": "icp.number",
+    "status_code": "web.status_code",
 }
 
 
 def fofa_to_hunter(query: str) -> str:
-    """将 FOFA 语法翻译为 Hunter (鹰图) 语法。"""
-    tokens = _tokenize_fofa(query)
+    tokens, joins = parse_fofa_query(query)
     if not tokens:
         return query
 
-    parts = []
-    for t in tokens:
+    parts: list[str] = []
+    kept_joins: list[str] = []
+    for i, t in enumerate(tokens):
         f = _FOFA_TO_HUNTER.get(t["field"], t["field"])
-        op = t["op"]
-        v = t["value"]
+        op, v = t["op"], t["value"]
+        # Hunter: = 模糊，== 精确；FOFA =~ 接近模糊 =
         if t["field"] == "port":
-            parts.append(f'{f}={v}')
+            piece = f'{f}="{v}"' if _eq_ops(op) else f'{f}!="{v}"'
+        elif op == "==":
+            piece = f'{f}=="{v}"'
         elif op in ("=", "=~"):
-            parts.append(f'{f}="{v}"')
-        elif op == "!=":
-            parts.append(f'{f}!="{v}"')
+            piece = f'{f}="{v}"'
+        elif op == "!==":
+            piece = f'{f}!=="{v}"'
+        elif _neq_ops(op):
+            piece = f'{f}!="{v}"'
+        else:
+            continue
+        if parts:
+            kept_joins.append(joins[i - 1] if i - 1 < len(joins) else "&&")
+        parts.append(piece)
+    return _join_parts(parts, kept_joins, "&&", "||") or query
 
-    q = " && ".join(parts) if parts else query
-    return q
 
-
-# FOFA 字段 → ZoomEye 字段映射
+# ── ZoomEye（v2 语法已对齐 FOFA：field="value" &&/||）────────
 _FOFA_TO_ZOOMEYE = {
     "title": "title",
-    "body": "content",
-    "domain": "site",
+    "body": "body",
+    "domain": "domain",
     "host": "hostname",
     "ip": "ip",
     "port": "port",
@@ -158,77 +201,106 @@ _FOFA_TO_ZOOMEYE = {
     "country": "country",
     "city": "city",
     "app": "app",
-    "header": "headers",
+    "header": "header",
     "os": "os",
+    "cert": "ssl",
+    "icon_hash": "iconhash",
 }
 
 
 def fofa_to_zoomeye(query: str) -> str:
-    """将 FOFA 语法翻译为 ZoomEye 语法。"""
-    tokens = _tokenize_fofa(query)
+    tokens, joins = parse_fofa_query(query)
     if not tokens:
         return query
 
-    parts = []
-    for t in tokens:
+    parts: list[str] = []
+    kept_joins: list[str] = []
+    for i, t in enumerate(tokens):
         f = _FOFA_TO_ZOOMEYE.get(t["field"], t["field"])
-        op = t["op"]
-        v = t["value"]
+        op, v = t["op"], t["value"]
         if t["field"] == "port":
-            parts.append(f'{f}:{v}')
-        elif op in ("=", "=~"):
-            parts.append(f'{f}:"{v}"')
-        elif op == "!=":
-            parts.append(f'-{f}:"{v}"')
+            piece = f'{f}={v}' if _eq_ops(op) else f'{f}!={v}'
+        elif op == "==":
+            piece = f'{f}=="{v}"'
+        elif _eq_ops(op):
+            piece = f'{f}="{v}"'
+        elif _neq_ops(op):
+            piece = f'{f}!="{v}"'
+        else:
+            continue
+        if parts:
+            kept_joins.append(joins[i - 1] if i - 1 < len(joins) else "&&")
+        parts.append(piece)
+    return _join_parts(parts, kept_joins, "&&", "||") or query
 
-    q = " +".join(parts) if parts else query
-    return q
 
-
-# FOFA 字段 → Shodan 字段映射
+# ── Shodan ────────────────────────────────────────────────────
+# filter:value，空格连接；否定前缀 -
 _FOFA_TO_SHODAN = {
-    "title": "title",
+    "title": "http.title",
     "body": "http.html",
     "domain": "hostname",
     "host": "hostname",
-    "ip": "ip",
+    "ip": "net",
     "port": "port",
     "org": "org",
-    "protocol": "http",
-    "server": "http.server",
+    "protocol": "",  # 无对等 filter；常见 http/https 由其它条件覆盖
+    "server": "product",
     "country": "country",
     "city": "city",
     "app": "product",
     "os": "os",
-    "header": "http.response_header",
+    "header": "http.component",
+    "cert": "ssl",
+    "cert.subject": "ssl.cert.subject.cn",
+    "cert.subject.cn": "ssl.cert.subject.cn",
     "cert.subject.org": "ssl.cert.subject.cn",
     "cert.issuer.org": "ssl.cert.issuer.cn",
+    "icon_hash": "http.favicon.hash",
 }
 
 
 def fofa_to_shodan(query: str) -> str:
-    """将 FOFA 语法翻译为 Shodan 语法。"""
-    tokens = _tokenize_fofa(query)
+    tokens, joins = parse_fofa_query(query)
     if not tokens:
         return query
 
-    parts = []
-    for t in tokens:
+    # Shodan 无 OR 连接 filter 的标准写法；遇到 || 时用 OR 分组尽量保留
+    and_groups: list[list[str]] = [[]]
+    for i, t in enumerate(tokens):
+        if i > 0 and i - 1 < len(joins) and joins[i - 1] == "||":
+            and_groups.append([])
         f = _FOFA_TO_SHODAN.get(t["field"], t["field"])
-        op = t["op"]
-        v = t["value"]
+        if f == "":
+            continue
+        op, v = t["op"], t["value"]
+        if t["field"] == "ip" and "/" not in v:
+            v = f"{v}/32"
         if t["field"] == "port":
-            parts.append(f'{f}:{v}')
-        elif op in ("=", "=~"):
-            parts.append(f'{f}:"{v}"')
-        elif op == "!=":
-            parts.append(f'-{f}:"{v}"')
+            piece = f"{f}:{v}"
+        elif t["field"] == "country" and len(v) != 2:
+            # Shodan country 要两字母码；非码值降级为全文
+            piece = f'"{v}"'
+        elif _eq_ops(op):
+            piece = f'{f}:"{v}"' if (" " in v or not v.isalnum()) else f"{f}:{v}"
+            # hostname / 带点域名需要引号更稳
+            if t["field"] in ("domain", "host", "title", "body", "org", "server", "app", "header") or "." in v or " " in v:
+                piece = f'{f}:"{v}"'
+        elif _neq_ops(op):
+            piece = f'-{f}:"{v}"'
+        else:
+            continue
+        and_groups[-1].append(piece)
 
-    q = " ".join(parts) if parts else query
-    return q
+    groups = [" ".join(g) for g in and_groups if g]
+    if not groups:
+        return query
+    if len(groups) == 1:
+        return groups[0]
+    return " OR ".join(f"({g})" for g in groups)
 
 
-# FOFA 字段 → Censys 字段映射
+# ── Censys（Legacy Search Language / v2 hosts search）─────────
 _FOFA_TO_CENSYS = {
     "title": "services.http.response.html_title",
     "body": "services.http.response.body",
@@ -236,44 +308,46 @@ _FOFA_TO_CENSYS = {
     "host": "dns.names",
     "ip": "ip",
     "port": "services.port",
-    "org": "location.country",
+    "org": "autonomous_system.organization",
     "protocol": "services.service_name",
     "server": "services.http.response.headers.server",
     "country": "location.country",
     "city": "location.city",
     "app": "services.software.product",
-    "os": "services.software.operating_system",
-    "cert.subject.org": "services.tls.certificates.leaf_data.subject.organization",
-    "cert.issuer.org": "services.tls.certificates.leaf_data.issuer.organization",
+    "os": "services.software.uniform_resource_identifier",
+    "header": "services.http.response.headers",
+    "cert.subject.org": "services.tls.certificates.leaf.names",
+    "cert.subject.cn": "services.tls.certificates.leaf.names",
+    "cert": "services.tls.certificates.leaf.names",
 }
 
 
 def fofa_to_censys(query: str) -> str:
-    """将 FOFA 语法翻译为 Censys 语法。"""
-    tokens = _tokenize_fofa(query)
+    tokens, joins = parse_fofa_query(query)
     if not tokens:
         return query
 
-    parts = []
-    for t in tokens:
+    parts: list[str] = []
+    kept_joins: list[str] = []
+    for i, t in enumerate(tokens):
         f = _FOFA_TO_CENSYS.get(t["field"], t["field"])
-        op = t["op"]
-        v = t["value"]
+        op, v = t["op"], t["value"]
         if t["field"] == "port":
             v = v.lstrip("0") or "0"
-            parts.append(f'{f}:{v}')
-        elif op in ("=", "=~"):
-            parts.append(f'{f}:"{v}"')
-        elif op == "!=":
-            parts.append(f'NOT {f}:"{v}"')
+            piece = f"{f}:{v}"
+        elif t["field"] == "protocol":
+            piece = f'{f}:{v.upper()}'
+        elif _eq_ops(op):
+            piece = f'{f}:"{v}"'
+        elif _neq_ops(op):
+            piece = f'not {f}:"{v}"'
+        else:
+            continue
+        if parts:
+            kept_joins.append(joins[i - 1] if i - 1 < len(joins) else "&&")
+        parts.append(piece)
+    return _join_parts(parts, kept_joins, "and", "or") or query
 
-    q = " AND ".join(parts) if parts else query
-    q = re.sub(r'\s*&&\s*', ' AND ', q)
-    q = re.sub(r'\s*\|\|\s*', ' OR ', q)
-    return q
-
-
-# ── 引擎分发表 ────────────────────────────────────────────────
 
 _FOFA_TRANSLATORS = {
     "quake": fofa_to_quake,
@@ -285,13 +359,23 @@ _FOFA_TRANSLATORS = {
 
 
 def translate_fofa_query(query: str, target_engine: str) -> str:
-    """将 FOFA 语法翻译为目标引擎语法。若目标引擎为 fofa 则原样返回。"""
-    if not query or target_engine == "fofa":
+    """将 FOFA 语法翻译为目标引擎语法。目标为 fofa / 空则原样返回。"""
+    if not query:
         return query
-    translator = _FOFA_TRANSLATORS.get(target_engine)
+    engine = (target_engine or "fofa").strip().lower()
+    if engine in ("", "fofa"):
+        return query
+    translator = _FOFA_TRANSLATORS.get(engine)
     if translator is None:
         return query
     try:
-        return translator(query)
+        out = translator(query)
+        return out if out else query
     except Exception:
         return query
+
+
+def looks_like_fofa_syntax(query: str) -> bool:
+    """粗判是否像 FOFA 字段条件（供 UI / 调试）。"""
+    tokens, _ = parse_fofa_query(query)
+    return bool(tokens)

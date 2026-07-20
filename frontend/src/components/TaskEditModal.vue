@@ -245,14 +245,17 @@ async function save() {
         <label v-if="!isSiteMode">搜集方式
           <select v-model="form.intent_mode">
             <option value="">自动判断</option>
-            <option value="syntax">FOFA 语法</option>
+            <option value="syntax">查询语法（FOFA，其它引擎自动翻译）</option>
             <option value="intent">自然语言意图</option>
           </select>
         </label>
       </div>
 
       <label>漏洞类型（逗号分隔） <input v-model="form.vuln_types" /></label>
-      <label v-if="!isSiteMode">FOFA 语法 / 搜集意图 <input v-model="form.fofa_query" /></label>
+      <label v-if="!isSiteMode">查询语法 / 搜集意图 <input v-model="form.fofa_query" /></label>
+      <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
+        统一按 FOFA 语法书写；非 FOFA 引擎会自动翻译。原生语法可原样透传。
+      </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>
       </label>

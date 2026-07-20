@@ -178,17 +178,21 @@ onMounted(async () => {
       <label v-if="!isSiteMode">搜集方式
         <select v-model="form.intent_mode">
           <option value="">自动判断（写得像语法就当语法，否则当意图）</option>
-          <option value="syntax">FOFA 语法（我自己写好了）</option>
+          <option value="syntax">查询语法（按 FOFA 书写，其它引擎自动翻译）</option>
           <option value="intent">自然语言意图（让搜集 Agent 翻译成语法并逐轮演化）</option>
         </select>
       </label>
       <label v-if="!isSiteMode">
-        {{ form.intent_mode === "intent" ? "搜集意图（用大白话说要找什么）" : "FOFA 语法 / 搜集意图" }}
+        {{ form.intent_mode === "intent" ? "搜集意图（用大白话说要找什么）" : "查询语法 / 搜集意图" }}
         <input v-model="form.fofa_query"
           :placeholder="form.src_type === 'enterprise'
             ? (form.intent_mode === 'intent' ? '例：找某集团 OA/CRM/ERP/API/运维后台资产' : 'domain=&quot;example.com&quot; || cert=&quot;示例集团&quot; || org=&quot;示例集团&quot;')
             : (form.intent_mode === 'intent' ? '例：找全国高校的统一身份认证登录系统' : 'title=&quot;统一身份认证&quot; && domain=&quot;.edu.cn&quot;')" />
       </label>
+      <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
+        统一按 <strong>FOFA 语法</strong>书写；选择 Quake / Hunter / ZoomEye / Shodan / Censys 时会自动翻译成该引擎原生语法再请求。
+        若直接粘贴目标引擎原生语法（解析不到 FOFA 条件），则原样透传。
+      </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写：重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。&#10;例：后台在 /admin，重点测 API、越权、上传。"></textarea>
       </label>

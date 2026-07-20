@@ -14,6 +14,8 @@ class EngineResult:
     size: int = 0
     page: int = 1
     engine: str = ""
+    # Censys 等引擎用 cursor 翻页；无则保持 None，collector 继续用 page。
+    next_cursor: str | None = None
 
 
 class SearchEngine(ABC):
@@ -45,13 +47,17 @@ class SearchEngine(ABC):
         page: int = 1,
         page_size: int = 100,
         base_url: str | None = None,
+        cursor: str | None = None,
     ) -> EngineResult:
         """执行搜索，返回统一格式的 EngineResult。"""
         ...
 
-    def translate_query(self, query: str, target_engine: str) -> str:
-        """将本引擎的查询语法翻译为目标引擎语法（默认返回原样）。"""
-        return query
+    def translate_query(self, query: str, from_engine: str = "fofa") -> str:
+        """将 from_engine（默认 FOFA）语法翻译为本引擎语法。"""
+        if from_engine != "fofa" or self.name == "fofa":
+            return query
+        from app.engines.translator import translate_fofa_query
+        return translate_fofa_query(query, self.name)
 
     def get_default_base_url(self) -> str:
         """默认 API 端点。"""

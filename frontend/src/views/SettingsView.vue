@@ -254,7 +254,7 @@ onMounted(() => {
             <label class="full">默认搜集方式
               <select v-model="form.default_intent_mode">
                 <option value="">自动判断</option>
-                <option value="syntax">FOFA 语法</option>
+                <option value="syntax">查询语法（FOFA，其它引擎自动翻译）</option>
                 <option value="intent">自然语言意图</option>
               </select>
             </label>

@@ -27,6 +27,7 @@ from app.agents import target_cluster
 from app.agents.prompts import is_enterprise_src
 from app.db.models import Target, Task
 from app.engines import get_engine, EngineResult, QuakeRateLimitError
+from app.engines.translator import translate_fofa_query
 from app.tools.leakcreds import query_leaked_creds
 from app.agents import auth_bootstrap
 
@@ -467,9 +468,33 @@ async def _fofa_collect(
         task.fofa_config = {**cfg}
         return 0
 
+    # 产品约定：任务框统一写 FOFA 语法；非 FOFA 引擎在请求前自动翻译。
+    # 解析不到 FOFA 条件时原样透传（兼容用户直接粘贴该引擎原生语法）。
+    native_query = translate_fofa_query(cur_query, engine_name)
+    engine_cursor = cfg.get("engine_cursor") or None
+    # 换语法时清掉跨页 cursor（Censys 等）
+    if cfg.get("translated_query") != native_query:
+        engine_cursor = None
+        cfg.pop("engine_cursor", None)
+    cfg["translated_query"] = native_query
+    if native_query != cur_query:
+        await report(
+            "fofa_search",
+            f"{engine.display_name} 语法已从 FOFA 自动翻译",
+            query=cur_query,
+            translated_query=native_query,
+            engine=engine_name,
+        )
+
     try:
-        res = await engine.search(key, cur_query, page=next_cursor, page_size=size,
-                                  base_url=base_url)
+        res = await engine.search(
+            key,
+            native_query,
+            page=next_cursor,
+            page_size=size,
+            base_url=base_url,
+            cursor=engine_cursor,
+        )
     except QuakeRateLimitError as e:
         # Quake 专用限流异常
         err = f"{e}"[:300]
@@ -564,6 +589,10 @@ async def _fofa_collect(
         task.fofa_config = {**cfg}
         return 0
     cursor = next_cursor
+    if getattr(res, "next_cursor", None):
+        cfg["engine_cursor"] = res.next_cursor
+    else:
+        cfg.pop("engine_cursor", None)
     cfg["fofa_auth_fail_count"] = 0
     cfg["rate_limit_count"] = 0  # 成功请求重置限流计数
     cfg.pop("rate_limit_until", None)

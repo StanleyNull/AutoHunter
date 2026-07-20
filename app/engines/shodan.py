@@ -30,29 +30,29 @@ class ShodanEngine(SearchEngine):
         page: int = 1,
         page_size: int = 100,
         base_url: str | None = None,
+        cursor: str | None = None,
     ) -> EngineResult:
         if not api_key:
             raise ValueError("缺少 Shodan API Key")
         base = (base_url or self.get_default_base_url()).rstrip("/")
-        params = {"key": api_key, "query": query, "page": str(page), "limit": str(min(page_size, 100))}
+        # 官方 /shodan/host/search：固定每页约 100；无 limit 参数
+        params = {"key": api_key, "query": query, "page": str(page or 1)}
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=45) as client:
                 resp = await client.get(f"{base}/shodan/host/search", params=params)
                 data = resp.json()
         except Exception as e:
             raise ValueError(f"Shodan 请求失败: {e}") from e
 
-        if "error" in data:
+        if isinstance(data, dict) and data.get("error"):
             raise ValueError(f"Shodan 错误: {data['error']}")
 
-        matches = data.get("matches", [])
+        matches = data.get("matches", []) if isinstance(data, dict) else []
         results = []
         for item in matches:
             http_data = item.get("http", {}) if isinstance(item.get("http"), dict) else {}
-            title = ""
-            if http_data:
-                title = http_data.get("title", "")
-            hostnames = item.get("hostnames", [])
+            title = http_data.get("title", "") if http_data else ""
+            hostnames = item.get("hostnames") or []
             host = hostnames[0] if hostnames else item.get("ip_str", "")
             results.append([
                 host,
@@ -66,7 +66,7 @@ class ShodanEngine(SearchEngine):
         return EngineResult(
             fields=["host", "ip", "port", "title", "domain", "org"],
             results=results,
-            size=data.get("total", 0),
+            size=int((data or {}).get("total") or 0) if isinstance(data, dict) else 0,
             page=page,
             engine="shodan",
         )
