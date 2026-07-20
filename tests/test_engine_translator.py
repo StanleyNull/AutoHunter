@@ -41,7 +41,7 @@ class TranslatorTests(unittest.TestCase):
     def test_domain_dot_stripped(self):
         self.assertIn('domain.suffix="edu.cn"', fofa_to_hunter('domain=".edu.cn"'))
         self.assertIn('hostname:"edu.cn"', fofa_to_shodan('domain=".edu.cn"'))
-        self.assertIn('domain:"edu.cn"', fofa_to_zoomeye('domain=".edu.cn"'))
+        self.assertIn('domain="edu.cn"', fofa_to_zoomeye('domain=".edu.cn"'))
 
     def test_zoomeye_fofa_like(self):
         q = fofa_to_zoomeye('title="cisco vpn" && country="CN"')
