@@ -1441,6 +1441,11 @@ class TaskRunner:
                 st["action"] = f"记录情报: {data.get('intel_kind','')}"
             elif kind == "worker_finish":
                 st["action"] = f"收尾: {data.get('verdict','')}"
+            elif kind == "auth_status":
+                st["auth"] = data.get("status") or ""
+                st["auth_kinds"] = ",".join(data.get("kinds") or [])
+                st["auth_label"] = (data.get("reason") or data.get("message") or "")[:160]
+                st["action"] = data.get("message") or f"凭据: {data.get('status')}"
 
         def emit(kind: str, data: dict):
             if cancel_event.is_set():
@@ -1458,6 +1463,9 @@ class TaskRunner:
                         )
                         # 观测异常：finding 实时落库失败必须留痕，否则真洞可能静默丢失。
                         ft.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_single_finding"))
+                    if kind == "auth_status":
+                        at = asyncio.create_task(self._persist_auth_status(target_id, dict(data)))
+                        at.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_auth_status"))
                     _update_live(kind, data)
                     pt = asyncio.create_task(bus.publish(
                         task_id, {"agent": "worker", "kind": kind, "target_id": target_id, **data}))
@@ -1491,7 +1499,12 @@ class TaskRunner:
                     "title": tgt.title or "", "is_edu": tgt.is_edu,
                     "source": tgt.source or "", "priority_reason": tgt.priority_reason or "",
                     "leaked_creds": tgt.leaked_creds or [],
+                    "auth_context": tgt.auth_context or None,
+                    "user_auth": tgt.auth_context or None,
                 }
+                if tgt.auth_status:
+                    self._live[target_id]["auth"] = (tgt.auth_status or {}).get("status") or ""
+                    self._live[target_id]["auth_label"] = (tgt.auth_status or {}).get("reason") or ""
                 try:
                     plan = playbook_router.route_target(
                         url=tgt.url or url,
@@ -1733,6 +1746,43 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "salvage",
                                 f"被取消的 worker 抢救落库 {saved} 个漏洞（目标 {target_id[:8]}）",
                                 level="warn", target_id=target_id, saved=saved)
+
+    async def _persist_auth_status(self, target_id: str, payload: dict) -> None:
+        """把凭据使用反馈落到 Target.auth_status + TaskEvent（无明文），刷新后仍可见。"""
+        if not payload:
+            return
+        safe = {
+            "used": bool(payload.get("used")),
+            "matched": bool(payload.get("matched")),
+            "status": str(payload.get("status") or "")[:40],
+            "kinds": list(payload.get("kinds") or [])[:8],
+            "matched_by": str(payload.get("matched_by") or "")[:40],
+            "binding_target": str(payload.get("binding_target") or "")[:200],
+            "reason": str(payload.get("reason") or payload.get("message") or "")[:300],
+            "cookie_names": list(payload.get("cookie_names") or [])[:30],
+            "header_names": list(payload.get("header_names") or [])[:20],
+        }
+        msg = str(payload.get("message") or "").strip()
+        if not msg:
+            from app.agents.auth_bootstrap import format_auth_status_message
+            msg = format_auth_status_message(safe)
+        try:
+            async with SessionLocal() as session:
+                tgt = await session.get(Target, target_id)
+                if not tgt:
+                    return
+                tgt.auth_status = safe
+                session.add(TaskEvent(
+                    task_id=self.task_id,
+                    agent="worker",
+                    kind="auth_status",
+                    level="info" if safe["status"] in ("injected", "login_ok") else "warn",
+                    message=msg[:500],
+                    payload={"target_id": target_id, "host": tgt.host, **safe},
+                ))
+                await session.commit()
+        except Exception:
+            logger.warning("persist_auth_status failed target=%s", target_id[:8], exc_info=True)
 
     async def _persist_single_finding(self, task_id: str, target_id: str, f: dict) -> None:
         """worker 每 submit 一个洞就实时落库，进程被打断时不丢洞。

@@ -176,23 +176,26 @@ def route_reason(route: SiteRoute) -> str:
 
 
 # 用户在自由文本里给出的登录凭据/登录态的识别特征。
-# 命中任一即认为用户「提供了可登录的凭据」，触发登录后深入引导。
+# 命中任一即认为用户「明确提供了可登录的凭据」，触发强制登录后深入引导。
 _CRED_SIGNALS: tuple[re.Pattern, ...] = (
+    # 账号/密码/口令 关键词（中英）后跟分隔符 + 值
     re.compile(r"(?i)(账号|帐号|账户|用户名|登录名|user(?:name)?|account|login)\s*[:：=]\s*\S+"),
     re.compile(r"(?i)(密码|口令|passwd|password|pwd|pass)\s*[:：=]\s*\S+"),
+    # 会话态：Cookie / Authorization / Bearer / 常见 session 名 / token
     re.compile(r"(?i)\bcookie\s*[:：]\s*\S+"),
     re.compile(r"(?i)\bauthorization\s*[:：]\s*\S+"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{10,}"),
     re.compile(r"(?i)\b(JSESSIONID|PHPSESSID|SESSION|SESSID|sid|token|access_token|CASTGC)\s*=\s*\S+"),
+    # 明确的「已有账号/登录态/凭据」表述
     re.compile(r"(?i)(已有|提供|给你|附上|如下).{0,6}(账号|帐号|账户|登录|凭据|凭证|cookie|token|session)"),
 )
 
 
 def detect_user_credentials(site_info: str) -> bool:
-    """判断用户自由文本里是否给出了可登录的账号密码 / 登录态。
+    """判断用户自由文本里是否明确给出了可登录的账号密码 / 登录态。
 
-    命中即触发 render_context 里的「登录后深入」引导块。宁可宽松命中——
-    误判成本只是多一段引导文字，漏判成本是忽略用户凭据不去登录。
+    命中即触发 render_context 里的「强制登录后深入」引导块。宁可宽松命中——
+    误判成本只是多一段引导文字，漏判成本是 agent 忽略用户凭据不去登录。
     """
     text = (site_info or "").strip()
     if not text:
@@ -200,23 +203,24 @@ def detect_user_credentials(site_info: str) -> bool:
     return any(p.search(text) for p in _CRED_SIGNALS)
 
 
-# 用户给出凭据时的引导块：登录成功后进系统深入，只登录不算漏洞。
+# 用户明确给出凭据时的强制引导块：登录成功后必须进系统深入，只登录不算交活。
 _USER_CRED_DIRECTIVE = (
-    "# 用户已提供登录凭据 —— 登录并进系统深入\n"
-    "上方「用户提供的目标相关信息」里含用户主动给出的账号密码 / Cookie / Token / 登录态，"
-    "这是用户授权你使用的入场券，请执行：\n"
-    "1. 【先登录】用给出的账号密码走登录接口，或把给出的 Cookie/Authorization 用 session_set 登记；"
-    "登记后 http_request 会自动携带登录态，不必每次手动拼 Cookie。\n"
-    "   ⚠ 登录若是表单/CAS/SSO：先 GET 登录页取隐藏字段（CAS 的 lt/execution、表单 csrf token），"
+    "# ⚠ 用户已提供登录凭据 —— 必须登录并进系统深入\n"
+    "上方「用户提供的目标相关信息」里含用户主动给出的账号密码 / Cookie / Token / 登录态。"
+    "这是用户明确授权你使用的入场券，必须执行以下动作，不得跳过：\n"
+    "1. 【先登录】用给出的账号密码走登录接口，或直接把给出的 Cookie/Authorization 用 session_set 登记；"
+    "拿到登录态后 session_set 会让后续 http_request 自动携带，不要每次手动拼 Cookie 也不要忘带。\n"
+    "   ⚠ 登录若是表单/CAS/SSO：先 GET 登录页取隐藏字段（CAS 的 lt/execution、表单的 csrf token），"
     "再带账号密码+隐藏字段 POST 登录接口，且 http_request 必须设 follow_redirects=true——"
-    "一次即可自动走完 302 连环跳、每跳 Cookie 自动入会话；看返回 redirect_chain/final_url 判成败，"
-    "别手动一跳跳拼 ticket、别在登录这步反复卡壳。\n"
+    "一次即可自动走完 lt→CASTGC→ST ticket→跨域 JSESSIONID 的 302 连环跳、每跳 Cookie 自动入会话；"
+    "看返回 redirect_chain/final_url 判成败，别手动一跳跳拼 ticket、别在登录这步反复卡壳。\n"
     "2. 【判成败】登录成功的判据：拿到 Set-Cookie/有效 session、能访问到需登录才可见的页面/接口（非跳登录、非 401/403）。"
-    "登录本身不是漏洞，不能就此 finish。\n"
-    "3. 【进系统深入】带着登录态进入系统内部逐项验证：后台/个人中心/管理菜单，测越权(IDOR/水平垂直)、"
-    "他人对象访问、敏感数据读取、上传/导入、敏感写操作、配置暴露、受限 API；实证到够格危害才 submit_finding。\n"
-    "4. 【登不进/无货】登录失败就记录现象；登进去但无可深挖危害，用 deepen_lead 写清下一轮拿这登录态该测哪里再 finish。\n"
-    "只登录成功 / 只进个人中心 / 只写「可能可以访问 X」都不算漏洞，需要登录态下的实证危害。不要修改任何账号密码。\n"
+    "确认登录成功后，登录本身不是洞、绝不能就此 finish。\n"
+    "3. 【进系统深入】带着登录态进入系统内部逐项深挖：翻后台/个人中心/管理菜单，测越权(IDOR/水平垂直)、"
+    "遍历他人对象、敏感数据读取、上传/导入、敏感写操作、配置与凭据泄露、受限 API。至少实证一项够格危害才 submit_finding。\n"
+    "4. 【登不进/无货】若凭据登录失败，明确记录失败现象；若登进去但确无可深挖危害，用 deepen_lead 写清"
+    "「已用此登录态到达哪里、下一轮该拿它打哪个系统/接口、取什么数据」再 finish，不要空手收摊。\n"
+    "纪律：只登录成功 / 只进个人中心 / 只写「可能可以访问 X」都不算洞；必须有登录态下的实锤危害。严禁改密。\n"
 )
 
 
@@ -260,8 +264,9 @@ def render_context(
             ]
     if site_info.strip():
         lines += ["", "# 用户提供的目标相关信息", site_info.strip()[:2000]]
+        # 用户明确给了账号密码/登录态 → 追加强制「登录后进系统深入」引导。
         if detect_user_credentials(site_info):
-            lines += ["", _USER_CRED_DIRECTIVE]
+            lines += ["", _USER_CRED_DIRECTIVE.rstrip()]
     if coverage_block.strip():
         lines += ["", coverage_block.strip()]
     if focus_note.strip():
@@ -353,7 +358,9 @@ def build_collab_overview(rows: list[dict]) -> dict | None:
     if not site_rows:
         return None
 
+    ACTIVE = {"queued", "assigned", "scanning"}
     RUNNING = {"assigned", "scanning"}
+    DONE = {"done", "skipped", "dead"}
 
     def _status_of(r: dict) -> str:
         s = (r.get("status") or "").lower()

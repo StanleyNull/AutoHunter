@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app.agents.history import compact_messages
 from app.agents.prompts import is_enterprise_src, normalize_worker_prompt_version, worker_system_prompt
+from app.agents import auth_bootstrap
 from app.config import worker_config
 from app import dedup
 from app.llm.client import LLMClient
@@ -122,7 +123,7 @@ class Worker:
         playbook = self._playbook_block()
         # 即使没有资产情报，只要有泄露凭证/情报库命中也要带出去（企业目标常无 school/org/title）。
         if not (school or org or title or source):
-            return site + playbook + self._creds_block() + self._intel_lib_block()
+            return site + playbook + self._user_auth_block() + self._creds_block() + self._intel_lib_block()
         owner_label = "候选归属单位/系统" if is_enterprise_src(self.src_type) else "候选归属学校"
         prefix = [b.rstrip() for b in (site, playbook) if b.strip()]
         lines = prefix + ["# 资产情报（搜集阶段提供，需你核实）"]
@@ -138,7 +139,29 @@ class Worker:
                 lines.append(f"- 通杀上下文：{priority_reason}")
             lines.append("注意：你只负责把当前站点的实际漏洞证据打出来，不要围绕该产品继续做通杀扩散判断。")
         lines.append("提交漏洞时，请核实归属（域名/备案/证书CN/页脚版权/FOFA org/登录页品牌）后把最终归属写进 submit_finding 的 owner 字段。")
-        return "\n".join(lines) + "\n\n" + self._creds_block() + self._intel_lib_block()
+        return "\n".join(lines) + "\n\n" + self._user_auth_block() + self._creds_block() + self._intel_lib_block()
+
+    def _user_auth_block(self) -> str:
+        """用户在凭据区提供的 Cookie/账密（系统已尝试后的回执）。"""
+        ctx = (self.target_meta or {}).get("user_auth") or (self.target_meta or {}).get("auth_context")
+        attempt = (self.target_meta or {}).get("auth_attempt")
+        if not ctx and not attempt:
+            return ""
+        return auth_bootstrap.user_auth_prompt_block(ctx, attempt)
+
+    def _bootstrap_user_auth(self) -> None:
+        """启动时确定性使用用户凭据：注入 Cookie/Bearer 或尝试账密登录，并 emit 反馈。"""
+        ctx = (self.target_meta or {}).get("user_auth") or (self.target_meta or {}).get("auth_context")
+        if not ctx:
+            return
+        result = auth_bootstrap.bootstrap_auth(self.executor, ctx, self.target)
+        payload = result.as_event()
+        self.target_meta["auth_attempt"] = payload
+        self._emit(
+            "auth_status",
+            message=auth_bootstrap.format_auth_status_message(result),
+            **payload,
+        )
 
     def _playbook_block(self) -> str:
         """目标打法路由：编排层生成的短路线块。"""
@@ -186,6 +209,14 @@ class Worker:
         return "\n".join(lines) + "\n\n"
 
     def run(self) -> WorkerResult:
+        # 用户凭据：在任何 LLM 轮次前强制尝试，结果写进 target_meta 供 prompt 与看板。
+        try:
+            self._bootstrap_user_auth()
+        except Exception as e:
+            self._emit("auth_status", used=True, matched=True, status="login_fail",
+                       kinds=[], reason=f"凭据启动异常: {type(e).__name__}: {e}"[:300],
+                       message=f"凭据启动异常: {e}")
+
         if self.deepen_context:
             user_content = self._intel_block() + self._duplicate_block() + self._deepen_brief()
             self._emit("worker_start", target=self.target, mode="deepen", prompt_version=self.prompt_version)
@@ -218,7 +249,7 @@ class Worker:
             try:
                 self._emit("llm_round_start", round=rounds)
                 tools = list(TOOL_SCHEMAS)
-                # 会话保持工具全模式开放：拿到凭证登录后固化登录态再深挖。
+                # 会话保持工具全模式开放：拿到泄露/用户凭证登录后固化登录态再深挖。
                 tools += SESSION_TOOL_SCHEMAS
                 if self._js_tool_enabled:
                     tools += JS_ANALYZER_TOOL_SCHEMAS
@@ -712,7 +743,11 @@ class Worker:
         }
 
     def _recovery_hint(self, tool: str, result: dict) -> str:
-        """工具失败时返回针对性恢复提示，帮模型在同流里快速纠偏而非从头推理。"""
+        """工具失败时返回针对性恢复提示，帮模型在同流里快速纠偏而非从头推理。
+
+        只在 result 不含 guidance 时才会被采用（调用方用 setdefault）。
+        针对 http_request 的各类状态码、run_shell 的各类失败、以及通用错误分别给提示。
+        """
         if result.get("ok") is True or result.get("guidance"):
             return ""
         if tool == "http_request":
@@ -740,7 +775,7 @@ class Worker:
             if result.get("timed_out"):
                 return "命令超时：可能命令本身耗时(如 nmap 全端口)或挂起。换更小范围或加 timeout 参数；别重复跑超时命令。"
             if result.get("blocked"):
-                return ""
+                return ""  # blocked 已有自己的 guidance
         if "参数" in str(result.get("error", "")) or "JSON" in str(result.get("error", "")):
             return "参数格式错误：检查工具参数是否合法 JSON、必填字段是否齐全。对照工具 schema 修正后重试一次。"
         return ""

@@ -57,6 +57,7 @@ const form = reactive({
   concurrency: 3,
   skip_site_recon: false,
 });
+const authBindings = ref([{ target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" }]);
 const original = reactive({
   base_url: "",
   model: "",
@@ -67,6 +68,57 @@ const original = reactive({
   page_size: 100,
 });
 const isSiteMode = computed(() => form.target_source === "site");
+const manualTargetLines = computed(() =>
+  form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean)
+);
+const bindingOptions = computed(() => {
+  const opts = [{ value: "*", label: "*（全部目标默认）" }];
+  for (const line of manualTargetLines.value) {
+    opts.push({ value: line, label: line });
+  }
+  return opts;
+});
+function emptyBinding() {
+  return { target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" };
+}
+function addBinding() {
+  authBindings.value.push(emptyBinding());
+}
+function removeBinding(i) {
+  authBindings.value.splice(i, 1);
+  if (!authBindings.value.length) authBindings.value.push(emptyBinding());
+}
+function exportAuthBindings() {
+  return authBindings.value
+    .map((b) => ({
+      target: (b.target || "*").trim() || "*",
+      username: (b.username || "").trim(),
+      password: (b.password || "").trim(),
+      cookie: (b.cookie || "").trim(),
+      authorization: (b.authorization || "").trim(),
+      login_url: (b.login_url || "").trim(),
+      raw: (b.raw || "").trim(),
+      note: (b.note || "").trim(),
+    }))
+    .filter((b) => b.username || b.password || b.cookie || b.authorization || b.raw);
+}
+function loadAuthBindings(task) {
+  const rows = Array.isArray(task?.auth_bindings) ? task.auth_bindings : [];
+  if (!rows.length) {
+    authBindings.value = [emptyBinding()];
+    return;
+  }
+  authBindings.value = rows.map((b) => ({
+    target: b.target || "*",
+    raw: b.raw || "",
+    username: b.username || "",
+    password: b.password || "",
+    cookie: b.cookie || "",
+    authorization: b.authorization || "",
+    login_url: b.login_url || "",
+    note: b.note || "",
+  }));
+}
 
 function fill(task) {
   if (!task) return;
@@ -91,6 +143,7 @@ function fill(task) {
   form.page_size = fofaCfg.page_size ?? 100;
   form.skip_site_recon = !!fofaCfg.skip_site_recon;
   form.concurrency = task.concurrency || 3;
+  loadAuthBindings(task);
   original.base_url = form.base_url;
   original.model = form.model;
   original.prompt_version = form.prompt_version;
@@ -138,6 +191,7 @@ async function save() {
     engine: form.engine,
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
+    auth_bindings: exportAuthBindings(),
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
     model_config_data: modelConfig,
@@ -197,12 +251,44 @@ async function save() {
 
       <label>漏洞类型（逗号分隔） <input v-model="form.vuln_types" /></label>
       <label v-if="!isSiteMode">FOFA 语法 / 搜集意图 <input v-model="form.fofa_query" /></label>
-      <label v-else>目标相关信息 / 协作重点 / 已有凭据
-        <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置，以及【已有的登录凭据】。给了凭据 Agent 会先前台测、再登录进系统内部深挖。&#10;例：后台在 /admin；已有账号 test / Test@123；或 Cookie: JSESSIONID=xxxx"></textarea>
+      <label v-else>目标相关信息 / 协作重点
+        <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>
       </label>
       <label>{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
         <textarea v-model="form.manual_targets" rows="3"></textarea>
       </label>
+
+      <section class="auth-bindings">
+        <div class="auth-bindings-head">
+          <strong>登录凭据（按目标绑定，可选）</strong>
+          <button type="button" class="linkish" @click="addBinding">+ 添加一条</button>
+        </div>
+        <p class="field-hint">不填不影响挖掘。填了会强制尝试并在看板反馈成败。</p>
+        <div v-for="(b, i) in authBindings" :key="i" class="auth-binding-row">
+          <div class="auth-binding-top">
+            <label>绑定目标
+              <select v-model="b.target">
+                <option v-for="opt in bindingOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+            </label>
+            <button type="button" class="icon-btn" title="删除" @click="removeBinding(i)">×</button>
+          </div>
+          <label>快捷粘贴
+            <textarea v-model="b.raw" rows="2" placeholder="Cookie: ... / Bearer ... / 账号+密码"></textarea>
+          </label>
+          <details>
+            <summary>结构化字段</summary>
+            <div class="auth-grid">
+              <label>账号 <input v-model="b.username" autocomplete="off" /></label>
+              <label>密码 <input v-model="b.password" type="password" autocomplete="new-password" /></label>
+              <label class="span2">Cookie <input v-model="b.cookie" /></label>
+              <label class="span2">Authorization <input v-model="b.authorization" /></label>
+              <label class="span2">登录 URL <input v-model="b.login_url" /></label>
+            </div>
+          </details>
+        </div>
+      </section>
+
       <label v-if="isSiteMode" class="check-line">
         <input type="checkbox" v-model="form.skip_site_recon" />
         跳过入口盘点侦察（省 token）

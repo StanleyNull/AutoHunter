@@ -53,6 +53,8 @@ class Task(Base):
     target_source: Mapped[str] = mapped_column(String(20), default="fofa")  # fofa / manual / both / site
     fofa_query: Mapped[str] = mapped_column(Text, default="")
     manual_targets: Mapped[list] = mapped_column(JSON, default=list)
+    # 用户登录凭据绑定列表：[{target, username, password, cookie, authorization, login_url, raw, note}]
+    auth_bindings: Mapped[list] = mapped_column(JSON, default=list)
     model_config_json: Mapped[dict] = mapped_column("model_config", JSON, default=dict)
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
@@ -100,6 +102,10 @@ class Target(Base):
     deepen_count: Mapped[int] = mapped_column(Integer, default=0)
     # 搜集阶段顺带查到的、过滤打分后的该域泄露凭证（喂给 worker 作额外攻击面）。
     leaked_creds: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 用户凭据：入队时从 Task.auth_bindings 匹配写入；worker 启动 bootstrap 用。
+    auth_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 最近一次凭据使用反馈（无明文）：status/kinds/reason/...
+    auth_status: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     assigned_worker: Mapped[str] = mapped_column(String(64), default="")
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

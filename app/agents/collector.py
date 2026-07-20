@@ -28,6 +28,16 @@ from app.agents.prompts import is_enterprise_src
 from app.db.models import Target, Task
 from app.engines import get_engine, EngineResult, QuakeRateLimitError
 from app.tools.leakcreds import query_leaked_creds
+from app.agents import auth_bootstrap
+
+
+def _auth_context_for(task: Task, url: str) -> dict | None:
+    """入队时按 Task.auth_bindings 匹配目标；无凭据区则返回 None（不写字段）。"""
+    bindings = getattr(task, "auth_bindings", None) or []
+    if not auth_bootstrap.has_any_bindings(bindings):
+        return None
+    manual = [str(t).strip() for t in (task.manual_targets or []) if str(t).strip()]
+    return auth_bootstrap.resolve_auth_context_for_target(bindings, url, manual)
 from app.llm.client import LLMClient, LLMError
 from app.settings_service import llm_client_for_task_optional, resolve_engine_config, resolve_skip_score_threshold
 
@@ -338,7 +348,8 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                 continue
             seen.add(host)
             session.add(Target(task_id=task.id, url=_ensure_url(host), host=host,
-                               source="manual", status="queued"))
+                               source="manual", status="queued",
+                               auth_context=_auth_context_for(task, _ensure_url(host))))
             added += 1
         task.manual_targets = []  # 消费掉，避免重复
 
@@ -386,6 +397,7 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
                 status="queued",
                 priority_score=route.priority,
                 priority_reason=site_collab.route_reason(route),
+                auth_context=_auth_context_for(task, url),
             ))
             added += 1
     return added
@@ -728,6 +740,7 @@ async def _fofa_collect(
             school=c.get("school", ""),
             priority_score=score, priority_reason=reason,
             leaked_creds=c.get("leaked_creds") or None,
+            auth_context=_auth_context_for(task, c["url"]),
         ))
         if cluster_item:
             cluster_item["pending"] += 1

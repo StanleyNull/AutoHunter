@@ -76,6 +76,9 @@ _MIGRATIONS = [
     ("killsweeps", "affected_table", "JSON DEFAULT '[]'"),
     ("system_settings", "engines", "JSON DEFAULT '{}'"),
     ("tasks", "engine", "VARCHAR(20) DEFAULT ''"),
+    ("tasks", "auth_bindings", "JSON"),
+    ("targets", "auth_context", "JSON"),
+    ("targets", "auth_status", "JSON"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。

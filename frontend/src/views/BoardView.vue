@@ -261,6 +261,7 @@ const IMPORTANT_KINDS = new Set([
   "killsweep_invalid", "killsweep_cancelled",
   "llm_error", "quota_stop", "reclaim", "recover", "workers_cancelled",
   "tool_exception",
+  "auth_status",
 ]);
 const NOISE_KINDS = new Set([
   "ping",
@@ -317,9 +318,34 @@ function fmtEvent(ev) {
     case "killsweep_invalid": return `通杀记录已标记无效：${d.product || ""}`;
     case "llm_error": return `⚠ LLM 调用失败: ${d.error || ""}`;
     case "tool_exception": return `工具异常: ${d.tool || ""} ${(d.error || "").slice(0, 80)}`;
+    case "auth_status": {
+      const kinds = (d.kinds || []).join(",") || "-";
+      const st = d.status || "?";
+      if (d.message) return d.message;
+      if (st === "injected") return `凭据[${kinds}] 已注入`;
+      if (st === "login_ok") return `凭据[${kinds}] 登录成功`;
+      if (st === "login_fail") return `凭据[${kinds}] 登录失败：${(d.reason || "").slice(0, 100)}`;
+      return `凭据未使用：${(d.reason || "").slice(0, 100)}`;
+    }
     case "ping": return null;
     default: return ev.message || `${ev.kind || ""}`;
   }
+}
+
+function authBadge(w) {
+  const st = w?.auth || "";
+  if (!st) return "";
+  if (st === "injected") return "凭据·已注入";
+  if (st === "login_ok") return "凭据·登录成功";
+  if (st === "login_fail") return "凭据·登录失败";
+  if (st === "unused") return "凭据·未匹配";
+  return `凭据·${st}`;
+}
+function authBadgeClass(w) {
+  const st = w?.auth || "";
+  if (st === "injected" || st === "login_ok") return "ok";
+  if (st === "login_fail") return "bad";
+  return "muted";
 }
 
 function phaseStateText(state) {
@@ -1064,6 +1090,7 @@ function parseEventTs(ts) {
           <div class="wc-top">
             <span class="wc-host">{{ w.host }}</span>
             <span class="wc-meta">
+              <span v-if="authBadge(w)" class="wc-auth" :class="authBadgeClass(w)" :title="w.auth_label || ''">{{ authBadge(w) }}</span>
               <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ w.score }}</span>
               第 {{ w.round }} 轮 · {{ elapsed(w.started_at) }}
             </span>

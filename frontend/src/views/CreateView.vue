@@ -20,6 +20,8 @@ const form = reactive({
   skip_site_recon: false,
   skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
 });
+const authBindings = ref([{ target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" }]);
+
 const inherited = reactive({
   base_url: "",
   model: "",
@@ -32,14 +34,52 @@ const inherited = reactive({
 const isSiteMode = computed(() => form.target_source === "site");
 const isFofaMode = computed(() => form.target_source === "fofa");
 
-// 粗略识别用户是否在方向说明里给了登录凭据（账号密码 / Cookie / Token）。
-// 命中即默认帮用户勾上「跳过入口盘点」——有凭据可直接登录进系统，泛侦察费 token。
+const manualTargetLines = computed(() =>
+  form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean)
+);
+
+const bindingOptions = computed(() => {
+  const opts = [{ value: "*", label: "*（全部目标默认）" }];
+  for (const line of manualTargetLines.value) {
+    opts.push({ value: line, label: line });
+  }
+  return opts;
+});
+
+function emptyBinding() {
+  return { target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" };
+}
+function addBinding() {
+  authBindings.value.push(emptyBinding());
+}
+function removeBinding(i) {
+  authBindings.value.splice(i, 1);
+  if (!authBindings.value.length) authBindings.value.push(emptyBinding());
+}
+function exportAuthBindings() {
+  return authBindings.value
+    .map((b) => ({
+      target: (b.target || "*").trim() || "*",
+      username: (b.username || "").trim(),
+      password: (b.password || "").trim(),
+      cookie: (b.cookie || "").trim(),
+      authorization: (b.authorization || "").trim(),
+      login_url: (b.login_url || "").trim(),
+      raw: (b.raw || "").trim(),
+      note: (b.note || "").trim(),
+    }))
+    .filter((b) => b.username || b.password || b.cookie || b.authorization || b.raw);
+}
+
+// 粗略识别用户是否在方向说明或凭据区给了登录凭据。
 const looksHasCreds = computed(() => {
   const t = (form.fofa_query || "");
-  return /(账号|帐号|账户|用户名|user(name)?|密码|pass(word|wd)?|cookie|token|authorization|bearer|jsessionid|session|登录态|凭据|凭证)/i.test(t);
+  if (/(账号|帐号|账户|用户名|user(name)?|密码|pass(word|wd)?|cookie|token|authorization|bearer|jsessionid|session|登录态|凭据|凭证)/i.test(t)) {
+    return true;
+  }
+  return exportAuthBindings().length > 0;
 });
-watch([() => form.fofa_query, isSiteMode], () => {
-  // 只在用户没手动调过开关时，才自动跟随「是否检测到凭据」。
+watch([() => form.fofa_query, isSiteMode, authBindings], () => {
   if (isSiteMode.value && !form.skip_recon_touched) {
     form.skip_site_recon = looksHasCreds.value;
   }
@@ -68,6 +108,7 @@ async function submit() {
     engine: form.engine,
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
+    auth_bindings: exportAuthBindings(),
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
     model_config_data: modelConfig,
@@ -146,12 +187,47 @@ onMounted(async () => {
             ? (form.intent_mode === 'intent' ? '例：找某集团 OA/CRM/ERP/API/运维后台资产' : 'domain=&quot;example.com&quot; || cert=&quot;示例集团&quot; || org=&quot;示例集团&quot;')
             : (form.intent_mode === 'intent' ? '例：找全国高校的统一身份认证登录系统' : 'title=&quot;统一身份认证&quot; && domain=&quot;.edu.cn&quot;')" />
       </label>
-      <label v-else>目标相关信息 / 协作重点 / 已有凭据
-        <textarea v-model="form.fofa_query" rows="4" placeholder="可写：重点方向、后台位置、以及【已有的登录凭据】。给了凭据 Agent 会先在前台测，再登录进系统内部深挖（越权/敏感数据/上传/写操作）。&#10;例：后台在 /admin，重点测 API、越权、上传。&#10;已有账号：test / Test@123&#10;或登录态：Cookie: JSESSIONID=xxxx（或 Authorization: Bearer xxxx）"></textarea>
+      <label v-else>目标相关信息 / 协作重点
+        <textarea v-model="form.fofa_query" rows="4" placeholder="可写：重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。&#10;例：后台在 /admin，重点测 API、越权、上传。"></textarea>
       </label>
       <label v-if="!isFofaMode">{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
         <textarea v-model="form.manual_targets" rows="3" :placeholder="isSiteMode ? 'https://target.example.com/' : 'http://211.84.165.243/'"></textarea>
       </label>
+
+      <section class="auth-bindings">
+        <div class="auth-bindings-head">
+          <strong>登录凭据（按目标绑定，可选）</strong>
+          <button type="button" class="linkish" @click="addBinding">+ 添加一条</button>
+        </div>
+        <p class="field-hint">
+          不填则完全不影响挖掘。填了会<strong>强制尝试</strong>：Cookie/Token 直接注入会话，账密自动走登录；
+          成败在看板目标卡徽章 + 活动流里反馈。绑定 <code>*</code> 表示该任务下匹配到的目标都用。
+        </p>
+        <div v-for="(b, i) in authBindings" :key="i" class="auth-binding-row">
+          <div class="auth-binding-top">
+            <label>绑定目标
+              <select v-model="b.target">
+                <option v-for="opt in bindingOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+            </label>
+            <button type="button" class="icon-btn" title="删除" @click="removeBinding(i)">×</button>
+          </div>
+          <label>快捷粘贴（系统自动分辨 Cookie / Bearer / 账密）
+            <textarea v-model="b.raw" rows="2" placeholder="例：Cookie: JSESSIONID=xxx&#10;或 Authorization: Bearer eyJ...&#10;或 账号: test  密码: Test@123"></textarea>
+          </label>
+          <details>
+            <summary>展开填结构化字段</summary>
+            <div class="auth-grid">
+              <label>账号 <input v-model="b.username" autocomplete="off" /></label>
+              <label>密码 <input v-model="b.password" type="password" autocomplete="new-password" /></label>
+              <label class="span2">Cookie 串 <input v-model="b.cookie" placeholder="JSESSIONID=...; other=..." /></label>
+              <label class="span2">Authorization <input v-model="b.authorization" placeholder="Bearer eyJ..." /></label>
+              <label class="span2">登录 URL（可选） <input v-model="b.login_url" placeholder="https://host/login" /></label>
+            </div>
+          </details>
+        </div>
+      </section>
+
       <label v-if="isSiteMode" class="check-line">
         <input type="checkbox" v-model="form.skip_site_recon" @change="form.skip_recon_touched = true" />
         跳过入口盘点侦察（省 token）
@@ -160,6 +236,9 @@ onMounted(async () => {
         默认会先派一条「入口盘点」路线泛扒首页/robots/API 文档摸清全站入口。<strong>已给登录凭据时不必这样</strong>——
         Agent 可直接登录进系统，从内部功能发现入口，泛侦察纯属浪费 token。勾选后跳过它（前端 JS/密钥侦察仍保留）。
         检测到你填了账号密码/Cookie 会自动勾上，可手动取消。
+      </p>
+      <p v-if="isSiteMode && looksHasCreds && !(exportAuthBindings().length)" class="field-hint warn-hint">
+        协作备注里像有凭据，但「登录凭据区」为空——请挪到凭据区，才能强制尝试并在看板反馈。
       </p>
       <details :open="adv">
         <summary @click="adv = !adv">高级：模型 / FOFA / 并发（留空用服务端默认）</summary>

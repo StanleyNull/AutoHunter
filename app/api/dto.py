@@ -28,6 +28,18 @@ class EngineConfigDTO(BaseModel):
     base_url: str = ""
 
 
+class AuthBindingDTO(BaseModel):
+    """一条用户凭据绑定：可绑 URL/host/*，字段可空，由后端 normalize 分辨类型。"""
+    target: str = "*"
+    username: str = ""
+    password: str = ""
+    cookie: str = ""
+    authorization: str = ""
+    login_url: str = ""
+    raw: str = ""
+    note: str = ""
+
+
 class CreateTaskRequest(BaseModel):
     name: str
     src_type: str = "edusrc"
@@ -37,6 +49,7 @@ class CreateTaskRequest(BaseModel):
     engine: str = ""                                           # 搜索引擎：fofa/quake/hunter/...
     fofa_query: str = ""
     manual_targets: list[str] = Field(default_factory=list)
+    auth_bindings: list[AuthBindingDTO] = Field(default_factory=list)
     model_config_data: ModelConfigDTO = Field(default_factory=ModelConfigDTO)
     fofa_config: FofaConfigDTO = Field(default_factory=FofaConfigDTO)
     engine_config: EngineConfigDTO = Field(default_factory=EngineConfigDTO)  # 引擎 Key/URL
@@ -73,6 +86,7 @@ class UpdateTaskRequest(BaseModel):
     engine: Optional[str] = None                                 # 切换引擎
     fofa_query: Optional[str] = None
     manual_targets: Optional[list[str]] = None
+    auth_bindings: Optional[list[AuthBindingDTO]] = None
     model_config_data: Optional[PartialModelConfigDTO] = None
     fofa_config: Optional[PartialFofaConfigDTO] = None
     engine_config: Optional[PartialEngineConfigDTO] = None
@@ -109,6 +123,7 @@ class TaskResponse(BaseModel):
     concurrency: int
     src_rules: str = ""
     manual_targets: list[str] = Field(default_factory=list)
+    auth_bindings: list[dict] = Field(default_factory=list)
     model_config_data: dict = Field(default_factory=dict)
     fofa_config: dict = Field(default_factory=dict)
     engine_config: dict = Field(default_factory=dict)

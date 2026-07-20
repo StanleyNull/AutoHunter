@@ -29,6 +29,7 @@ _STREAM_IMPORTANT_KINDS = frozenset({
     "review_done", "review_deferred", "review_cancelled",
     "reclaim", "recover", "workers_cancelled", "quota_stop",
     "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
+    "auth_status",
 })
 
 
@@ -149,6 +150,37 @@ def _public_fofa_config(task: Task) -> dict:
     }
 
 
+def _dump_auth_bindings(items) -> list[dict]:
+    """把创建/更新请求里的凭据绑定规范成可落库的 list[dict]（保留原文便于回显编辑）。"""
+    out: list[dict] = []
+    for item in items or []:
+        d = item.model_dump() if hasattr(item, "model_dump") else dict(item or {})
+        target = str(d.get("target") or "*").strip() or "*"
+        row = {
+            "target": target,
+            "username": str(d.get("username") or "").strip(),
+            "password": str(d.get("password") or "").strip(),
+            "cookie": str(d.get("cookie") or "").strip(),
+            "authorization": str(d.get("authorization") or "").strip(),
+            "login_url": str(d.get("login_url") or "").strip(),
+            "raw": str(d.get("raw") or "").strip(),
+            "note": str(d.get("note") or "").strip(),
+        }
+        if not any(row[k] for k in ("username", "password", "cookie", "authorization", "raw")):
+            continue
+        out.append(row)
+    return out
+
+
+def _public_auth_bindings(task: Task, observer: bool = False) -> list[dict]:
+    if observer:
+        return []
+    rows = task.auth_bindings or []
+    if not isinstance(rows, list):
+        return []
+    return [dict(x) for x in rows if isinstance(x, dict)]
+
+
 def _task_to_dto(t: Task, stats: TaskStats | None = None,
                  pending_user_review: int = 0, observer: bool = False) -> TaskResponse:
     model_config = _public_model_config(t)
@@ -160,6 +192,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         engine=t.engine or "", fofa_query="" if observer else t.fofa_query, concurrency=t.concurrency,
         src_rules="" if observer else (t.src_rules or ""),
         manual_targets=[] if observer else (t.manual_targets or []),
+        auth_bindings=_public_auth_bindings(t, observer=observer),
         model_config_data=model_config,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
         engine_config={} if observer else {"engine": t.engine or ""},
@@ -251,6 +284,7 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         name=req.name, src_type=normalize_src_type(req.src_type), vuln_types=req.vuln_types,
         src_rules=req.src_rules, target_source=req.target_source,
         engine=engine_name, fofa_query=req.fofa_query, manual_targets=req.manual_targets,
+        auth_bindings=_dump_auth_bindings(req.auth_bindings),
         model_config_json=req.model_config_data.model_dump(exclude_defaults=True),
         fofa_config=fofa_cfg, concurrency=req.concurrency,
         status="created",
@@ -388,6 +422,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         task.engine = req.engine
     if req.manual_targets is not None:
         task.manual_targets = [t.strip() for t in req.manual_targets if str(t).strip()]
+    if req.auth_bindings is not None:
+        task.auth_bindings = _dump_auth_bindings(req.auth_bindings)
     if req.concurrency is not None:
         task.concurrency = max(1, min(int(req.concurrency), 20))
 
