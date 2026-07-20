@@ -90,8 +90,8 @@ def _is_forced_tool_choice_unsupported(err: LLMError) -> bool:
 
     并非所有模型都支持 OpenAI 的 `tool_choice={"type":"function",...}`（强制调用指定函数）：
     - DeepSeek thinking：明确报 "thinking mode does not support this tool_choice"；
-    - 部分代理网关(vveai/gpt.ge 等)的 GLM/Qwen/Gemini：直接返回 HTTP 400 + "API 调用参数有误"
-      (如 code=1210)，或提示 tool_choice/parameter invalid。
+    - 部分代理网关(vveai/gpt.ge/goaiaog 等)的 Grok/GLM/Qwen/Gemini：直接返回 HTTP 400/422
+      （如 Upstream error: 422、code=1210 "API 调用参数有误"），或提示 tool_choice/parameter invalid。
     命中这些时中心降级为 auto 重试，避免 reviewer/collector 这类强制调用方在非 DeepSeek 模型上
     直接失败（表现为审核异常 kind=unknown）。
     """
@@ -99,14 +99,17 @@ def _is_forced_tool_choice_unsupported(err: LLMError) -> bool:
     if "thinking mode does not support this tool_choice" in text:
         return True
     status = getattr(err, "status", None)
-    if str(status) == "400" or " 400 " in f" {text} ":
-        # 400 且看起来是参数/工具选择相关（含 tool_choice 关键词，或通用“参数有误”），
-        # 就当作 forced tool_choice 不兼容，降级重试一次。降级后若仍失败会走正常报错。
+    # 400/422：网关常把不支持的 forced tool_choice 包装成参数错误或 Upstream error。
+    if str(status) in ("400", "422") or " 400 " in f" {text} " or " 422 " in f" {text} ":
         markers = (
             "tool_choice", "tool choice", "function call",
             "参数有误", "参数错误", "invalid parameter", "invalid_request",
             "unsupported", "not support", "unrecognized", "unexpected",
+            "upstream error", "unprocessable",
         )
+        # 422 Upstream error 几乎总是网关对请求形态的拒绝；对 forced tool_choice 场景直接降级。
+        if str(status) == "422" or "upstream error" in text or "unprocessable" in text:
+            return True
         return any(m in text for m in markers)
     return False
 
@@ -327,7 +330,7 @@ class LLMClient:
                     # 这些模型仍支持 tools + auto，故中心降级为 auto 重试，让 reviewer/collector 等
                     # 强制调用方在非 DeepSeek 模型上也能正常出结果，而不是 kind=unknown 直接失败。
                     logger.warning(
-                        "LLM forced tool_choice rejected (thinking/400); falling back to auto "
+                        "LLM forced tool_choice rejected (thinking/400/422); falling back to auto "
                         "(model=%s, detail=%s)",
                         self.config.model, last_exc.detail[:300],
                     )
