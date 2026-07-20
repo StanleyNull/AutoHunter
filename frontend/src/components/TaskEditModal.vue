@@ -68,6 +68,8 @@ const original = reactive({
   page_size: 100,
 });
 const isSiteMode = computed(() => form.target_source === "site");
+const isFofaMode = computed(() => form.target_source === "fofa");
+const showAuthBindings = computed(() => !isFofaMode.value);
 const manualTargetLines = computed(() =>
   form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean)
 );
@@ -191,7 +193,7 @@ async function save() {
     engine: form.engine,
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
-    auth_bindings: exportAuthBindings(),
+    auth_bindings: showAuthBindings.value ? exportAuthBindings() : [],
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
     model_config_data: modelConfig,
@@ -258,7 +260,7 @@ async function save() {
         <textarea v-model="form.manual_targets" rows="3"></textarea>
       </label>
 
-      <section class="auth-bindings">
+      <section v-if="showAuthBindings" class="auth-bindings">
         <div class="auth-bindings-head">
           <strong>登录凭据（按目标绑定，可选）</strong>
           <button type="button" class="linkish" @click="addBinding">+ 添加一条</button>

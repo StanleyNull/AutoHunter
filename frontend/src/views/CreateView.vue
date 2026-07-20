@@ -33,6 +33,8 @@ const inherited = reactive({
 });
 const isSiteMode = computed(() => form.target_source === "site");
 const isFofaMode = computed(() => form.target_source === "fofa");
+// 凭据区只对「用户自己指定目标」有意义：手动 / 两者 / 单站。纯 FOFA 自动搜不展示。
+const showAuthBindings = computed(() => !isFofaMode.value);
 
 const manualTargetLines = computed(() =>
   form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean)
@@ -108,7 +110,7 @@ async function submit() {
     engine: form.engine,
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
-    auth_bindings: exportAuthBindings(),
+    auth_bindings: showAuthBindings.value ? exportAuthBindings() : [],
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
     model_config_data: modelConfig,
@@ -194,7 +196,7 @@ onMounted(async () => {
         <textarea v-model="form.manual_targets" rows="3" :placeholder="isSiteMode ? 'https://target.example.com/' : 'http://211.84.165.243/'"></textarea>
       </label>
 
-      <section class="auth-bindings">
+      <section v-if="showAuthBindings" class="auth-bindings">
         <div class="auth-bindings-head">
           <strong>登录凭据（按目标绑定，可选）</strong>
           <button type="button" class="linkish" @click="addBinding">+ 添加一条</button>
