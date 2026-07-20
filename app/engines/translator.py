@@ -99,6 +99,14 @@ _FOFA_TO_QUAKE = {
 }
 
 
+def _strip_domain_dot(v: str) -> str:
+    """FOFA domain=\".edu.cn\" 的前导点在部分引擎要去掉。"""
+    v = (v or "").strip()
+    while v.startswith("."):
+        v = v[1:]
+    return v
+
+
 def fofa_to_quake(query: str) -> str:
     tokens, joins = parse_fofa_query(query)
     if not tokens:
@@ -114,6 +122,8 @@ def fofa_to_quake(query: str) -> str:
         if f == "":
             continue
         op, v = t["op"], t["value"]
+        if t["field"] in ("domain", "host"):
+            v = _strip_domain_dot(v)
         if t["field"] == "port":
             v = (v.lstrip("0") or "0")
             piece = f"{f}:{v}"
@@ -168,6 +178,8 @@ def fofa_to_hunter(query: str) -> str:
     for i, t in enumerate(tokens):
         f = _FOFA_TO_HUNTER.get(t["field"], t["field"])
         op, v = t["op"], t["value"]
+        if t["field"] in ("domain", "host"):
+            v = _strip_domain_dot(v)
         # Hunter: = 模糊，== 精确；FOFA =~ 接近模糊 =
         if t["field"] == "port":
             piece = f'{f}="{v}"' if _eq_ops(op) else f'{f}!="{v}"'
@@ -218,6 +230,8 @@ def fofa_to_zoomeye(query: str) -> str:
     for i, t in enumerate(tokens):
         f = _FOFA_TO_ZOOMEYE.get(t["field"], t["field"])
         op, v = t["op"], t["value"]
+        if t["field"] in ("domain", "host"):
+            v = _strip_domain_dot(v)
         if t["field"] == "port":
             piece = f'{f}={v}' if _eq_ops(op) else f'{f}!={v}'
         elif op == "==":
@@ -274,6 +288,8 @@ def fofa_to_shodan(query: str) -> str:
         if f == "":
             continue
         op, v = t["op"], t["value"]
+        if t["field"] in ("domain", "host"):
+            v = _strip_domain_dot(v)
         if t["field"] == "ip" and "/" not in v:
             v = f"{v}/32"
         if t["field"] == "port":
@@ -282,10 +298,10 @@ def fofa_to_shodan(query: str) -> str:
             # Shodan country 要两字母码；非码值降级为全文
             piece = f'"{v}"'
         elif _eq_ops(op):
-            piece = f'{f}:"{v}"' if (" " in v or not v.isalnum()) else f"{f}:{v}"
-            # hostname / 带点域名需要引号更稳
             if t["field"] in ("domain", "host", "title", "body", "org", "server", "app", "header") or "." in v or " " in v:
                 piece = f'{f}:"{v}"'
+            else:
+                piece = f'{f}:"{v}"' if (" " in v or not v.isalnum()) else f"{f}:{v}"
         elif _neq_ops(op):
             piece = f'-{f}:"{v}"'
         else:
@@ -332,6 +348,8 @@ def fofa_to_censys(query: str) -> str:
     for i, t in enumerate(tokens):
         f = _FOFA_TO_CENSYS.get(t["field"], t["field"])
         op, v = t["op"], t["value"]
+        if t["field"] in ("domain", "host"):
+            v = _strip_domain_dot(v)
         if t["field"] == "port":
             v = v.lstrip("0") or "0"
             piece = f"{f}:{v}"
