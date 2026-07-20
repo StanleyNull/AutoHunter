@@ -376,12 +376,94 @@ _FOFA_TRANSLATORS = {
 }
 
 
+# 冒号语法：Quake / Shodan / Censys（field:value）
+_COLON_FIELD_RE = re.compile(r"[a-zA-Z_][\w.]*\s*:")
+
+# 各引擎「一眼能认出」的原生字段/写法；命中则整句原样透传，不做 FOFA 翻译
+_HUNTER_NATIVE_RE = re.compile(
+    r"(?i)\b("
+    r"web\.title|web\.body|web\.app|web\.icon|web\.status_code|web\.similar|web\.tag|"
+    r"domain\.suffix|ip\.country|ip\.city|ip\.company|ip\.tag|header\.server|"
+    r"cert\.subject_org|cert\.is_trust|icp\.number|is_web"
+    r")\b"
+)
+_ZOOMEYE_NATIVE_RE = re.compile(
+    r"(?i)(\bhostname\s*=|\biconhash\s*=|\bbanner\s*=|\borganization\.name\b|\bheader\.server\.name\b)"
+)
+_SHODAN_NATIVE_RE = re.compile(
+    r"(?i)\b("
+    r"http\.title|http\.html|http\.favicon|http\.component|ssl\.cert|"
+    r"product:|os:|net:|hostname:|port:|org:|country:|city:"
+    r")"
+)
+_CENSYS_NATIVE_RE = re.compile(
+    r"(?i)\b(services\.|dns\.names|autonomous_system\.|location\.(country|city)|host\.services\.)"
+)
+_QUAKE_NATIVE_RE = re.compile(
+    r"(?i)(\b(AND|OR|NOT)\b|"
+    r"service\.http\.|service\.name|location\.|favicon:|hostname:|transport:)"
+)
+
+
+def looks_like_fofa_syntax(query: str) -> bool:
+    """粗判是否像 FOFA 字段条件（field=\"value\" / != / =~）。"""
+    tokens, _ = parse_fofa_query(query)
+    return bool(tokens)
+
+
+def looks_like_native_syntax(engine: str, query: str) -> bool:
+    """判断是否已是目标引擎的原生语法 → 应原样透传。"""
+    q = (query or "").strip()
+    if not q:
+        return False
+    eng = (engine or "").strip().lower()
+
+    has_colon = bool(_COLON_FIELD_RE.search(q))
+    has_fofa = looks_like_fofa_syntax(q)
+
+    if eng == "quake":
+        # Quake DSL 以 field:value + AND/OR 为主；没有 FOFA 的 = 条件即视为原生
+        if has_colon and not has_fofa:
+            return True
+        return bool(_QUAKE_NATIVE_RE.search(q) and has_colon)
+
+    if eng == "shodan":
+        if has_colon and not has_fofa:
+            return True
+        return bool(_SHODAN_NATIVE_RE.search(q))
+
+    if eng == "censys":
+        if _CENSYS_NATIVE_RE.search(q):
+            return True
+        return has_colon and not has_fofa
+
+    if eng == "hunter":
+        # Hunter 也是 field="value"，靠特有字段识别，避免把 web.title 再翻坏
+        return bool(_HUNTER_NATIVE_RE.search(q))
+
+    if eng == "zoomeye":
+        # v2 与 FOFA 很像；出现 hostname=/iconhash= 等视为已按 ZoomEye 书写
+        return bool(_ZOOMEYE_NATIVE_RE.search(q))
+
+    return False
+
+
 def translate_fofa_query(query: str, target_engine: str) -> str:
-    """将 FOFA 语法翻译为目标引擎语法。目标为 fofa / 空则原样返回。"""
+    """查询语法适配：
+
+    - 目标为 fofa：原样
+    - 已是目标引擎原生语法：原样透传（用户直接写 Quake/Hunter/… 也能用）
+    - 像 FOFA：翻译成目标引擎
+    - 其它无法识别：原样透传，避免误伤
+    """
     if not query:
         return query
     engine = (target_engine or "fofa").strip().lower()
     if engine in ("", "fofa"):
+        return query
+    if looks_like_native_syntax(engine, query):
+        return query
+    if not looks_like_fofa_syntax(query):
         return query
     translator = _FOFA_TRANSLATORS.get(engine)
     if translator is None:
@@ -391,9 +473,3 @@ def translate_fofa_query(query: str, target_engine: str) -> str:
         return out if out else query
     except Exception:
         return query
-
-
-def looks_like_fofa_syntax(query: str) -> bool:
-    """粗判是否像 FOFA 字段条件（供 UI / 调试）。"""
-    tokens, _ = parse_fofa_query(query)
-    return bool(tokens)

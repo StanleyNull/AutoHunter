@@ -69,10 +69,32 @@ class TranslatorTests(unittest.TestCase):
         q = 'title="x" && domain=".edu.cn"'
         self.assertEqual(translate_fofa_query(q, "fofa"), q)
 
-    def test_dispatch(self):
-        q = 'domain="example.com"'
-        self.assertIn("domain:", translate_fofa_query(q, "quake"))
-        self.assertIn("domain.suffix", translate_fofa_query(q, "hunter"))
+    def test_native_passthrough_quake(self):
+        native = 'title:"登录" AND domain:"edu.cn" AND port:443'
+        self.assertEqual(translate_fofa_query(native, "quake"), native)
+
+    def test_native_passthrough_hunter(self):
+        native = 'web.title="登录" && domain.suffix="edu.cn"'
+        self.assertEqual(translate_fofa_query(native, "hunter"), native)
+
+    def test_native_passthrough_shodan(self):
+        native = 'http.title:"nginx" port:443 country:CN'
+        self.assertEqual(translate_fofa_query(native, "shodan"), native)
+
+    def test_native_passthrough_censys(self):
+        native = 'services.http.response.html_title:"Login" and services.port:443'
+        self.assertEqual(translate_fofa_query(native, "censys"), native)
+
+    def test_native_passthrough_zoomeye(self):
+        native = 'hostname="www.example.com" && title="login"'
+        self.assertEqual(translate_fofa_query(native, "zoomeye"), native)
+
+    def test_fofa_still_translates_on_quake(self):
+        q = 'title="登录" && domain=".edu.cn"'
+        out = translate_fofa_query(q, "quake")
+        self.assertIn('title:"登录"', out)
+        self.assertIn('domain:"edu.cn"', out)
+        self.assertNotEqual(out, q)
 
 
 if __name__ == "__main__":
