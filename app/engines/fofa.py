@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import base64
-import os
 from typing import Any
 
 import httpx
@@ -10,13 +9,6 @@ import httpx
 from app.engines.base import EngineResult, SearchEngine, register_engine
 
 BASE = "https://fofa.info"
-
-# 允许指向内网/私有的 FOFA base_url 白名单
-_FOFA_ALLOWED_HOSTS = {
-    h.strip().lower()
-    for h in os.environ.get("FOFA_ALLOWED_HOSTS", "").split(",")
-    if h.strip()
-}
 
 
 class FofaError(Exception):
@@ -71,14 +63,7 @@ class FofaEngine(SearchEngine):
         if not api_key:
             raise FofaError("缺少 FOFA key")
         base = (base_url or BASE).rstrip("/")
-        # SSRF 防护
-        from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
-        try:
-            assert_safe_outbound_url(
-                f"{base}/api/v1/search/all", allow_extra_hosts=_FOFA_ALLOWED_HOSTS
-            )
-        except SsrfBlocked as e:
-            raise FofaError(f"FOFA base_url 不被允许：{e}") from e
+        # 不再对 FOFA base_url 做本地白名单/SSRF 拦截：私有部署、内网镜像、自建代理均可直连。
 
         fields = "host,ip,port,title,domain,org"
         params = {

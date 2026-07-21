@@ -125,6 +125,115 @@ def _is_max_tokens_unsupported(err: LLMError) -> bool:
     )
 
 
+def _dict_to_message(msg: dict[str, Any]) -> SimpleNamespace:
+    """把网关 dict message 转成与 OpenAI SDK 相近的 SimpleNamespace。"""
+    content = msg.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "text":
+                parts.append(str(p.get("text") or ""))
+            elif isinstance(p, str):
+                parts.append(p)
+        content = "".join(parts)
+    tool_calls = msg.get("tool_calls")
+    ns_calls = None
+    if isinstance(tool_calls, list) and tool_calls:
+        ns_calls = []
+        for c in tool_calls:
+            if not isinstance(c, dict):
+                continue
+            fn = c.get("function") if isinstance(c.get("function"), dict) else {}
+            args = fn.get("arguments")
+            if args is not None and not isinstance(args, str):
+                args = json.dumps(args, ensure_ascii=False)
+            ns_calls.append(SimpleNamespace(
+                id=c.get("id", ""),
+                type=c.get("type", "function"),
+                function=SimpleNamespace(name=fn.get("name", ""), arguments=args or ""),
+            ))
+    return SimpleNamespace(
+        content="" if content is None else content,
+        tool_calls=ns_calls or None,
+        role=msg.get("role") or "assistant",
+    )
+
+
+def _coerce_chat_message(resp: Any) -> Any:
+    """兼容各类网关返回：ChatCompletion / dict / JSON 字符串 / 纯文本 / SSE 残留。
+
+    部分中转会把整段 JSON 当字符串返回，或 200 直接回纯文本，官方 SDK 解出来是 str，
+    随后访问 ``resp.choices`` 就会报 ``'str' object has no attribute 'choices'``。
+    """
+    if resp is None:
+        raise LLMError("upstream", "LLM 返回空响应。", detail="resp is None")
+
+    if isinstance(resp, (bytes, bytearray)):
+        resp = resp.decode("utf-8", errors="replace")
+
+    if isinstance(resp, str):
+        text = resp.strip()
+        if not text:
+            raise LLMError("upstream", "LLM 返回空字符串。", detail="empty string")
+        # SSE：取最后一条有效 data:
+        if text.startswith("data:") or "\ndata:" in text:
+            lines = [ln[5:].strip() for ln in text.splitlines() if ln.startswith("data:")]
+            lines = [ln for ln in lines if ln and ln != "[DONE]"]
+            if lines:
+                text = lines[-1]
+        try:
+            resp = json.loads(text)
+        except json.JSONDecodeError:
+            return SimpleNamespace(content=text, tool_calls=None, role="assistant")
+
+    if isinstance(resp, dict):
+        if resp.get("error"):
+            err = resp["error"]
+            detail = err if isinstance(err, str) else json.dumps(err, ensure_ascii=False)
+            raise LLMError(
+                "upstream", "LLM 网关返回错误。",
+                detail=_sanitize_error_detail(str(detail)),
+            )
+        choices = resp.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, str):
+                return SimpleNamespace(content=first, tool_calls=None, role="assistant")
+            if isinstance(first, dict):
+                msg = first.get("message", first)
+                if isinstance(msg, str):
+                    return SimpleNamespace(content=msg, tool_calls=None, role="assistant")
+                if isinstance(msg, dict):
+                    return _dict_to_message(msg)
+        if "content" in resp or "tool_calls" in resp:
+            return _dict_to_message(resp)
+        raise LLMError(
+            "upstream", "LLM 响应无法解析为 message。",
+            detail=_sanitize_error_detail(str(resp)[:400]),
+        )
+
+    # 标准 ChatCompletion 对象
+    choices = getattr(resp, "choices", None)
+    if choices:
+        first = choices[0]
+        msg = getattr(first, "message", None)
+        if msg is not None:
+            return msg
+        if isinstance(first, str):
+            return SimpleNamespace(content=first, tool_calls=None, role="assistant")
+        return first
+
+    # 已是 message 形态（如 Anthropic 解析结果）
+    if hasattr(resp, "content") or hasattr(resp, "tool_calls"):
+        return resp
+
+    raise LLMError(
+        "upstream",
+        "LLM 响应格式异常。",
+        detail=_sanitize_error_detail(f"{type(resp).__name__}: {resp!r}"[:400]),
+    )
+
+
 def _classify_error(e: Exception) -> LLMError:
     response = getattr(e, "response", None)
     status = getattr(e, "status_code", None) or getattr(response, "status_code", None)
@@ -138,6 +247,15 @@ def _classify_error(e: Exception) -> LLMError:
     detail = _sanitize_error_detail(raw)
     text = f"{status or ''} {code} {raw}".lower()
 
+    # 网关返回了字符串/非标准对象，访问 .choices 失败 → 归为 upstream（可临时回队）
+    if isinstance(e, AttributeError) and "choices" in text:
+        return LLMError(
+            "upstream",
+            "LLM 响应格式异常（非标准 ChatCompletion，常见于中转网关）。",
+            e, status=status, code=str(code), detail=detail,
+        )
+    if isinstance(e, LLMError):
+        return e
     if any(k in text for k in ("insufficient_quota", "quota", "billing", "余额", "额度", "balance")):
         return LLMError(
             "quota", "LLM 额度不足或账户余额不足，请更换/充值模型 API Key 后重试。",
@@ -307,7 +425,7 @@ class LLMClient:
                     )
                 resp = self.client.chat.completions.create(**kwargs)
                 self._record_openai_usage(resp)
-                return resp.choices[0].message
+                return _coerce_chat_message(resp)
             except Exception as e:  # 网络/超时/限流/5xx 统一重试
                 # TLS 自适应：https 中转自签证书导致校验失败时，自动降级不校验并立即重试。
                 # 只会降级一次（之后 _insecure_tls=True，再进来直接返回 False），不会死循环。
