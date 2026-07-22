@@ -142,28 +142,32 @@ def _norm_url(u: str) -> str:
 
 
 def _host_of(u: str) -> str:
+    from app.urlnorm import is_bare_ipv6, safe_urlparse
     u = _strip(u)
     if not u:
         return ""
     if "://" not in u and "/" not in u:
-        return u.lower().split(":")[0]
-    p = urlparse(u if "://" in u else "http://" + u)
-    return (p.hostname or "").lower()
+        # 裸 IPv6 不能按 ':' 切（会截断成第一段）
+        return u.lower() if is_bare_ipv6(u) else u.lower().split(":")[0]
+    return (safe_urlparse(u).hostname or "").lower()
 
 
 def _hostport_of(u: str) -> str:
+    from app.urlnorm import is_bare_ipv6, safe_port, safe_urlparse
     u = _strip(u)
     if not u:
         return ""
     if "://" not in u and "/" not in u:
         return u.lower()
-    p = urlparse(u if "://" in u else "http://" + u)
+    p = safe_urlparse(u)
     host = (p.hostname or "").lower()
     if not host:
         return ""
-    if p.port:
-        return f"{host}:{p.port}"
-    return host
+    disp = f"[{host}]" if is_bare_ipv6(host) else host
+    port = safe_port(p)
+    if port:
+        return f"{disp}:{port}"
+    return disp
 
 
 @dataclass

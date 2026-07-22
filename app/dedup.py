@@ -145,19 +145,11 @@ class Fingerprint:
 
 
 def normalize_host(url_or_host: str) -> str:
-    s = (url_or_host or "").strip()
-    if not s:
-        return ""
-    if "://" not in s:
-        s = "http://" + s
+    from app.urlnorm import normalize_host as _norm
     try:
-        parsed = urlparse(s)
+        return _norm(url_or_host)
     except Exception:
-        return s.lower().strip("/")
-    host = (parsed.hostname or "").lower()
-    if parsed.port and parsed.port not in (80, 443):
-        host = f"{host}:{parsed.port}"
-    return host
+        return (url_or_host or "").lower().strip("/")
 
 
 def normalize_endpoint(url_or_host: str) -> str:

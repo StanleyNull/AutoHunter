@@ -62,8 +62,10 @@ def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = N
         raise SsrfBlocked("目标为云元数据地址，已拦截")
 
     # 逐个解析出的 IP 校验（含 IPv6、DNS 到内网的情形）。
+    from app.urlnorm import safe_port
+    port = safe_port(parsed) or (443 if scheme == "https" else 80)
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except OSError as exc:
         raise SsrfBlocked(f"主机解析失败: {host}") from exc
 

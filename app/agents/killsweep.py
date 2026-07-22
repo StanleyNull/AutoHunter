@@ -37,19 +37,11 @@ def _qbase64(q: str) -> str:
 
 
 def _normalize_host(url_or_host: str) -> str:
-    s = (url_or_host or "").strip()
-    if not s:
-        return ""
-    if "://" not in s:
-        s = "http://" + s
+    from app.urlnorm import normalize_host as _norm
     try:
-        p = urlparse(s)
+        return _norm(url_or_host)
     except Exception:
-        return s.lower().strip("/")
-    host = (p.hostname or "").lower()
-    if p.port and p.port not in (80, 443):
-        host = f"{host}:{p.port}"
-    return host
+        return (url_or_host or "").lower().strip("/")
 
 
 def _affected_row_key(host: str, vuln_title: str, vuln_type: str) -> str:

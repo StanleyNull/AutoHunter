@@ -55,15 +55,15 @@ ProgressReporter = Callable[..., Awaitable[None]]
 
 
 def normalize_host(url_or_host: str) -> str:
-    """归一化为 host（去协议、去末尾/、小写）。"""
-    s = url_or_host.strip()
-    if "://" not in s:
-        s = "http://" + s
-    parsed = urlparse(s)
-    host = (parsed.hostname or "").lower()
-    if parsed.port and parsed.port not in (80, 443):
-        host = f"{host}:{parsed.port}"
-    return host
+    """归一化为 host（去协议、去末尾/、小写）。裸 IPv6 走安全解析，避免 .port 抛错。"""
+    from app.urlnorm import normalize_host as _norm
+    return _norm(url_or_host)
+
+
+def _is_unusable(raw: str, host: str) -> bool:
+    """畸形主机（截断/非法 IPv6 等）：拼进 URL 会崩解析，直接跳过不入队。"""
+    from app.urlnorm import is_unusable_host
+    return is_unusable_host(raw) or is_unusable_host(host)
 
 
 def _is_edusrc_intent_task(task: Task, raw: str, is_intent: bool) -> bool:
@@ -348,6 +348,8 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
             if not host or host in seen:
                 continue
             seen.add(host)
+            if _is_unusable(raw, host):
+                continue
             if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(raw):
                 session.add(Target(
                     task_id=task.id, url=_ensure_url(host), host=host,
@@ -383,6 +385,8 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
     for raw in raw_targets:
         host = normalize_host(raw)
         if not host:
+            continue
+        if _is_unusable(raw, host):
             continue
         if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(raw):
             # 占住去重位，避免后续又被 FOFA/通杀塞回来
@@ -641,9 +645,13 @@ async def _fofa_collect(
     dropped_oos = 0
     for row in res.results:
         rec = dict(zip(fields, row)) if isinstance(row, list) else row
-        host = normalize_host(rec.get("host") or rec.get("domain") or rec.get("ip") or "")
+        raw_host = rec.get("host") or rec.get("domain") or rec.get("ip") or ""
+        host = normalize_host(raw_host)
         if not host or host in seen:
             continue
+        if _is_unusable(raw_host, host):
+            seen.add(host)
+            continue  # 畸形 IPv6/无效主机，丢弃（不入库、不占派发）
         if scope_domains and target_cluster.root_domain(host) not in scope_domains:
             dropped_oos += 1
             continue  # 范围外资产，丢弃（不入库、不占去重位）

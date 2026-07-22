@@ -238,11 +238,24 @@ def _log_bg_task_exc(task: asyncio.Future, label: str) -> None:
                      exc_info=(type(exc), exc, exc.__traceback__))
 
 
+def _bracket_ipv6_host(host: str) -> str:
+    """裸 IPv6 加方括号，避免拼进 URL 后被 urlparse/httpx 误当 host:port。
+
+    形如 `250:4809:3:fcfc:feff:febc:b092` 的裸 IPv6，直接拼 `http://<ip>` 会让
+    解析器把最后一段当端口 → `ValueError: Port could not be cast to integer`。
+    """
+    from app.urlnorm import bracket_ipv6_host
+    return bracket_ipv6_host(host)
+
+
 def _with_scheme(url_or_host: str) -> str:
     s = (url_or_host or "").strip()
     if not s:
         return ""
-    return s if "://" in s else f"http://{s}"
+    if "://" in s:
+        return s
+    from app.urlnorm import ensure_scheme
+    return ensure_scheme(s)
 
 
 def _swap_url_scheme(url: str) -> str:
@@ -1263,7 +1276,7 @@ class TaskRunner:
         # follow-up 自己也会上报 coverage，避免无限派生。
         if (tgt.source or "").startswith("site_f"):
             return 0
-        base_url = tgt.url or (f"https://{tgt.host}" if tgt.host else "")
+        base_url = tgt.url or (f"https://{_bracket_ipv6_host(tgt.host)}" if tgt.host else "")
         specs = site_collab.followup_specs_from_coverage(coverage_items, base_url=base_url, max_specs=8)
         if not specs:
             return 0
@@ -2609,6 +2622,9 @@ class TaskRunner:
         """把通杀验证成功的同款站点作为新目标入队（host 去重；拉高优先级）。"""
         host = collector.normalize_host(url)
         if not host or host == collector.normalize_host(origin):
+            return False
+        from app.urlnorm import is_unusable_host
+        if is_unusable_host(url) or is_unusable_host(host):
             return False
         if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(url):
             return False

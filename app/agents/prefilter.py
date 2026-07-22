@@ -165,6 +165,10 @@ def should_skip(host: str, url: str) -> tuple[bool, str]:
 
 def should_skip_ex(host: str, url: str) -> tuple[bool, str, dict]:
     """同 should_skip，但额外返回首页探测信息(供评分复用，避免重复发包)。"""
+    # 畸形主机（截断/非法 IPv6 等，拼进 URL 会崩解析）：直接跳过，不探活、不派 worker
+    from app.urlnorm import is_unusable_host
+    if is_unusable_host(host) and is_unusable_host(url):
+        return True, "无效主机（畸形 IPv6/无法解析），自动跳过", {}
     # 敏感域名最先拦：不探活、不发包、不派 worker
     if is_sensitive_host(host) or is_sensitive_host(url):
         return True, _SENSITIVE_SKIP_REASON, {}
