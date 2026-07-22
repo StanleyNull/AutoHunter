@@ -30,6 +30,106 @@ _REQUEST_TIMEOUT = float(os.environ.get("LLM_REQUEST_TIMEOUT", "120"))
 # 失败重试次数（网络抖动/限流/5xx）；默认 4 次（含网络抖动场景多给几次机会）。
 _MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "4"))
 
+# 浏览器 UA（伪装成 Chrome，绕过 Cloudflare/WAF 对 SDK UA 的封禁）
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+def _default_ua_for_model(model: str, base_url: str) -> str:
+    """按模型/中转特征给一个「不像 SDK」的 User-Agent。
+
+    很多中转站/2api 网关（尤其套 Cloudflare 的）会封禁 OpenAI/Anthropic Python SDK
+    自带的 `User-Agent: OpenAI/Python x.y` 与 `x-stainless-*` 头，转发到上游 2api 时
+    直接回 403。这里按模型族给一个贴近官方客户端/浏览器的 UA，最大化通过率。
+    """
+    m = (model or "").lower()
+    if any(k in m for k in ("deepseek",)):
+        return "DeepSeek/1.0 (compatible)"
+    if any(k in m for k in ("claude", "anthropic")):
+        return "Anthropic/Python 0.39.0"
+    if any(k in m for k in ("gpt", "o1", "o3", "o4", "openai")):
+        return "OpenAI/Python 1.51.0"
+    if any(k in m for k in ("glm", "zhipu", "chatglm")):
+        return "zhipuai/2.1.0"
+    if any(k in m for k in ("qwen", "qianwen", "dashscope", "tongyi")):
+        return "dashscope/1.20.0 python"
+    if any(k in m for k in ("kimi", "moonshot")):
+        return "moonshot/1.0 python"
+    if any(k in m for k in ("gemini", "google")):
+        return "google-genai/0.8.0"
+    if any(k in m for k in ("grok", "xai")):
+        return "xai-sdk/0.1.0"
+    # 兜底：直接伪装浏览器，最不容易被 WAF 拦
+    return _BROWSER_UA
+
+
+def _resolve_user_agent(model: str, base_url: str) -> str:
+    """决定实际使用的 UA：显式配置优先，其次按模型推断。
+
+    - LLM_USER_AGENT="browser" → 用浏览器 UA
+    - LLM_USER_AGENT=<自定义串> → 原样使用
+    - 未配置 → 按模型族自动选（_default_ua_for_model）
+    """
+    explicit = (os.environ.get("LLM_USER_AGENT", "") or "").strip()
+    if explicit:
+        low = explicit.lower()
+        if low in ("browser", "chrome"):
+            return _BROWSER_UA
+        if low in ("auto", "model"):
+            return _default_ua_for_model(model, base_url)
+        return explicit
+    return _default_ua_for_model(model, base_url)
+
+
+def _stainless_omit_value():
+    """返回让 openai SDK 彻底删除 header 的哨兵值。
+
+    新版 SDK 用 `Omit()` 表示「从最终请求里删掉这个头」；置 None 会让 httpx 崩，
+    置空串又会被 SDK 拼成 `python, `（仍泄露指纹）。老版本没有 Omit 时退回空串。
+    """
+    try:
+        from openai import Omit  # type: ignore
+        return Omit()
+    except Exception:  # pragma: no cover - 老 SDK 兜底
+        return ""
+
+
+def _llm_default_headers(model: str, base_url: str) -> dict[str, Any]:
+    """OpenAI SDK 的 default_headers：覆盖 UA + 抹掉暴露 SDK 的 x-stainless-* 头。
+
+    很多中转/2api 网关只按 `User-Agent` 与 `x-stainless-*` 指纹拦 SDK 流量，
+    转发到上游时回 403。这里把 UA 换成贴近官方客户端/浏览器的值，并用 Omit()
+    删除 stainless 指纹头，让请求看起来不像 Python SDK。
+    """
+    omit = _stainless_omit_value()
+    headers: dict[str, Any] = {"User-Agent": _resolve_user_agent(model, base_url)}
+    # 大小写必须与 SDK platform_headers() 完全一致，否则会被当成不同 key、删不掉。
+    for h in (
+        "X-Stainless-Lang", "X-Stainless-Package-Version", "X-Stainless-OS",
+        "X-Stainless-Arch", "X-Stainless-Runtime", "X-Stainless-Runtime-Version",
+        "X-Stainless-Async", "X-Stainless-Retry-Count", "X-Stainless-Read-Timeout",
+    ):
+        headers[h] = omit
+    return headers
+
+
+def _per_request_omit_headers() -> dict[str, Any]:
+    """逐请求删除 SDK 动态补写的 x-stainless-retry-count / read-timeout。
+
+    这两个头在 `_build_headers` 里按 `custom_headers`（即 create() 的 extra_headers）
+    是否存在来决定要不要补；用 Omit() 占位即可让最终请求里不出现它们。
+    老 SDK 无 Omit 时返回空 dict（放弃删这两个无关紧要的头）。
+    """
+    omit = _stainless_omit_value()
+    if omit == "":
+        return {}
+    return {
+        "X-Stainless-Retry-Count": omit,
+        "X-Stainless-Read-Timeout": omit,
+    }
+
 
 class LLMError(RuntimeError):
     """归一化 LLM 错误，避免前端/日志只看到 SDK 原始异常。"""
@@ -364,9 +464,11 @@ class LLMClient:
         """构造 OpenAI 客户端。insecure=True 时用不校验证书的 httpx client。"""
         http_client = httpx.Client(verify=False, timeout=_REQUEST_TIMEOUT) if insecure else None
         # 关闭 SDK 内置重试，自己控制重试节奏与日志；设请求超时兜住挂起。
+        # default_headers 换 UA + 抹 x-stainless-*，绕过中转/WAF 对 SDK UA 的 403 封禁。
         return OpenAI(
             base_url=self.config.base_url, api_key=self.config.api_key,
             timeout=_REQUEST_TIMEOUT, max_retries=0,
+            default_headers=_llm_default_headers(self.config.model, self.config.base_url),
             **({"http_client": http_client} if http_client else {}),
         )
 
@@ -412,6 +514,11 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
+        # 逐请求再抹掉 SDK 在 _build_headers 里补写的 retry-count/read-timeout 两个
+        # x-stainless-* 头（它们不在 default_headers 里，只能靠 per-request 覆盖）。
+        extra = _per_request_omit_headers()
+        if extra:
+            kwargs["extra_headers"] = extra
 
         last_exc: Optional[Exception] = None
         active_tool_choice: Any = tool_choice
@@ -598,6 +705,8 @@ class LLMClient:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
+            # 换 UA，绕过中转/2api WAF 对 SDK UA 的 403 封禁。
+            "User-Agent": _resolve_user_agent(self.config.model, self.config.base_url),
         }
         return payload, headers
 
