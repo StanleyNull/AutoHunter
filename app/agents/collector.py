@@ -341,13 +341,21 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
         await session.commit()
         return added
 
-    # 1) 手动清单（一次性消费，不预筛——用户明确指定的直接挖）
+    # 1) 手动清单（一次性消费；.gov 一律跳过，其余用户指定的直接入队）
     if task.target_source in ("manual", "both") and task.manual_targets:
         for raw in task.manual_targets:
             host = normalize_host(raw)
             if not host or host in seen:
                 continue
             seen.add(host)
+            if prefilter.is_gov_host(host) or prefilter.is_gov_host(raw):
+                session.add(Target(
+                    task_id=task.id, url=_ensure_url(host), host=host,
+                    source="manual", status="skipped",
+                    verdict="skip_gov",
+                    dead_reason=prefilter._GOV_SKIP_REASON,
+                ))
+                continue
             session.add(Target(task_id=task.id, url=_ensure_url(host), host=host,
                                source="manual", status="queued",
                                auth_context=_auth_context_for(task, _ensure_url(host))))
@@ -375,6 +383,19 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
     for raw in raw_targets:
         host = normalize_host(raw)
         if not host:
+            continue
+        if prefilter.is_gov_host(host) or prefilter.is_gov_host(raw):
+            # 占住去重位，避免后续又被 FOFA/通杀塞回来
+            existing = (await session.execute(
+                select(Target.source).where(Target.task_id == task.id, Target.host == host)
+            )).all()
+            if not existing:
+                session.add(Target(
+                    task_id=task.id, url=_ensure_url(raw), host=host,
+                    source="site", status="skipped",
+                    verdict="skip_gov",
+                    dead_reason=prefilter._GOV_SKIP_REASON,
+                ))
             continue
         url = _ensure_url(raw)
         existing = (await session.execute(
@@ -626,6 +647,16 @@ async def _fofa_collect(
         if scope_domains and target_cluster.root_domain(host) not in scope_domains:
             dropped_oos += 1
             continue  # 范围外资产，丢弃（不入库、不占去重位）
+        if prefilter.is_gov_host(host):
+            seen.add(host)
+            session.add(Target(
+                task_id=task.id, url=_ensure_url(rec.get("host") or host), host=host,
+                ip=rec.get("ip", ""), org=rec.get("org", ""), title=rec.get("title", ""),
+                source="fofa", status="skipped",
+                verdict="skip_gov",
+                dead_reason=prefilter._GOV_SKIP_REASON,
+            ))
+            continue
         seen.add(host)
         candidates.append({
             "host": host,
