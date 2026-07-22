@@ -2610,7 +2610,7 @@ class TaskRunner:
         host = collector.normalize_host(url)
         if not host or host == collector.normalize_host(origin):
             return False
-        if prefilter.is_gov_host(host) or prefilter.is_gov_host(url):
+        if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(url):
             return False
         exists = (await session.execute(
             select(Target).where(Target.task_id == task_id, Target.host == host)

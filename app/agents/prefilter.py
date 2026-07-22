@@ -1,17 +1,18 @@
 """机械预筛：在入队前过滤无挖掘价值的资产。
 
 只做确定性的机械判断（不耗 LLM）：
-0. 政府/政务 .gov 域名 → 跳过（永不攻击）
+0. 敏感域名（.gov / .mil / 军政公安关键词等）→ 跳过（永不攻击）
 1. CDN / 对象存储 / 云 WAF 域名特征 → 跳过
 2. 死链 / 连接超时 / 无响应 → 跳过
 3. 纯前端静态站（无任何后端交互特征，且是 SPA/静态托管）→ 跳过
 
 判断尽量保守：拿不准就放行（宁可多挖，不要误杀有价值目标）。
-例外：.gov 域名一律跳过，无例外。
+例外：敏感域名一律跳过，无例外。
 """
 from __future__ import annotations
 
 import ipaddress
+import os
 from urllib.parse import urlparse
 
 import httpx
@@ -27,7 +28,31 @@ _CDN_MARKERS = (
 # 纯静态托管 Server 头特征
 _STATIC_SERVERS = ("githubpages", "netlify", "vercel", "cloudflare", "amazons3", "aliyunoss")
 
-_GOV_SKIP_REASON = "政府/政务域名（.gov），自动跳过"
+# 敏感公共后缀第二级标签（*.gov / *.gov.cn / *.mil.cn …）
+_SENSITIVE_PUBLIC_LABELS = frozenset({"gov", "mil"})
+
+# 主机名中出现即视为敏感（偏军政/政法，避免误伤普通 edu 业务）
+_SENSITIVE_KEYWORDS = (
+    "gongan", "jiancha", "jiwei", "chinamil", "guofang", "wujing",
+    "mps.gov", "mod.gov", "court.gov", "spp.gov", "ccdi.gov",
+    "公安", "检察", "法院", "纪委", "国安", "国防", "武警", "军事",
+    "政法委", "人大常委会", "中央军委", "解放军",
+)
+
+_SENSITIVE_SKIP_REASON = "敏感域名（政府/军政/政法等），自动跳过"
+# 兼容旧常量名
+_GOV_SKIP_REASON = _SENSITIVE_SKIP_REASON
+
+
+def _extra_sensitive_suffixes() -> tuple[str, ...]:
+    """环境变量 AUTOHUNTER_SENSITIVE_HOSTS：逗号分隔额外后缀/完整域名。"""
+    raw = os.environ.get("AUTOHUNTER_SENSITIVE_HOSTS", "") or ""
+    out = []
+    for part in raw.split(","):
+        p = part.strip().lower().lstrip(".")
+        if p:
+            out.append(p)
+    return tuple(out)
 
 
 def _host_only(host_or_url: str) -> str:
@@ -51,10 +76,30 @@ def _host_only(host_or_url: str) -> str:
     return s.rstrip(".")
 
 
-def is_gov_host(host_or_url: str) -> bool:
-    """是否政府/政务域名：*.gov / *.gov.cn / *.gov.uk 等。
+def _is_sensitive_public_suffix(h: str) -> bool:
+    """*.gov / *.gov.cn / *.mil / *.mil.cn / *.gov.ac.uk 等。"""
+    if not h:
+        return False
+    parts = h.split(".")
+    for label in _SENSITIVE_PUBLIC_LABELS:
+        if h == label or h.endswith(f".{label}"):
+            return True
+        # example.gov.cn / a.b.mil.uk
+        if len(parts) >= 3 and parts[-2] == label and parts[-1].isalpha() and 2 <= len(parts[-1]) <= 4:
+            return True
+        # *.gov.ac.uk
+        if len(parts) >= 4 and parts[-3] == label:
+            return True
+    return False
 
-    只看域名标签，不把 government.com、mygov.edu.cn 误判进来。
+
+def is_sensitive_host(host_or_url: str) -> bool:
+    """是否敏感域名：政府/军队/政法等，打了不合规也不该碰。
+
+    覆盖：
+    - *.gov / *.gov.cn / *.mil / *.mil.cn …
+    - 主机名含公安/检察/法院/纪委/国防/武警等关键词
+    - 环境变量 AUTOHUNTER_SENSITIVE_HOSTS 追加的后缀
     """
     h = _host_only(host_or_url)
     if not h:
@@ -64,16 +109,19 @@ def is_gov_host(host_or_url: str) -> bool:
         return False
     except ValueError:
         pass
-    if h == "gov" or h.endswith(".gov"):
+    if _is_sensitive_public_suffix(h):
         return True
-    parts = h.split(".")
-    # example.gov.cn / a.b.gov.uk
-    if len(parts) >= 3 and parts[-2] == "gov" and parts[-1].isalpha() and 2 <= len(parts[-1]) <= 4:
+    if any(k in h for k in _SENSITIVE_KEYWORDS):
         return True
-    # 少见：*.gov.ac.uk
-    if len(parts) >= 4 and parts[-3] == "gov":
-        return True
+    for suf in _extra_sensitive_suffixes():
+        if h == suf or h.endswith("." + suf):
+            return True
     return False
+
+
+def is_gov_host(host_or_url: str) -> bool:
+    """兼容旧接口：等价于敏感域名判断（含 .gov 及更广军政范围）。"""
+    return is_sensitive_host(host_or_url)
 
 
 def is_cdn_host(host: str) -> bool:
@@ -117,9 +165,9 @@ def should_skip(host: str, url: str) -> tuple[bool, str]:
 
 def should_skip_ex(host: str, url: str) -> tuple[bool, str, dict]:
     """同 should_skip，但额外返回首页探测信息(供评分复用，避免重复发包)。"""
-    # .gov 最先拦：不探活、不发包、不派 worker
-    if is_gov_host(host) or is_gov_host(url):
-        return True, _GOV_SKIP_REASON, {}
+    # 敏感域名最先拦：不探活、不发包、不派 worker
+    if is_sensitive_host(host) or is_sensitive_host(url):
+        return True, _SENSITIVE_SKIP_REASON, {}
     if is_cdn_host(host):
         return True, "CDN/对象存储/静态托管域名", {}
     info = probe(url)
