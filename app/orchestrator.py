@@ -318,8 +318,12 @@ def _probe_target_liveness(url: str, host: str, timeout: float) -> dict:
     }
 
 
-def _llm_for_task(task: Task) -> LLMClient:
-    return llm_client_for_task(task)
+def _llm_for_task(task: Task, on_provider_failure=None, on_provider_selected=None) -> LLMClient:
+    return llm_client_for_task(
+        task,
+        on_provider_failure=on_provider_failure,
+        on_provider_selected=on_provider_selected,
+    )
 
 
 class TaskRunner:
@@ -353,6 +357,10 @@ class TaskRunner:
         self._queue_liveness_ok_until: dict[str, float] = {}
         # 5xx 等临时预筛失败不进终态 skipped，只做短冷却，稍后再探。
         self._queue_prefilter_retry_after: dict[str, float] = {}
+        # 端点池全部冷却时按 worker 返回的 retry-after 暂缓该目标，不消耗普通重试次数。
+        self._llm_provider_retry_after: dict[str, float] = {}
+        # 全池不可用是任务级条件；冷却期间不要让其它 queued 目标逐个启动再回队。
+        self._llm_pool_retry_after: float = 0
 
     def live_workers(self) -> list[dict]:
         return list(self._live.values())
@@ -392,6 +400,73 @@ class TaskRunner:
         # ts 统一用带 UTC 标识的 ISO 字符串（…+00:00），前端 new Date 才能正确转本地时区。
         await bus.publish(self.task_id, {"agent": agent, "kind": kind, "level": level,
                                          "message": message, "ts": _now_iso(), **payload})
+
+    @staticmethod
+    def _llm_payload(llm: LLMClient, model_role: str) -> dict:
+        config = getattr(llm, "selected_provider", None)
+        return {
+            "model_role": model_role,
+            "model": getattr(config, "model", "") or "",
+            "base_url": getattr(config, "base_url", "") or "",
+        }
+
+    def _provider_selected_callback(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        target_id: str,
+        model_role: str,
+    ):
+        def on_selected(info: dict) -> None:
+            def apply_selection() -> None:
+                state = self._live.get(target_id)
+                if not state:
+                    return
+                state["model_role"] = model_role
+                state["model"] = str(info.get("model") or "")
+                state["model_base_url"] = str(info.get("base_url") or "")
+
+            loop.call_soon_threadsafe(apply_selection)
+
+        return on_selected
+
+    def _provider_failure_callback(self, loop: asyncio.AbstractEventLoop, agent: str, **extra):
+        def on_failure(info: dict) -> None:
+            payload = {**(info or {}), **extra}
+            future = asyncio.run_coroutine_threadsafe(
+                self._record_provider_failure(agent, payload),
+                loop,
+            )
+            future.add_done_callback(_consume_task_exception)
+        return on_failure
+
+    async def _record_provider_failure(self, agent: str, payload: dict) -> None:
+        model = payload.get("model") or ""
+        base_url = payload.get("base_url") or ""
+        kind = payload.get("kind") or "failed"
+        consecutive = int(payload.get("consecutive_failures") or 0)
+        cooldown_seconds = int(payload.get("cooldown_seconds") or 0)
+        transition = payload.get("transition") or ""
+        if transition in {"cooldown_probe_failed", "behavior_cooldown_started"}:
+            message = (
+                f"LLM 端点进入冷却：{model} @ {base_url}"
+                f"（{kind}，连续失败 {consecutive} 次，冷却 {cooldown_seconds} 秒）"
+            )
+        else:
+            message = (
+                f"LLM 端点运行失败，正在尝试池内其它端点：{model} @ {base_url}"
+                f"（{kind}，连续失败 {consecutive} 次）"
+            )
+        event_payload = dict(payload)
+        event_payload["error_kind"] = event_payload.pop("kind", kind)
+        async with SessionLocal() as session:
+            await self._log(
+                session,
+                agent,
+                "llm_provider_failed",
+                message,
+                level="error",
+                **event_payload,
+            )
 
     async def recover(self, session: AsyncSession) -> None:
         """重启恢复：assigned/scanning → queued；不动已有 Finding/Review。"""
@@ -455,7 +530,17 @@ class TaskRunner:
                     **payload,
                 )
 
-            added = await collector.refill(session, task, LOW_WATERMARK, progress_cb=collector_progress)
+            added = await collector.refill(
+                session,
+                task,
+                LOW_WATERMARK,
+                progress_cb=collector_progress,
+                on_provider_failure=self._provider_failure_callback(
+                    asyncio.get_running_loop(),
+                    "collector",
+                    model_role="搜集模型",
+                ),
+            )
 
             # FOFA 账号连续无效达阈值 → 自动暂停任务，不再空转刷无效请求。
             fofa_fail = int((task.fofa_config or {}).get("fofa_auth_fail_count", 0))
@@ -553,9 +638,16 @@ class TaskRunner:
         # 多取一批是为了遇到同款系统正在跑/已冷却时，能跳到其它 cluster。
         loop = asyncio.get_running_loop()
         now = loop.time()
+        if self._llm_pool_retry_after > now:
+            return None
+        self._llm_pool_retry_after = 0
         if self._queue_prefilter_retry_after:
             self._queue_prefilter_retry_after = {
                 tid: until for tid, until in self._queue_prefilter_retry_after.items() if until > now
+            }
+        if self._llm_provider_retry_after:
+            self._llm_provider_retry_after = {
+                tid: until for tid, until in self._llm_provider_retry_after.items() if until > now
             }
         candidates = (await session.execute(
             select(Target).where(Target.task_id == self.task_id, Target.status == "queued")
@@ -582,6 +674,8 @@ class TaskRunner:
         eligible: list[Target] = []
         for target in candidates:
             if self._queue_prefilter_retry_after.get(target.id, 0) > now:
+                continue
+            if self._llm_provider_retry_after.get(target.id, 0) > now:
                 continue
             key = target_cluster.target_cluster_key(target.host or target.url, target.title, target.org)
             # 企业模式：目标多为用户指定的具体资产（pre-paycenter/test-gateway 等不同子系统），
@@ -1422,6 +1516,12 @@ class TaskRunner:
             st["last_activity_at"] = _now_iso()
             if "round" in data:
                 st["round"] = data["round"]
+            if data.get("model"):
+                st["model"] = data["model"]
+            if data.get("base_url"):
+                st["model_base_url"] = data["base_url"]
+            if data.get("model_role"):
+                st["model_role"] = data["model_role"]
             if kind == "tool_http":
                 st["action"] = f"HTTP {data.get('method','GET')} {data.get('url','')}"
             elif kind == "tool_shell":
@@ -1468,8 +1568,12 @@ class TaskRunner:
                 if cancel_event.is_set():
                     return
                 try:
+                    payload = {
+                        **(data or {}),
+                        **self._llm_payload(llm, "挖掘模型"),
+                    }
                     # finding_submitted 携带完整 finding：实时落库（不丢洞），并从看板推送里剥离大字段。
-                    finding_payload = data.pop("finding", None) if kind == "finding_submitted" else None
+                    finding_payload = payload.pop("finding", None) if kind == "finding_submitted" else None
                     if finding_payload:
                         ft = asyncio.create_task(
                             self._persist_single_finding(task_id, target_id, finding_payload)
@@ -1477,11 +1581,11 @@ class TaskRunner:
                         # 观测异常：finding 实时落库失败必须留痕，否则真洞可能静默丢失。
                         ft.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_single_finding"))
                     if kind == "auth_status":
-                        at = asyncio.create_task(self._persist_auth_status(target_id, dict(data)))
+                        at = asyncio.create_task(self._persist_auth_status(target_id, dict(payload)))
                         at.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_auth_status"))
-                    _update_live(kind, data)
+                    _update_live(kind, payload)
                     pt = asyncio.create_task(bus.publish(
-                        task_id, {"agent": "worker", "kind": kind, "target_id": target_id, **data}))
+                        task_id, {"agent": "worker", "kind": kind, "target_id": target_id, **payload}))
                     pt.add_done_callback(lambda f: _log_bg_task_exc(f, "bus.publish"))
                 except Exception:
                     logger.warning("TaskRunner[%s] emit dispatch failed target=%s kind=%s",
@@ -1570,7 +1674,16 @@ class TaskRunner:
                     self._live[target_id]["action"] = "🔁 定向深挖启动中…"
                 duplicate_history = await self._build_duplicate_history(session, task_id, tgt)
                 await session.commit()
-            llm = _llm_for_task(task_obj)
+            llm = _llm_for_task(
+                task_obj,
+                on_provider_failure=self._provider_failure_callback(
+                    loop, "worker", target_id=target_id
+                ),
+                on_provider_selected=self._provider_selected_callback(
+                    loop, target_id, "挖掘模型"
+                ),
+            )
+            self._live[target_id].update(self._llm_payload(llm, "挖掘模型"))
             prompt_version = resolve_worker_prompt_version(task_obj)
 
         worker_holder: dict[str, Worker] = {}
@@ -1713,6 +1826,9 @@ class TaskRunner:
             "started_at": live_snapshot.get("started_at"),
             "finished_at": _now_iso(),
             "duration_seconds": max(0.0, loop.time() - started_monotonic),
+            "model": live_snapshot.get("model") or "",
+            "base_url": live_snapshot.get("model_base_url") or live_snapshot.get("base_url") or "",
+            "model_role": live_snapshot.get("model_role") or "挖掘模型",
         })
         await self._persist_worker_result(task_id, target_id, final_result)
 
@@ -1958,6 +2074,12 @@ class TaskRunner:
             findings = result.get("findings", [])
             error_text = result.get("error") or ""
             summary_text = result.get("summary") or ""
+            failure_kind = str(result.get("failure_kind") or "").strip()
+            provider_cooldown = (
+                verdict == Verdict.error.value
+                and not findings
+                and result.get("failure_kind") == "provider_cooldown"
+            )
             auto_converged = (
                 verdict == Verdict.no_vuln.value
                 and not findings
@@ -1975,7 +2097,13 @@ class TaskRunner:
             transient_llm_error = (
                 verdict == Verdict.error.value
                 and not findings
-                and self._is_transient_worker_error(error_text)
+                and not provider_cooldown
+                and (
+                    failure_kind in {
+                        "model_behavior", "tool_argument",
+                    }
+                    or self._is_transient_worker_error(error_text)
+                )
             )
             # 自动深挖回火标记（worker 突破有线索时设置，用于日志）。
             auto_deepen_info = None
@@ -1989,6 +2117,24 @@ class TaskRunner:
                 if cnt > MAX_TRANSIENT_LLM_REQUEUE:
                     transient_llm_error = False
                     transient_exhausted = True
+
+            runtime = result.get("_runtime") if isinstance(result.get("_runtime"), dict) else {}
+            runtime_model = str(runtime.get("model") or "").strip()
+            runtime_base_url = str(runtime.get("base_url") or "").strip()
+            if runtime_model or runtime_base_url:
+                session.add(TaskEvent(
+                    task_id=task_id,
+                    agent="worker",
+                    kind="worker_model",
+                    level="info",
+                    message="",
+                    payload={
+                        "target_id": target_id,
+                        "model": runtime_model,
+                        "base_url": runtime_base_url,
+                        "model_role": str(runtime.get("model_role") or "挖掘模型"),
+                    },
+                ))
 
             # 落 Finding（含漏洞级去重；DB 唯一索引兜底，逐条 savepoint 容错并发重复）
             for f in findings:
@@ -2096,6 +2242,21 @@ class TaskRunner:
                 tgt.last_error = error_text[:500]
                 tgt.dead_reason = ""
                 await self._stop_task_for_quota(session, error_text, target_id=target_id)
+            elif provider_cooldown:
+                retry_after = max(1, int(result.get("retry_after_seconds") or 0))
+                self._llm_provider_retry_after[target_id] = (
+                    asyncio.get_running_loop().time() + retry_after
+                )
+                self._llm_pool_retry_after = max(
+                    self._llm_pool_retry_after,
+                    asyncio.get_running_loop().time() + retry_after,
+                )
+                tgt.verdict = ""
+                tgt.status = "queued"
+                tgt.assigned_worker = ""
+                tgt.heartbeat_at = None
+                tgt.last_error = error_text[:500]
+                tgt.dead_reason = ""
             elif transient_llm_error:
                 tgt.verdict = ""
                 tgt.status = "queued"
@@ -2106,6 +2267,8 @@ class TaskRunner:
             else:
                 tgt.verdict = verdict
             if quota_llm_error:
+                pass
+            elif provider_cooldown:
                 pass
             elif transient_llm_error:
                 pass
@@ -2200,6 +2363,8 @@ class TaskRunner:
             # 目标已离开「持续临时错误」状态（成功/无果/置dead），清理回队计数避免泄漏累积。
             if not transient_llm_error:
                 self._transient_llm_requeue.pop(target_id, None)
+            if not provider_cooldown:
+                self._llm_provider_retry_after.pop(target_id, None)
             await session.commit()
             if auto_deepen_info:
                 host, dc, lead = auto_deepen_info
@@ -2210,6 +2375,12 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "quota_stop",
                                 f"LLM/API 额度不足，任务已自动停止: {error_text[:120]}",
                                 level="error", target_id=target_id, verdict="quota_stop", findings=0)
+            elif provider_cooldown:
+                retry_after = max(1, int(result.get("retry_after_seconds") or 0))
+                await self._log(session, "worker", "target_requeued",
+                                f"目标 {tgt.host} 因模型端点池冷却回队，约 {retry_after} 秒后重试: "
+                                f"{error_text[:120]}",
+                                level="warn", target_id=target_id, verdict="retry", findings=0)
             elif transient_llm_error:
                 await self._log(session, "worker", "target_requeued",
                                 f"目标 {tgt.host} 因临时 LLM 错误回队列(第 "
@@ -2330,7 +2501,12 @@ class TaskRunner:
                 kill_chain=f.kill_chain or [], self_check=f.self_check or {},
                 owner=f.owner or "",
             )
-            llm = _llm_for_task(task_obj)
+            llm = _llm_for_task(
+                task_obj,
+                on_provider_failure=self._provider_failure_callback(
+                    loop, "reviewer", finding_id=finding_id
+                ),
+            )
 
         def emit(kind: str, data: dict):
             asyncio.run_coroutine_threadsafe(
@@ -2490,7 +2666,12 @@ class TaskRunner:
                                 level="warn", finding_id=finding_id)
             return
 
-        llm = _llm_for_task(await self._get_task(task_id))
+        llm = _llm_for_task(
+            await self._get_task(task_id),
+            on_provider_failure=self._provider_failure_callback(
+                loop, "killsweep", finding_id=finding_id
+            ),
+        )
         cancel_event = threading.Event()
         self._killsweep_cancel_events[finding_id] = cancel_event
 
@@ -2685,7 +2866,12 @@ class TaskRunner:
                 "kill_chain": f.kill_chain, "severity": orig_severity,
             }
 
-        llm = _llm_for_task(await self._get_task(task_id))
+        llm = _llm_for_task(
+            await self._get_task(task_id),
+            on_provider_failure=self._provider_failure_callback(
+                loop, "escalation", finding_id=finding_id
+            ),
+        )
         cancel_event = threading.Event()
         self._escalation_cancel_events[finding_id] = cancel_event
 

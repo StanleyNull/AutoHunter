@@ -233,8 +233,8 @@ def _is_cluster_deadish(t: Target) -> bool:
     return any(marker in reason for marker in ("无可利用", "无果", "自动收敛", "打不穿", "timeout", "超时"))
 
 
-def _llm_for_task(task: Task) -> LLMClient | None:
-    return llm_client_for_task_optional(task)
+def _llm_for_task(task: Task, on_provider_failure=None) -> LLMClient | None:
+    return llm_client_for_task_optional(task, on_provider_failure=on_provider_failure)
 
 
 async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
@@ -311,7 +311,8 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
 
 async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                  batch_pages: int = 1,
-                 progress_cb: ProgressCallback | None = None) -> int:
+                 progress_cb: ProgressCallback | None = None,
+                 on_provider_failure=None) -> int:
     """补充目标。返回新入队数量。队列够则不补。"""
     queued = (await session.execute(
         select(func.count()).select_from(Target).where(
@@ -366,7 +367,9 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
 
     # 2) FOFA 智能搜集
     if task.target_source in ("fofa", "both"):
-        added += await _fofa_collect(session, task, seen, cluster_state, progress)
+        added += await _fofa_collect(
+            session, task, seen, cluster_state, progress, on_provider_failure
+        )
 
     await session.commit()
     return added
@@ -435,6 +438,7 @@ async def _fofa_collect(
     seen: set[str],
     cluster_state: dict[str, dict],
     progress: ProgressReporter | None = None,
+    on_provider_failure=None,
 ) -> int:
     async def report(phase: str, text: str, **payload) -> None:
         if progress:
@@ -454,7 +458,7 @@ async def _fofa_collect(
     size = int(defaults["page_size"])
     base_url = defaults.get("base_url") or engine.get_default_base_url()
 
-    llm = _llm_for_task(task)
+    llm = _llm_for_task(task, on_provider_failure=on_provider_failure)
     history: list[str] = list(cfg.get("history", []))
     cur_query = cfg.get("current_query", "")
     cursor = int(cfg.get("cursor", 0))

@@ -259,7 +259,7 @@ const IMPORTANT_KINDS = new Set([
   "reproduce_start", "reproduce_done",
   "killsweep_start", "killsweep_done", "killsweep_error", "killsweep_dedup",
   "killsweep_invalid", "killsweep_cancelled",
-  "llm_error", "quota_stop", "reclaim", "recover", "workers_cancelled",
+  "llm_error", "llm_provider_failed", "quota_stop", "reclaim", "recover", "workers_cancelled",
   "tool_exception",
   "auth_status",
 ]);
@@ -317,6 +317,7 @@ function fmtEvent(ev) {
     case "killsweep_dedup": return `通杀分析去重：${d.product || ""}`;
     case "killsweep_invalid": return `通杀记录已标记无效：${d.product || ""}`;
     case "llm_error": return `⚠ LLM 调用失败: ${d.error || ""}`;
+    case "llm_provider_failed": return `LLM 端点失败: ${d.model || ""} @ ${d.base_url || ""} (${d.error_kind || "failed"})`;
     case "tool_exception": return `工具异常: ${d.tool || ""} ${(d.error || "").slice(0, 80)}`;
     case "auth_status": {
       const kinds = (d.kinds || []).join(",") || "-";
@@ -764,6 +765,15 @@ const runState = computed(() => {
 const modelName = computed(() =>
   task.value?.model_config_data?.model || task.value?.llm_usage?.model || "未配置模型"
 );
+function compactBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try { return new URL(raw).host; }
+  catch { return raw.replace(/^https?:\/\//, "").split("/")[0]; }
+}
+function workerModelTitle(worker) {
+  return [worker?.model_role || "挖掘模型", worker?.model, worker?.model_base_url].filter(Boolean).join(" · ");
+}
 const tokenUsage = computed(() => task.value?.llm_usage || {});
 const cacheHitRate = computed(() => {
   const u = tokenUsage.value || {};
@@ -1096,6 +1106,11 @@ function parseEventTs(ts) {
             </span>
           </div>
           <div class="wc-action">{{ w.action }}</div>
+          <div v-if="w.model || w.model_base_url" class="wc-model" :title="workerModelTitle(w)">
+            <span>{{ w.model_role || "挖掘模型" }}</span>
+            <b>{{ w.model || "未知模型" }}</b>
+            <small v-if="w.model_base_url">@ {{ compactBaseUrl(w.model_base_url) }}</small>
+          </div>
           <div class="wc-foot">
             <span class="wc-find" :class="{ hit: w.findings > 0 }">
               {{ w.findings > 0 ? `🎯 ${w.findings} 个漏洞` : "侦察中…" }}

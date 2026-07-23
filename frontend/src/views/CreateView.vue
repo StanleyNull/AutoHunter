@@ -15,7 +15,8 @@ const form = reactive({
   intent_mode: "",
   manual_targets: "",
   src_rules: "",
-  base_url: "", api_key: "", model: "", prompt_version: "legacy",
+  inherit_model_global: true,
+  base_url: "", api_key: "", key_ref: "", model: "", protocol: "auto", prompt_version: "legacy",
   fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3,
   skip_site_recon: false,
   skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
@@ -25,6 +26,9 @@ const authBindings = ref([{ target: "*", raw: "", username: "", password: "", co
 const inherited = reactive({
   base_url: "",
   model: "",
+  protocol: "auto",
+  llm_provider_count: 0,
+  llm_mode: "single",
   prompt_version: "legacy",
   fofa_base_url: "",
   max_pages: 20,
@@ -58,6 +62,10 @@ function removeBinding(i) {
   authBindings.value.splice(i, 1);
   if (!authBindings.value.length) authBindings.value.push(emptyBinding());
 }
+
+function invalidateModelKey() {
+  form.key_ref = "";
+}
 function exportAuthBindings() {
   return authBindings.value
     .map((b) => ({
@@ -88,10 +96,12 @@ watch([() => form.fofa_query, isSiteMode, authBindings], () => {
 });
 
 async function submit() {
-  const modelConfig = {};
-  if (form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
-  if (form.base_url && form.base_url !== inherited.base_url) modelConfig.base_url = form.base_url;
-  if (form.model && form.model !== inherited.model) modelConfig.model = form.model;
+  if (!form.inherit_model_global && !form.api_key.trim() && !form.key_ref) return;
+  const modelConfig = { inherit_global: form.inherit_model_global };
+  if (!form.inherit_model_global && form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
+  if (!form.inherit_model_global && form.base_url) modelConfig.base_url = form.base_url;
+  if (!form.inherit_model_global && form.model) modelConfig.model = form.model;
+  if (!form.inherit_model_global) modelConfig.protocol = form.protocol;
   if (form.prompt_version !== inherited.prompt_version) modelConfig.prompt_version = form.prompt_version;
 
   const maxPages = parseInt(form.max_pages) || 20;
@@ -125,6 +135,8 @@ onMounted(async () => {
     const s = await api.getSettings();
     if (!form.base_url) form.base_url = s.llm?.base_url || "";
     if (!form.model) form.model = s.llm?.model || "";
+    form.protocol = s.llm?.protocol || form.protocol;
+    form.key_ref = s.llm?.key_ref || "";
     form.prompt_version = s.defaults?.worker_prompt_version || form.prompt_version;
     form.max_pages = s.fofa?.max_pages ?? form.max_pages;
     if (!form.intent_mode) form.intent_mode = s.fofa?.default_intent_mode || "";
@@ -132,6 +144,9 @@ onMounted(async () => {
     form.concurrency = s.defaults?.concurrency ?? form.concurrency;
     inherited.base_url = form.base_url;
     inherited.model = form.model;
+    inherited.protocol = form.protocol;
+    inherited.llm_provider_count = s.llm?.provider_count || 0;
+    inherited.llm_mode = s.llm?.mode || "single";
     inherited.prompt_version = form.prompt_version;
     inherited.fofa_base_url = form.fofa_base_url;
     inherited.max_pages = Number(form.max_pages);
@@ -248,9 +263,24 @@ onMounted(async () => {
       </p>
       <details :open="adv">
         <summary @click="adv = !adv">高级：模型 / FOFA / 并发（留空用服务端默认）</summary>
-        <label>模型 base_url <input v-model="form.base_url" placeholder="https://api.deepseek.com/v1" /></label>
-        <label>模型 api_key <input v-model="form.api_key" type="password" /></label>
-        <label>模型名 <input v-model="form.model" placeholder="deepseek-chat" /></label>
+        <p class="field-hint">
+          当前系统方案：{{ inherited.llm_mode === "pool" ? inherited.llm_provider_count + " 个模型端点" : "单模型" }}。
+          跟随后，系统配置变更会在任务下一轮调用时生效。
+        </p>
+        <label class="check-line">
+          <input v-model="form.inherit_model_global" type="checkbox" />
+          跟随系统模型方案
+        </label>
+        <label>模型 base_url <input v-model="form.base_url" :disabled="form.inherit_model_global" :required="!form.inherit_model_global" placeholder="https://api.deepseek.com/v1" @input="invalidateModelKey" /></label>
+        <label>模型 api_key <input v-model="form.api_key" :disabled="form.inherit_model_global" :required="!form.inherit_model_global && !form.key_ref" type="password" :placeholder="form.key_ref ? '已配置，留空复用' : 'sk-...'" /></label>
+        <label>模型名 <input v-model="form.model" :disabled="form.inherit_model_global" :required="!form.inherit_model_global" placeholder="deepseek-chat" /></label>
+        <label>模型协议
+          <select v-model="form.protocol" :disabled="form.inherit_model_global" @change="invalidateModelKey">
+            <option value="auto">自动识别</option>
+            <option value="openai_chat">OpenAI Chat Completions</option>
+            <option value="anthropic_messages">Anthropic Messages</option>
+          </select>
+        </label>
         <label>Worker 提示词
           <select v-model="form.prompt_version">
             <option value="current">current（当前省 token 版）</option>

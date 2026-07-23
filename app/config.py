@@ -29,6 +29,9 @@ class LLMConfig(BaseModel):
     api_key: str = os.environ.get("LLM_API_KEY", "")
     model: str = os.environ.get("LLM_MODEL", "deepseek-chat")
     temperature: float = float(os.environ.get("LLM_TEMPERATURE", "0.3"))
+    protocol: str = os.environ.get("LLM_PROTOCOL", "auto")
+    weight: int = int(os.environ.get("LLM_WEIGHT", "1"))
+    enabled: bool = True
 
 
 class WorkerConfig(BaseModel):

@@ -242,8 +242,15 @@ export const api = {
   userReview: (id, data) => req("PATCH", `/api/results/${id}`, data),
   deepen: (id, directive) => req("POST", `/api/results/${id}/deepen`, { directive }),
   getSettings: () => req("GET", "/api/settings"),
+  providerHealth: () => req("GET", "/api/settings/provider-health"),
   updateSettings: (data) => req("PUT", "/api/settings", data),
-  listModels: (base_url, api_key) => req("POST", "/api/settings/models", { base_url, api_key }),
+  listModels: (base_url, api_key, extra = {}) => req(
+    "POST",
+    "/api/settings/models",
+    typeof base_url === "object" ? base_url : { base_url, api_key, ...extra }
+  ),
+  taskModels: (id, data) => req("POST", `/api/tasks/${id}/models`, data),
+  testLLM: (data) => req("POST", "/api/settings/test-llm", data),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit) =>

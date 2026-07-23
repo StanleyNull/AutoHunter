@@ -11,24 +11,55 @@ import os
 import json
 import logging
 import re
+import threading
 import time
-from typing import Any, Optional
+import uuid
+from typing import Any, Callable, Optional
 from types import SimpleNamespace
 
 import httpx
 from openai import OpenAI
 
 from app.config import LLMConfig, llm_config
+from app.llm.health import (
+    acquire_provider_slot,
+    mark_provider_failed,
+    mark_provider_behavior_failed,
+    mark_provider_behavior_ok,
+    mark_provider_ok,
+    provider_ref,
+    provider_retry_after_seconds,
+    snapshot as health_snapshot,
+)
 from app.llm.usage import record_usage
 
 logger = logging.getLogger("autohunter.llm")
 
-_SECRET_RE = re.compile(r"\b(sk-[A-Za-z0-9_-]{8,})\b")
+_SECRET_RE = re.compile(
+    r"(?:\bsk-[A-Za-z0-9_-]{8,}\b"
+    r"|\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|(?:api[_-]?key|token|secret|password|passwd|pwd)"
+    r"\b[\"']?\s*[:=]\s*[\"']?[^\s'\"&]{6,})",
+    re.IGNORECASE,
+)
 
 # 单次 LLM 请求超时（秒）；DeepSeek 带工具调用通常 10-60s，120s 足够且能兜住挂起。
 _REQUEST_TIMEOUT = float(os.environ.get("LLM_REQUEST_TIMEOUT", "120"))
 # 失败重试次数（网络抖动/限流/5xx）；默认 4 次（含网络抖动场景多给几次机会）。
 _MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "4"))
+_RR_LOCK = threading.Lock()
+# Smooth weighted round-robin current weights, keyed by pool/rank/provider.
+# The state is intentionally process-local; the production process runs one Uvicorn worker.
+_RR_STATE: dict[str, int] = {}
+
+
+def _api_root(base_url: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    lowered = base.lower()
+    for suffix in ("/chat/completions", "/messages"):
+        if lowered.endswith(suffix):
+            return base[: -len(suffix)].rstrip("/")
+    return base
 
 # 浏览器 UA（伪装成 Chrome，绕过 Cloudflare/WAF 对 SDK UA 的封禁）
 _BROWSER_UA = (
@@ -143,6 +174,7 @@ class LLMError(RuntimeError):
         status: int | None = None,
         code: str = "",
         detail: str = "",
+        retry_after: int = 0,
     ):
         super().__init__(message)
         self.kind = kind
@@ -150,6 +182,7 @@ class LLMError(RuntimeError):
         self.status = status
         self.code = code
         self.detail = detail
+        self.retry_after = max(0, int(retry_after or 0))
 
     def diagnostic(self) -> str:
         parts = [f"kind={self.kind}"]
@@ -160,6 +193,8 @@ class LLMError(RuntimeError):
         parts.append(f"message={super().__str__()}")
         if self.detail:
             parts.append(f"detail={self.detail}")
+        if self.retry_after:
+            parts.append(f"retry_after={self.retry_after}")
         return "；".join(parts)
 
     def __str__(self) -> str:
@@ -167,7 +202,7 @@ class LLMError(RuntimeError):
 
 
 def _sanitize_error_detail(text: str, limit: int = 1200) -> str:
-    text = _SECRET_RE.sub("sk-<masked>", text or "")
+    text = _SECRET_RE.sub("<masked>", text or "")
     text = " ".join(text.split())
     return text[:limit]
 
@@ -361,14 +396,31 @@ def _classify_error(e: Exception) -> LLMError:
             "quota", "LLM 额度不足或账户余额不足，请更换/充值模型 API Key 后重试。",
             e, status=status, code=str(code), detail=detail,
         )
-    if status == 401 or any(k in text for k in ("unauthorized", "invalid api key", "incorrect api key", "无效")):
+    if status == 401 or any(k in text for k in (
+        "unauthorized", "invalid api key", "incorrect api key",
+        "api key 无效", "apikey 无效", "密钥无效", "令牌无效",
+    )):
         return LLMError(
             "auth", "LLM API Key 无效或无权限，请检查任务配置或服务端 .env。",
+            e, status=status, code=str(code), detail=detail,
+        )
+    if status == 403 or any(k in text for k in (
+        "forbidden", "request blocked", "access denied", "content policy", "被拦截", "禁止访问",
+    )):
+        return LLMError(
+            "blocked", "LLM 请求被上游网关或安全策略拒绝，请切换端点或检查访问策略。",
             e, status=status, code=str(code), detail=detail,
         )
     if status == 429 or any(k in text for k in ("rate limit", "too many requests", "限流")):
         return LLMError(
             "rate_limit", "LLM 请求被限流，请稍后重试或降低并发。",
+            e, status=status, code=str(code), detail=detail,
+        )
+    if status in {400, 422} or any(k in text for k in (
+        "invalid_request", "bad request", "unprocessable entity", "参数有误", "参数错误",
+    )):
+        return LLMError(
+            "invalid_request", "LLM 请求参数不被当前端点接受，请切换端点或检查协议配置。",
             e, status=status, code=str(code), detail=detail,
         )
     if any(k in text for k in ("timeout", "timed out", "readtimeout", "connecttimeout", "超时")):
@@ -397,12 +449,160 @@ def _classify_error(e: Exception) -> LLMError:
     )
 
 
+def _should_try_next_provider(error: Exception) -> bool:
+    if not isinstance(error, LLMError):
+        return False
+    if error.kind in {
+        "quota", "auth", "blocked", "invalid_request",
+        "rate_limit", "timeout", "network", "upstream",
+    }:
+        return True
+    if error.kind != "unknown":
+        return False
+    try:
+        status = int(error.status or 0)
+    except (TypeError, ValueError):
+        status = 0
+    return status == 0 or status >= 400
+
+
+def _should_retry_current_provider(error: Exception) -> bool:
+    return isinstance(error, LLMError) and error.kind in {
+        "rate_limit", "timeout", "network", "upstream",
+    }
+
+
+def _provider_weight(provider: LLMConfig) -> int:
+    try:
+        weight = int(getattr(provider, "weight", 1) or 1)
+    except (TypeError, ValueError):
+        weight = 1
+    return max(1, min(weight, 100))
+
+
+def _provider_health_rank(provider: LLMConfig, health: dict[str, dict[str, Any]]) -> int:
+    state = health.get(provider_ref(
+        provider.base_url, provider.model, provider.api_key, provider.protocol
+    )) or {}
+    status = str(state.get("status") or "")
+    if status == "half_open":
+        return 0
+    if status == "failed":
+        return 1
+    if status == "cooldown":
+        return 2
+    return 0
+
+
 class LLMClient:
-    def __init__(self, config: Optional[LLMConfig] = None, usage_key: str | None = None):
-        self.config = config or llm_config
+    def __init__(
+        self,
+        config: Optional[LLMConfig] = None,
+        usage_key: str | None = None,
+        providers: Optional[list[LLMConfig]] = None,
+        pool_mode: bool | None = None,
+        on_provider_failure: Callable[[dict[str, Any]], None] | None = None,
+        on_provider_selected: Callable[[dict[str, Any]], None] | None = None,
+    ):
+        raw_providers = list(providers) if providers is not None else [config or llm_config]
+        self.providers = [
+            provider for provider in raw_providers
+            if provider and provider.api_key and getattr(provider, "enabled", True)
+        ]
         self.usage_key = usage_key
-        if not self.config.api_key:
-            raise RuntimeError("缺少 LLM_API_KEY，请在 .env 中配置")
+        # A one-entry pool has no failover candidate and must retain single-provider
+        # transport retries even when the configuration mode is named "pool".
+        self.pool_mode = len(self.providers) > 1 and (
+            pool_mode is None or bool(pool_mode)
+        )
+        self.on_provider_failure = on_provider_failure
+        self.on_provider_selected = on_provider_selected
+        self.selected_provider: LLMConfig | None = None
+        if not self.providers:
+            raise RuntimeError("缺少 LLM_API_KEY/LLM_PROVIDERS_JSON，请在 .env 或系统设置中配置")
+        self._auto_protocol_cache: dict[str, bool] = {}
+        self._insecure_provider_refs: set[str] = set()
+        self._global_insecure_tls = os.environ.get("LLM_INSECURE_TLS", "").strip() in ("1", "true", "True")
+        self._client_cache: dict[tuple[str, bool], OpenAI] = {}
+        self._sticky_provider_ref = ""
+        self._provider_slot_owner = uuid.uuid4().hex
+        self._activate_provider(self.providers[0])
+
+    def _provider_order(self) -> list[LLMConfig]:
+        if len(self.providers) <= 1:
+            return list(self.providers)
+        health = health_snapshot()
+        if self._sticky_provider_ref:
+            sticky_index = next((
+                index
+                for index, provider in enumerate(self.providers)
+                if provider_ref(
+                    provider.base_url, provider.model, provider.api_key, provider.protocol
+                )
+                == self._sticky_provider_ref
+                and _provider_health_rank(provider, health) == 0
+            ), None)
+            if sticky_index is not None:
+                remaining = sorted(
+                    (index for index in range(len(self.providers)) if index != sticky_index),
+                    key=lambda index: _provider_health_rank(self.providers[index], health),
+                )
+                return [self.providers[sticky_index], *(self.providers[index] for index in remaining)]
+        groups: dict[int, list[int]] = {0: [], 1: [], 2: []}
+        for index, provider in enumerate(self.providers):
+            groups[_provider_health_rank(provider, health)].append(index)
+
+        ordered: list[int] = []
+        for rank in (0, 1, 2):
+            for index in self._weighted_group_order(groups[rank], rank):
+                if index not in ordered:
+                    ordered.append(index)
+        return [self.providers[index] for index in ordered]
+
+    def _weighted_group_order(self, indices: list[int], rank: int) -> list[int]:
+        if not indices:
+            return []
+        positions = {index: position for position, index in enumerate(indices)}
+        refs = {
+            index: provider_ref(
+                self.providers[index].base_url,
+                self.providers[index].model,
+                self.providers[index].api_key,
+                self.providers[index].protocol,
+            )
+            for index in indices
+        }
+        weights = {index: _provider_weight(self.providers[index]) for index in indices}
+        pool_key = "|".join(
+            f"{refs[index]}:{weights[index]}"
+            for index in indices
+        )
+        total_weight = sum(weights.values())
+        state_prefix = f"{rank}:{pool_key}:"
+        with _RR_LOCK:
+            scores: dict[int, int] = {}
+            for index in indices:
+                key = f"{state_prefix}{positions[index]}:{refs[index]}"
+                score = _RR_STATE.get(key, 0) + weights[index]
+                _RR_STATE[key] = score
+                scores[index] = score
+
+            # Choose the highest accumulated score, then subtract the pool total.
+            # This is the standard Smooth WRR recurrence and avoids bursts such as
+            # A,A,A,B for a 3:1 pool while preserving the exact long-run ratio.
+            selected = max(indices, key=lambda index: (scores[index], -positions[index]))
+            selected_key = f"{state_prefix}{positions[selected]}:{refs[selected]}"
+            _RR_STATE[selected_key] -= total_weight
+            scores[selected] -= total_weight
+
+            remaining = sorted(
+                (index for index in indices if index != selected),
+                key=lambda index: (-scores[index], positions[index]),
+            )
+        return [selected, *remaining]
+
+    def _activate_provider(self, config: LLMConfig) -> None:
+        self.config = config
         # 协议自适应：先按显式配置/强特征确定；不确定时给个默认猜测(未锁定)，
         # 运行时若首个请求报“协议不匹配”特征错误，自动切另一种协议重试并沿用。
         self._messages_protocol, self._protocol_locked = self._detect_messages_protocol()
@@ -410,29 +610,48 @@ class LLMClient:
         self._is_https = self.config.base_url.lower().startswith("https")
         # TLS 自适应：默认走正规证书校验；只有当 base_url 是 https 且首次遇到
         # “证书校验失败”（多为自建中转/网关的自签证书）时，才自动降级为不校验并沿用。
-        # 也支持显式 LLM_INSECURE_TLS=1 一开始就不校验（兜底）。
-        self._insecure_tls = os.environ.get("LLM_INSECURE_TLS", "").strip() in ("1", "true", "True")
-        self.client = self._build_client(insecure=self._insecure_tls)
+        # 也支持显式 LLM_INSECURE_TLS=1 一开始就不校验（兜底）。降级状态按端点隔离。
+        ref = provider_ref(
+            self.config.base_url, self.config.model, self.config.api_key, self.config.protocol
+        )
+        self._insecure_tls = self._global_insecure_tls or ref in self._insecure_provider_refs
+        cache_key = (ref, self._insecure_tls)
+        if cache_key not in self._client_cache:
+            self._client_cache[cache_key] = self._build_client(insecure=self._insecure_tls)
+        self.client = self._client_cache[cache_key]
 
     def _detect_messages_protocol(self) -> tuple[bool, bool]:
         """判定协议，返回 (是否 Anthropic Messages, 是否已锁定)。
 
-        - 环境变量 LLM_PROTOCOL 显式指定 → 锁定（messages/anthropic → True，openai/chat → False）。
+        - 当前 provider 显式指定 → 锁定（anthropic_messages / openai_chat）。
         - base_url 强特征（openmodel.ai / 路径含 messages / anthropic）→ 锁定 messages。
         - base_url 强特征（路径含 chat/completions）→ 锁定 openai。
         - 都没命中 → 默认按 openai 猜测，但**不锁定**，交给运行时自适应纠正。
         """
-        explicit = os.environ.get("LLM_PROTOCOL", "").strip().lower()
-        if explicit in ("messages", "anthropic"):
+        explicit = str(getattr(self.config, "protocol", "auto") or "auto").strip().lower()
+        if explicit in ("messages", "anthropic", "anthropic_messages"):
             return True, True
-        if explicit in ("openai", "chat", "completions"):
+        if explicit in ("openai", "chat", "completions", "openai_chat"):
             return False, True
+        ref = provider_ref(
+            self.config.base_url, self.config.model, self.config.api_key, self.config.protocol
+        )
+        if ref in self._auto_protocol_cache:
+            return self._auto_protocol_cache[ref], False
         url = self.config.base_url.lower()
         if "openmodel.ai" in url or "/messages" in url or "anthropic" in url:
             return True, True
         if "/chat/completions" in url or "chat/completions" in url:
             return False, True
         return False, False  # 默认 openai，未锁定，运行时可自适应切换
+
+    def _remember_auto_protocol(self) -> None:
+        if self._protocol_locked:
+            return
+        ref = provider_ref(
+            self.config.base_url, self.config.model, self.config.api_key, self.config.protocol
+        )
+        self._auto_protocol_cache[ref] = self._messages_protocol
 
     def _maybe_switch_protocol(self, exc: Exception) -> bool:
         """协议自适应：首个请求报“协议不匹配”特征错误时，自动切另一种协议重试。
@@ -466,7 +685,7 @@ class LLMClient:
         # 关闭 SDK 内置重试，自己控制重试节奏与日志；设请求超时兜住挂起。
         # default_headers 换 UA + 抹 x-stainless-*，绕过中转/WAF 对 SDK UA 的 403 封禁。
         return OpenAI(
-            base_url=self.config.base_url, api_key=self.config.api_key,
+            base_url=_api_root(self.config.base_url), api_key=self.config.api_key,
             timeout=_REQUEST_TIMEOUT, max_retries=0,
             default_headers=_llm_default_headers(self.config.model, self.config.base_url),
             **({"http_client": http_client} if http_client else {}),
@@ -488,7 +707,14 @@ class LLMClient:
         )
         if any(m in text for m in tls_markers):
             self._insecure_tls = True
-            self.client = self._build_client(insecure=True)
+            ref = provider_ref(
+                self.config.base_url, self.config.model, self.config.api_key, self.config.protocol
+            )
+            self._insecure_provider_refs.add(ref)
+            cache_key = (ref, True)
+            if cache_key not in self._client_cache:
+                self._client_cache[cache_key] = self._build_client(insecure=True)
+            self.client = self._client_cache[cache_key]
             logger.warning("检测到 LLM 中转 TLS 证书校验失败，已自动降级为不校验证书重试（多为自建自签中转）")
             return True
         return False
@@ -501,10 +727,156 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ):
-        """单次对话调用，返回完整 message 对象（可能含 tool_calls）。
+        """调用一个健康端点，失败时按健康状态和权重切换备用端点。"""
+        last_exc: Exception | None = None
+        cooldown_delays: list[int] = []
+        order = self._provider_order()
+        for index, provider in enumerate(order):
+            self._activate_provider(provider)
+            can_try, slot_state = acquire_provider_slot(
+                provider.base_url,
+                provider.model,
+                provider.api_key,
+                provider.protocol,
+                owner=self._provider_slot_owner,
+            )
+            if not can_try:
+                cooldown_delays.append(
+                    provider_retry_after_seconds(
+                        provider.base_url, provider.model, provider.api_key, provider.protocol
+                    )
+                )
+                continue
+            self.selected_provider = provider
+            self._notify_provider_selected(provider, slot_state)
+            try:
+                message = self._chat_current_provider(
+                    messages, tools, tool_choice, temperature, max_tokens
+                )
+                self._remember_auto_protocol()
+                mark_provider_ok(
+                    provider.base_url, provider.model, provider.api_key, provider.protocol
+                )
+                self._sticky_provider_ref = provider_ref(
+                    provider.base_url, provider.model, provider.api_key, provider.protocol
+                )
+                return message
+            except Exception as exc:
+                error = exc if isinstance(exc, LLMError) else _classify_error(exc)
+                state = mark_provider_failed(
+                    provider.base_url,
+                    provider.model,
+                    str(error),
+                    provider.api_key,
+                    provider.protocol,
+                    kind=getattr(error, "kind", ""),
+                )
+                self._notify_provider_failure(error, state)
+                last_exc = error
+                if (
+                    not self.pool_mode
+                    and state.get("status") == "cooldown"
+                    and _should_retry_current_provider(error)
+                ):
+                    retry_after = provider_retry_after_seconds(
+                        provider.base_url,
+                        provider.model,
+                        provider.api_key,
+                        provider.protocol,
+                    )
+                    raise LLMError(
+                        "provider_cooldown",
+                        f"LLM 端点正在冷却，预计 {retry_after} 秒后重试。",
+                        retry_after=retry_after,
+                    )
+                if index + 1 < len(order) and _should_try_next_provider(error):
+                    logger.warning(
+                        "LLM provider failed; trying next provider %d/%d "
+                        "(kind=%s, slot=%s, model=%s, base=%s)",
+                        index + 2, len(order), getattr(error, "kind", "?"), slot_state,
+                        provider.model, provider.base_url,
+                    )
+                    continue
+                if self.pool_mode and _should_try_next_provider(error):
+                    break
+                raise error
 
-        带超时 + 指数退避重试；耗尽重试后抛出最后一次异常（调用方已有兜底）。
-        """
+        # A cooldown result means that no endpoint was actually called. If at
+        # least one endpoint was called, preserve its real error so quota/auth/
+        # request failures are not misreported as a generic pool cooldown.
+        if last_exc:
+            raise last_exc
+        if cooldown_delays:
+            retry_after = min(cooldown_delays)
+            raise LLMError(
+                "provider_cooldown",
+                f"LLM 端点池正在冷却，预计 {retry_after} 秒后重试。",
+                retry_after=retry_after,
+            )
+        raise RuntimeError("没有可用的 LLM 端点")
+
+    def _notify_provider_selected(self, provider: LLMConfig, slot_state: str) -> None:
+        if not self.on_provider_selected:
+            return
+        try:
+            self.on_provider_selected({
+                "base_url": provider.base_url,
+                "model": provider.model,
+                "protocol": provider.protocol,
+                "slot_state": slot_state,
+            })
+        except Exception:
+            logger.exception("LLM provider selection callback failed")
+
+    def _notify_provider_failure(self, error: Exception, state: dict[str, Any]) -> None:
+        if not self.on_provider_failure:
+            return
+        try:
+            self.on_provider_failure({
+                "base_url": self.config.base_url,
+                "model": self.config.model,
+                "kind": getattr(error, "kind", ""),
+                "status": getattr(error, "status", None),
+                "error": _sanitize_error_detail(str(error), 500),
+                "provider_status": state.get("status"),
+                "transition": state.get("transition"),
+                "consecutive_failures": state.get("consecutive_failures", 0),
+                "cooldown_seconds": state.get("cooldown_seconds", 0),
+                "cooldown_until": state.get("cooldown_until", ""),
+            })
+        except Exception:
+            logger.exception("LLM provider failure callback failed")
+
+    def report_current_provider_failure(self, reason: str, *, kind: str = "model_behavior") -> dict[str, Any]:
+        error = LLMError(kind, _sanitize_error_detail(reason, 500))
+        state = mark_provider_behavior_failed(
+            self.config.base_url,
+            self.config.model,
+            str(error),
+            self.config.api_key,
+            self.config.protocol,
+            kind=kind,
+        )
+        self._notify_provider_failure(error, state)
+        return state
+
+    def report_current_provider_success(self) -> None:
+        mark_provider_behavior_ok(
+            self.config.base_url,
+            self.config.model,
+            self.config.api_key,
+            self.config.protocol,
+        )
+
+    def _chat_current_provider(
+        self,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """单次对话调用，返回完整 message 对象（可能含 tool_calls）。"""
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -524,7 +896,10 @@ class LLMClient:
         active_tool_choice: Any = tool_choice
         tool_choice_fallback_used = False
         max_tokens_fallback_used = False
-        for attempt in range(_MAX_RETRIES + 1):
+        max_retries = 0 if self.pool_mode else _MAX_RETRIES
+        retry_count = 0
+        # TLS/协议/参数兼容降级各自最多触发一次，不占传输重试次数。
+        for _attempt in range(max_retries + 5):
             try:
                 if self._messages_protocol:
                     return self._messages_chat(
@@ -578,17 +953,25 @@ class LLMClient:
                     kwargs.pop("max_tokens", None)
                     max_tokens_fallback_used = True
                     continue
-                if attempt < _MAX_RETRIES:
+                if not _should_retry_current_provider(last_exc):
+                    logger.warning(
+                        "LLM chat failed without same-provider retry (kind=%s, model=%s)",
+                        kind, self.config.model,
+                    )
+                    break
+                if retry_count < max_retries:
                     logger.info("LLM chat retry %d/%d (kind=%s, model=%s)",
-                                attempt + 1, _MAX_RETRIES, kind, self.config.model)
-                    time.sleep(min(2 ** attempt, 8))  # 1s, 2s, 4s... 封顶 8s
+                                retry_count + 1, max_retries, kind, self.config.model)
+                    time.sleep(min(2 ** retry_count, 8))  # 1s, 2s, 4s... 封顶 8s
+                    retry_count += 1
                 else:
                     logger.warning("LLM chat giving up after %d retries (kind=%s, model=%s)",
-                                   _MAX_RETRIES, kind, self.config.model)
+                                   max_retries, kind, self.config.model)
+                    break
         raise last_exc  # type: ignore[misc]
 
     def _messages_url(self) -> str:
-        base = self.config.base_url.rstrip("/")
+        base = _api_root(self.config.base_url)
         if base.endswith("/v1"):
             return f"{base}/messages"
         return f"{base}/v1/messages"
@@ -703,7 +1086,9 @@ class LLMClient:
                 payload["tool_choice"] = choice
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
+            "x-api-key": self.config.api_key,
             "Content-Type": "application/json",
+            "Accept": "application/json",
             "anthropic-version": "2023-06-01",
             # 换 UA，绕过中转/2api WAF 对 SDK UA 的 403 封禁。
             "User-Agent": _resolve_user_agent(self.config.model, self.config.base_url),
