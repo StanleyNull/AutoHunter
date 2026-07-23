@@ -17,7 +17,12 @@ async function loadModels() {
   modelsLoading.value = true;
   modelsError.value = "";
   try {
-    const res = await api.listModels(form.base_url || undefined, form.api_key || undefined);
+    const res = await api.taskModels(props.task.id, {
+      base_url: form.base_url || undefined,
+      api_key: form.api_key || undefined,
+      key_ref: form.key_ref || undefined,
+      protocol: form.protocol,
+    });
     if (res?.ok && res.models?.length) {
       models.value = res.models;
       // 当前模型不在列表里 → 默认进入手输模式，避免选错
@@ -46,9 +51,12 @@ const form = reactive({
   intent_mode: "",
   manual_targets: "",
   src_rules: "",
+  inherit_model_global: true,
   base_url: "",
   api_key: "",
+  key_ref: "",
   model: "",
+  protocol: "auto",
   prompt_version: "legacy",
   fofa_key: "",
   fofa_base_url: "",
@@ -61,6 +69,7 @@ const authBindings = ref([{ target: "*", raw: "", username: "", password: "", co
 const original = reactive({
   base_url: "",
   model: "",
+  protocol: "auto",
   prompt_version: "legacy",
   intent_mode: "",
   fofa_base_url: "",
@@ -89,6 +98,13 @@ function addBinding() {
 function removeBinding(i) {
   authBindings.value.splice(i, 1);
   if (!authBindings.value.length) authBindings.value.push(emptyBinding());
+}
+
+function invalidateModelKey() {
+  form.key_ref = "";
+  models.value = [];
+  modelsError.value = "";
+  useCustomModel.value = true;
 }
 function exportAuthBindings() {
   return authBindings.value
@@ -137,7 +153,10 @@ function fill(task) {
   form.src_rules = task.src_rules || "";
   form.base_url = modelCfg.base_url || "";
   form.api_key = "";
+  form.key_ref = modelCfg.key_ref || "";
   form.model = modelCfg.model || "";
+  form.protocol = modelCfg.protocol || "auto";
+  form.inherit_model_global = modelCfg.inherit_global !== false;
   form.prompt_version = modelCfg.prompt_version || "legacy";
   form.fofa_key = "";
   form.fofa_base_url = fofaCfg.base_url || "";
@@ -148,6 +167,7 @@ function fill(task) {
   loadAuthBindings(task);
   original.base_url = form.base_url;
   original.model = form.model;
+  original.protocol = form.protocol;
   original.prompt_version = form.prompt_version;
   original.intent_mode = form.intent_mode;
   original.fofa_base_url = form.fofa_base_url;
@@ -168,11 +188,13 @@ watch(() => props.open, (open) => {
 });
 
 async function save() {
-  const modelConfig = {};
-  if (form.base_url !== original.base_url) modelConfig.base_url = form.base_url;
-  if (form.model !== original.model) modelConfig.model = form.model;
+  if (!form.inherit_model_global && !form.api_key.trim() && !form.key_ref) return;
+  const modelConfig = { inherit_global: form.inherit_model_global };
+  if (!form.inherit_model_global) modelConfig.base_url = form.base_url;
+  if (!form.inherit_model_global) modelConfig.model = form.model;
+  if (!form.inherit_model_global) modelConfig.protocol = form.protocol;
   if (form.prompt_version !== original.prompt_version) modelConfig.prompt_version = form.prompt_version;
-  if (form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
+  if (!form.inherit_model_global && form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
 
   const maxPages = parseInt(form.max_pages) || 20;
   const pageSize = parseInt(form.page_size) || 100;
@@ -305,22 +327,27 @@ async function save() {
 
       <details open>
         <summary>高级：模型 / FOFA</summary>
+        <label class="check-line">
+          <input v-model="form.inherit_model_global" type="checkbox" />
+          跟随系统模型方案
+        </label>
         <div class="settings-grid">
-          <label>模型 base_url <input v-model="form.base_url" placeholder="https://api.deepseek.com/v1" /></label>
+          <label>模型 base_url <input v-model="form.base_url" :disabled="form.inherit_model_global" :required="!form.inherit_model_global" placeholder="https://api.deepseek.com/v1" @input="invalidateModelKey" /></label>
           <label class="model-field">
             模型名
             <div class="model-picker">
-              <select v-if="models.length && !useCustomModel" v-model="form.model">
+              <select v-if="models.length && !useCustomModel" v-model="form.model" :disabled="form.inherit_model_global">
                 <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
               </select>
-              <input v-else v-model="form.model" placeholder="deepseek-chat" />
-              <button type="button" class="ghost-btn" :disabled="modelsLoading" @click="loadModels" title="改了 base_url/api_key 后可重新拉取">
+              <input v-else v-model="form.model" :disabled="form.inherit_model_global" :required="!form.inherit_model_global" placeholder="deepseek-chat" />
+              <button type="button" class="ghost-btn" :disabled="modelsLoading || form.inherit_model_global" @click="loadModels" title="改了 base_url/api_key 后可重新拉取">
                 {{ modelsLoading ? "拉取中…" : "刷新" }}
               </button>
               <button
                 v-if="models.length"
                 type="button"
                 class="ghost-btn"
+                :disabled="form.inherit_model_global"
                 @click="useCustomModel = !useCustomModel"
               >
                 {{ useCustomModel ? "选列表" : "手动输入" }}
@@ -329,6 +356,13 @@ async function save() {
             <small v-if="modelsError" class="model-hint">{{ modelsError }}</small>
             <small v-else-if="models.length" class="model-hint">已获取 {{ models.length }} 个可用模型</small>
           </label>
+          <label>模型协议
+            <select v-model="form.protocol" :disabled="form.inherit_model_global" @change="invalidateModelKey">
+              <option value="auto">自动识别</option>
+              <option value="openai_chat">OpenAI Chat Completions</option>
+              <option value="anthropic_messages">Anthropic Messages</option>
+            </select>
+          </label>
           <label>Worker 提示词
             <select v-model="form.prompt_version">
               <option value="current">current（当前省 token 版）</option>
@@ -336,7 +370,7 @@ async function save() {
               <option value="modern">modern（当前完整版）</option>
             </select>
           </label>
-          <label>模型 api_key <input v-model="form.api_key" type="password" placeholder="留空保留原值" /></label>
+          <label>模型 api_key <input v-model="form.api_key" :disabled="form.inherit_model_global" :required="!form.inherit_model_global && !form.key_ref" type="password" :placeholder="form.key_ref ? '已配置，留空保留原值' : 'sk-...'" /></label>
           <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
           <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
           <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" min="1" max="200" /></label>

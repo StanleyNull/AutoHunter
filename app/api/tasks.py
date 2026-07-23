@@ -7,7 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dto import CreateTaskRequest, TaskResponse, TaskStats, UpdateTaskRequest
+from app.api.dto import (
+    CreateTaskRequest,
+    TaskModelsProbeRequest,
+    TaskResponse,
+    TaskStats,
+    UpdateTaskRequest,
+)
 from app.agents import site_collab
 from app.agents.prompts import normalize_src_type
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
@@ -15,7 +21,17 @@ from app.db.session import get_session
 from app.llm.usage import usage_snapshot
 from app.orchestrator import manager
 from app.security import resolve_role, token_from_headers
-from app.settings_service import resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version
+from app.settings_service import (
+    _llm_identity,
+    is_masked_secret,
+    list_available_models,
+    normalize_llm_protocol,
+    resolve_engine_config,
+    resolve_llm_config,
+    resolve_llm_providers,
+    resolve_worker_prompt_version,
+    secret_ref,
+)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -55,6 +71,17 @@ def _observer_fofa_config() -> dict:
         "key_set": False, "current_query": "", "cursor": 0,
         "collector_phase": "", "collector_phase_text": "",
     }
+
+
+def _model_inherits_global(cfg: dict) -> bool:
+    if cfg.get("inherit_global") is not None:
+        return bool(cfg.get("inherit_global"))
+    if cfg.get("providers"):
+        return False
+    return not any(
+        str(cfg.get(key) or "").strip()
+        for key in ("api_key", "providers_json", "base_url", "model", "protocol")
+    )
 
 
 def _mask_label(label: str) -> str:
@@ -121,11 +148,16 @@ def _observer_ip(ip: str) -> str:
 
 def _public_model_config(task: Task) -> dict:
     cfg = resolve_llm_config(task)
+    raw_cfg = dict(task.model_config_json or {})
     return {
         "base_url": cfg.base_url,
         "model": cfg.model,
+        "protocol": cfg.protocol,
         "api_key_set": bool(cfg.api_key),
+        "key_ref": secret_ref(cfg.api_key),
+        "provider_count": len(resolve_llm_providers(task)),
         "prompt_version": resolve_worker_prompt_version(task),
+        "inherit_global": _model_inherits_global(raw_cfg),
     }
 
 
@@ -280,12 +312,28 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         fofa_cfg["key"] = eng_cfg["key"]
     if eng_cfg.get("base_url"):
         fofa_cfg["base_url"] = eng_cfg["base_url"]
+    inherit_global = req.model_config_data.inherit_global
+    if inherit_global is None:
+        inherit_global = not bool(
+            req.model_config_data.model_fields_set
+            & {"base_url", "api_key", "model", "protocol"}
+        )
+    if inherit_global:
+        model_config = req.model_config_data.model_dump(exclude_defaults=True)
+        model_config = {k: v for k, v in model_config.items() if k == "prompt_version"}
+        model_config["inherit_global"] = True
+    else:
+        model_config = req.model_config_data.model_dump(
+            exclude={"inherit_global"},
+            exclude_unset=True,
+        )
+        model_config["inherit_global"] = False
     task = Task(
         name=req.name, src_type=normalize_src_type(req.src_type), vuln_types=req.vuln_types,
         src_rules=req.src_rules, target_source=req.target_source,
         engine=engine_name, fofa_query=req.fofa_query, manual_targets=req.manual_targets,
         auth_bindings=_dump_auth_bindings(req.auth_bindings),
-        model_config_json=req.model_config_data.model_dump(exclude_defaults=True),
+        model_config_json=model_config,
         fofa_config=fofa_cfg, concurrency=req.concurrency,
         status="created",
     )
@@ -293,6 +341,36 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
     await session.commit()
     await session.refresh(task)
     return _task_to_dto(task)
+
+
+@router.post("/{task_id}/models")
+async def probe_task_models(
+    task_id: str,
+    body: TaskModelsProbeRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    config = resolve_llm_config(task)
+    base_url = str(body.base_url or config.base_url or "").strip()
+    protocol = normalize_llm_protocol(body.protocol or config.protocol)
+    api_key = str(body.api_key or "").strip()
+    if is_masked_secret(api_key):
+        api_key = ""
+    if not api_key:
+        same_identity = _llm_identity(base_url, protocol) == _llm_identity(
+            config.base_url, config.protocol
+        )
+        same_ref = bool(body.key_ref and body.key_ref == secret_ref(config.api_key))
+        if not (same_identity and same_ref):
+            return {"ok": False, "error": "端点或协议已变化，请重新输入 API Key", "models": []}
+        api_key = config.api_key
+    return await list_available_models(
+        base_url=base_url,
+        api_key=api_key,
+        protocol=protocol,
+    )
 
 
 @router.get("", response_model=list[TaskResponse])
@@ -434,11 +512,37 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     if req.model_config_data is not None:
         patch = req.model_config_data.model_dump(exclude_unset=True)
         cfg = dict(task.model_config_json or {})
-        for key in ("base_url", "model"):
-            if key in patch and patch[key] is not None:
-                cfg[key] = str(patch[key]).strip()
-        if str(patch.get("api_key") or "").strip():
-            cfg["api_key"] = str(patch["api_key"]).strip()
+        current_runtime = resolve_llm_config(task)
+        current_identity = _llm_identity(
+            current_runtime.base_url, current_runtime.protocol
+        )
+        if patch.get("inherit_global") is True:
+            cfg = {k: v for k, v in cfg.items() if k == "prompt_version"}
+            cfg["inherit_global"] = True
+        elif patch.get("inherit_global") is False:
+            cfg.pop("providers", None)
+            cfg.pop("providers_json", None)
+            cfg["inherit_global"] = False
+        next_identity = _llm_identity(
+            patch.get("base_url")
+            if patch.get("base_url") is not None
+            else cfg.get("base_url") or current_runtime.base_url,
+            patch.get("protocol")
+            if patch.get("protocol") is not None
+            else cfg.get("protocol") or current_runtime.protocol,
+        )
+        supplied_key = str(patch.get("api_key") or "").strip()
+        has_new_key = bool(supplied_key and not is_masked_secret(supplied_key))
+        if current_identity != next_identity and not has_new_key:
+            cfg.pop("api_key", None)
+        for key in ("base_url", "model", "protocol"):
+            if not cfg.get("inherit_global") and key in patch and patch[key] is not None:
+                value = str(patch[key]).strip()
+                cfg[key] = normalize_llm_protocol(value) if key == "protocol" else value
+        if not cfg.get("inherit_global") and has_new_key:
+            cfg["api_key"] = supplied_key
+        if "prompt_version" in patch and patch.get("prompt_version") is not None:
+            cfg["prompt_version"] = str(patch["prompt_version"]).strip()
         task.model_config_json = cfg
 
     if req.engine_config is not None:
