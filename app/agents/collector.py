@@ -341,7 +341,9 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
         await session.commit()
         return added
 
-    # 1) 手动清单（一次性消费；.gov 一律跳过，其余用户指定的直接入队）
+    # 1) 手动清单（.gov 一律跳过，其余用户指定的直接入队）
+    #    不消费 manual_targets：保留用户原始清单便于任务详情/编辑展示，且停止后
+    #    重启时能靠它把手动目标补回队列；重复入队由 seen(_existing_hosts) 去重兜住。
     if task.target_source in ("manual", "both") and task.manual_targets:
         for raw in task.manual_targets:
             host = normalize_host(raw)
@@ -362,7 +364,6 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                                source="manual", status="queued",
                                auth_context=_auth_context_for(task, _ensure_url(host))))
             added += 1
-        task.manual_targets = []  # 消费掉，避免重复
 
     # 2) FOFA 智能搜集
     if task.target_source in ("fofa", "both"):
@@ -471,10 +472,14 @@ async def _fofa_collect(
 
     next_cursor = cursor + 1
 
-    # 频率限制冷却检查：如果还在冷却期内，直接跳过本轮
+    # 频率限制冷却检查：如果还在冷却期内，直接跳过本轮。
+    # 用 time.time() 墙钟（不是 time.monotonic()）：冷却时间戳要落进 fofa_config
+    # 持久化、跨进程重启读取，而 monotonic 是进程相对时钟，重启后与旧值不可比，
+    # 会把冷却期误判为「还没到」导致重启后一直跳过 FOFA 搜集。
+    now = time.time()
     rate_limit_until = float(cfg.get("rate_limit_until", 0))
-    if rate_limit_until > time.monotonic():
-        remain = rate_limit_until - time.monotonic()
+    if rate_limit_until > now:
+        remain = rate_limit_until - now
         cfg["collector_phase"] = "fofa_error"
         await report(
             "fofa_error",
@@ -488,7 +493,7 @@ async def _fofa_collect(
     # 12 次都卡才停任务（适合挂机过夜，等 FOFA 次日额度恢复自动继续）。
     # 冷却期内静默跳过，不重复弹消息（初始检测已报告过，避免每轮刷屏）。
     daily_limit_until = float(cfg.get("daily_limit_until", 0))
-    if daily_limit_until > time.monotonic():
+    if daily_limit_until > time.time():
         cfg["collector_phase"] = "fofa_error"
         task.fofa_config = {**cfg}
         return 0
@@ -527,7 +532,7 @@ async def _fofa_collect(
         # 不 sleep：设足够长的冷却期（60s→120s→240s→480s），让调度器跳过
         backoff = min(60 * (2 ** (rl_count - 1)), 600)
         cfg["rate_limit_count"] = rl_count
-        cfg["rate_limit_until"] = time.monotonic() + backoff
+        cfg["rate_limit_until"] = time.time() + backoff
         cfg["last_fofa_error"] = err
         cfg["collector_phase"] = "fofa_error"
         cfg["fofa_auth_fail_count"] = 0
@@ -550,7 +555,7 @@ async def _fofa_collect(
         if _is_daily_limit:
             dl_count = int(cfg.get("daily_limit_count", 0)) + 1
             cfg["daily_limit_count"] = dl_count
-            cfg["daily_limit_until"] = time.monotonic() + 3600  # 1 小时后重试
+            cfg["daily_limit_until"] = time.time() + 3600  # 1 小时后重试
             cfg["last_fofa_error"] = err
             cfg["collector_phase"] = "fofa_error"
             cfg["fofa_auth_fail_count"] = 0  # 不算账号无效，避免触发暂停
@@ -579,7 +584,7 @@ async def _fofa_collect(
             # 不 sleep，设冷却期让调度器跳过
             backoff = min(60 * (2 ** (rl_count - 1)), 600)
             cfg["rate_limit_count"] = rl_count
-            cfg["rate_limit_until"] = time.monotonic() + backoff
+            cfg["rate_limit_until"] = time.time() + backoff
             cfg["last_fofa_error"] = err
             cfg["collector_phase"] = "fofa_error"
             cfg["fofa_auth_fail_count"] = 0
@@ -626,6 +631,16 @@ async def _fofa_collect(
     cfg["daily_limit_count"] = 0
     cfg.pop("daily_limit_until", None)
     cfg.pop("daily_limit_exhausted", None)
+
+    # 关键：抓这一页时 FOFA 额度已经花掉了。这里立刻把游标推进 + 当前语法落库并
+    # commit，不要等后面那条慢管线（探活预筛 / LLM 评分 / 目标过滤 / 泄露凭证查询）
+    # 跑完才存。否则用户在慢管线执行期间点停止、或进程重启，已花额度的这一页游标没
+    # 保存，重启后又从同一页（对刚起步任务就是第一页）重抓，白白浪费 FOFA 额度。
+    cfg["current_query"] = cur_query
+    cfg["cursor"] = cursor
+    cfg["history"] = history
+    task.fofa_config = {**cfg}
+    await session.commit()
 
     # host 归属兜底过滤：即使 FOFA 语法因运算符优先级或 LLM 演化丢锚点而放宽范围，
     # 也在入库前按用户指定的根域名白名单二次过滤，丢弃一切范围外的无关资产。
