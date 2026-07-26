@@ -1,6 +1,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
+import { useAuthBindings, emptyBinding } from "../composables/useAuthBindings.js";
 
 const props = defineProps({
   open: Boolean,
@@ -65,7 +66,9 @@ const form = reactive({
   concurrency: 3,
   skip_site_recon: false,
 });
-const authBindings = ref([{ target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" }]);
+const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions, manualTargetLines } =
+  useAuthBindings(() => form.manual_targets);
+const saving = ref(false);
 const original = reactive({
   base_url: "",
   model: "",
@@ -79,46 +82,11 @@ const original = reactive({
 const isSiteMode = computed(() => form.target_source === "site");
 const isFofaMode = computed(() => form.target_source === "fofa");
 const showAuthBindings = computed(() => !isFofaMode.value);
-const manualTargetLines = computed(() =>
-  form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean)
-);
-const bindingOptions = computed(() => {
-  const opts = [{ value: "*", label: "*（全部目标默认）" }];
-  for (const line of manualTargetLines.value) {
-    opts.push({ value: line, label: line });
-  }
-  return opts;
-});
-function emptyBinding() {
-  return { target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" };
-}
-function addBinding() {
-  authBindings.value.push(emptyBinding());
-}
-function removeBinding(i) {
-  authBindings.value.splice(i, 1);
-  if (!authBindings.value.length) authBindings.value.push(emptyBinding());
-}
-
 function invalidateModelKey() {
   form.key_ref = "";
   models.value = [];
   modelsError.value = "";
   useCustomModel.value = true;
-}
-function exportAuthBindings() {
-  return authBindings.value
-    .map((b) => ({
-      target: (b.target || "*").trim() || "*",
-      username: (b.username || "").trim(),
-      password: (b.password || "").trim(),
-      cookie: (b.cookie || "").trim(),
-      authorization: (b.authorization || "").trim(),
-      login_url: (b.login_url || "").trim(),
-      raw: (b.raw || "").trim(),
-      note: (b.note || "").trim(),
-    }))
-    .filter((b) => b.username || b.password || b.cookie || b.authorization || b.raw);
 }
 function loadAuthBindings(task) {
   const rows = Array.isArray(task?.auth_bindings) ? task.auth_bindings : [];
@@ -189,6 +157,9 @@ watch(() => props.open, (open) => {
 
 async function save() {
   if (!form.inherit_model_global && !form.api_key.trim() && !form.key_ref) return;
+  if (saving.value) return;   // 防抖：慢网络/双击不重复 PATCH
+  saving.value = true;
+  try {
   const modelConfig = { inherit_global: form.inherit_model_global };
   if (!form.inherit_model_global) modelConfig.base_url = form.base_url;
   if (!form.inherit_model_global) modelConfig.model = form.model;
@@ -222,6 +193,9 @@ async function save() {
     fofa_config: fofaConfig,
   });
   emit("saved", updated);
+  } finally {
+    saving.value = false;
+  }
 }
 </script>
 
@@ -377,7 +351,7 @@ async function save() {
 
       <footer>
         <button type="button" @click="emit('close')">取消</button>
-        <button type="submit" class="primary">保存参数</button>
+        <button type="submit" class="primary" :disabled="saving">{{ saving ? "保存中…" : "保存参数" }}</button>
       </footer>
     </form>
   </div>

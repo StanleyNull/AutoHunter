@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
+import { useAuthBindings } from "../composables/useAuthBindings.js";
 
 const router = useRouter();
 const adv = ref(false);
@@ -21,7 +22,9 @@ const form = reactive({
   skip_site_recon: false,
   skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
 });
-const authBindings = ref([{ target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" }]);
+const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions, manualTargetLines } =
+  useAuthBindings(() => form.manual_targets);
+const submitting = ref(false);
 
 const inherited = reactive({
   base_url: "",
@@ -40,45 +43,8 @@ const isFofaMode = computed(() => form.target_source === "fofa");
 // 凭据区只对「用户自己指定目标」有意义：手动 / 两者 / 单站。纯 FOFA 自动搜不展示。
 const showAuthBindings = computed(() => !isFofaMode.value);
 
-const manualTargetLines = computed(() =>
-  form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean)
-);
-
-const bindingOptions = computed(() => {
-  const opts = [{ value: "*", label: "*（全部目标默认）" }];
-  for (const line of manualTargetLines.value) {
-    opts.push({ value: line, label: line });
-  }
-  return opts;
-});
-
-function emptyBinding() {
-  return { target: "*", raw: "", username: "", password: "", cookie: "", authorization: "", login_url: "", note: "" };
-}
-function addBinding() {
-  authBindings.value.push(emptyBinding());
-}
-function removeBinding(i) {
-  authBindings.value.splice(i, 1);
-  if (!authBindings.value.length) authBindings.value.push(emptyBinding());
-}
-
 function invalidateModelKey() {
   form.key_ref = "";
-}
-function exportAuthBindings() {
-  return authBindings.value
-    .map((b) => ({
-      target: (b.target || "*").trim() || "*",
-      username: (b.username || "").trim(),
-      password: (b.password || "").trim(),
-      cookie: (b.cookie || "").trim(),
-      authorization: (b.authorization || "").trim(),
-      login_url: (b.login_url || "").trim(),
-      raw: (b.raw || "").trim(),
-      note: (b.note || "").trim(),
-    }))
-    .filter((b) => b.username || b.password || b.cookie || b.authorization || b.raw);
 }
 
 // 粗略识别用户是否在方向说明或凭据区给了登录凭据。
@@ -97,6 +63,9 @@ watch([() => form.fofa_query, isSiteMode, authBindings], () => {
 
 async function submit() {
   if (!form.inherit_model_global && !form.api_key.trim() && !form.key_ref) return;
+  if (submitting.value) return;   // 防抖：慢网络/双击不重复建任务
+  submitting.value = true;
+  try {
   const modelConfig = { inherit_global: form.inherit_model_global };
   if (!form.inherit_model_global && form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
   if (!form.inherit_model_global && form.base_url) modelConfig.base_url = form.base_url;
@@ -128,6 +97,9 @@ async function submit() {
   };
   const task = await api.createTask(body);
   router.push(`/task/${task.id}`);
+  } finally {
+    submitting.value = false;
+  }
 }
 
 onMounted(async () => {
@@ -289,7 +261,7 @@ onMounted(async () => {
       <label>SRC 规则（审核用，可留空，审核 agent 已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'edusrc' }}标准）
         <textarea v-model="form.src_rules" rows="3"></textarea>
       </label>
-      <button type="submit" class="primary">创建任务</button>
+      <button type="submit" class="primary" :disabled="submitting">{{ submitting ? "创建中…" : "创建任务" }}</button>
     </form>
   </section>
 </template>

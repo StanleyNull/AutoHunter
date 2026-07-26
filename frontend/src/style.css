@@ -988,6 +988,19 @@ main {
 .settings-block legend + * {
   clear: both;
 }
+/* —— 设置页视觉打磨（additive，不改既有布局）：配置块层级更清晰 + 交互反馈 —— */
+.settings-block { transition: border-color .18s ease, box-shadow .18s ease; }
+.settings-block:hover { border-color: color-mix(in oklch, var(--accent) 30%, var(--border)); }
+.settings-block:focus-within {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+  box-shadow: var(--shadow), 0 0 0 3px var(--accent-bg);
+}
+.settings-block legend span::before {
+  content: ""; display: inline-block;
+  width: 3px; height: 13px; margin-right: 8px; vertical-align: -1px;
+  border-radius: 2px; background: var(--accent);
+}
+.settings-skeleton { pointer-events: none; }
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

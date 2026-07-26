@@ -47,8 +47,12 @@ async function load() {
   }
 }
 async function openEdit(task) {
-  editingTask.value = await api.getTask(task.id);
-  editOpen.value = true;
+  try {
+    editingTask.value = await api.getTask(task.id);
+    editOpen.value = true;
+  } catch (e) {
+    delError.value = `加载任务失败：${e?.message || e}`;   // 失败不静默、保持弹窗关闭
+  }
 }
 // ===== 删除任务：二次确认 + 输入 full 令牌校验 =====
 const delTarget = ref(null);       // 待删除的任务对象（弹窗打开时非空）

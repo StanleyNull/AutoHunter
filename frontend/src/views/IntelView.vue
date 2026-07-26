@@ -74,16 +74,24 @@ function secondaryText(row) {
 async function removeOne(row) {
   if (!writable.value) return;
   if (!confirm(`确认删除这条情报？\n${row.match_key} · ${primaryText(row)}`)) return;
-  await api.deleteIntel(row.id);
-  await reload();
+  try {
+    await api.deleteIntel(row.id);
+    await reload();
+  } catch (e) {
+    alert(`删除失败：${e?.message || e}`);
+  }
 }
 
 async function clearKind() {
   if (!writable.value) return;
   const label = kind.value === "all" ? "全部" : (KIND_META[kind.value]?.label || kind.value);
   if (!confirm(`确认清空【${label}】情报？此操作不可恢复。`)) return;
-  await api.clearIntel(kind.value);
-  await reload();
+  try {
+    await api.clearIntel(kind.value);
+    await reload();
+  } catch (e) {
+    alert(`清空失败：${e?.message || e}`);
+  }
 }
 
 async function previewCurator() {
@@ -109,6 +117,8 @@ async function applyCurator() {
     alert(`已清理 ${res?.deleted || 0} 条垃圾情报` + (kept ? `，保留 ${kept} 条高频复用项（hit≥3）需人工确认` : ""));
     curator.value = res;
     await reload();
+  } catch (e) {
+    alert(`清理失败：${e?.message || e}`);
   } finally {
     curatorApplying.value = false;
   }

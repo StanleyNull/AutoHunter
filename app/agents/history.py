@@ -193,6 +193,13 @@ def compact_messages(messages: list[dict[str, Any]], cur_round: int) -> list[dic
             "content": m.get("content", ""),
         }
         if cur_round - rnd >= window:
-            clean["content"] = summarize_tool_content(m.get("content", ""), tool)
+            # 首次越窗时才摘要，并把结果缓存到【原始】消息 m 上跨轮复用，避免旧 tool 消息
+            # 每轮都重新 json 解析+压缩（O(rounds²)）。_summary 是内部字段，绝不进 clean、
+            # 不泄漏给 LLM、不影响 tool_call_id 配对。
+            summ = m.get("_summary")
+            if summ is None:
+                summ = summarize_tool_content(m.get("content", ""), tool)
+                m["_summary"] = summ
+            clean["content"] = summ
         out.append(clean)
     return out

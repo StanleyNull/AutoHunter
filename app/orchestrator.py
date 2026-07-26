@@ -656,19 +656,36 @@ class TaskRunner:
         if not candidates:
             return None
 
-        all_targets = (await session.execute(
-            select(Target).where(
-                Target.task_id == self.task_id,
-                Target.status.in_(["queued", "assigned", "scanning", "dead", "skipped"]),
-            )
-        )).scalars().all()
-        cluster_state = self._cluster_state(all_targets)
-        active_clusters = {
-            target_cluster.target_cluster_key(t.host or t.url, t.title, t.org)
-            for t in all_targets
-            if t.status in ("assigned", "scanning")
-        }
-        active_clusters.discard("")
+        # 是否真的需要簇状态：仅当【非企业】且本批存在“受同款簇冷却/并发限流”的候选时才需要。
+        # 企业模式、或本批候选全是 manual/深挖/单站时，下面的全表 load + O(总目标数) 遍历
+        # 结果永远不会被读取（见下方 696-708 守卫），此处直接短路，避免 24×7 长跑越跑越慢。
+        need_cluster = (not self._is_enterprise) and any(
+            (not t.deepen_context and t.source != "manual"
+             and not site_collab.is_site_source(t.source)
+             and target_cluster.target_cluster_key(t.host or t.url, t.title, t.org))
+            for t in candidates
+        )
+        if need_cluster:
+            # 只取簇计算用到的列，不再水化不断增长的 dead/skipped 完整 ORM 实体。
+            all_targets = (await session.execute(
+                select(
+                    Target.host, Target.url, Target.title, Target.org,
+                    Target.status, Target.verdict, Target.dead_reason, Target.last_error,
+                ).where(
+                    Target.task_id == self.task_id,
+                    Target.status.in_(["queued", "assigned", "scanning", "dead", "skipped"]),
+                )
+            )).all()
+            cluster_state = self._cluster_state(all_targets)
+            active_clusters = {
+                target_cluster.target_cluster_key(t.host or t.url, t.title, t.org)
+                for t in all_targets
+                if t.status in ("assigned", "scanning")
+            }
+            active_clusters.discard("")
+        else:
+            cluster_state = {}
+            active_clusters = set()
 
         skipped_cooldown = 0
         eligible: list[Target] = []
@@ -2541,6 +2558,12 @@ class TaskRunner:
             select(Finding).where(Finding.task_id == self.task_id, Finding.status == "pending_review").limit(5)
         )).scalars().all()
         now = asyncio.get_running_loop().time()
+        # 顺带清扫已过期的 review backoff 条目：exp<=now 与“不存在（默认 0）”在下方
+        # `.get(f.id, 0) > now` 判定里完全等价，删除是纯内存回收、100% 行为不变，
+        # 避免长任务里 _review_backoff 只增不删的慢泄漏。
+        if self._review_backoff:
+            for _expired_fid in [k for k, exp in self._review_backoff.items() if exp <= now]:
+                del self._review_backoff[_expired_fid]
         for f in pending:
             if f.id in self._review_inflight:
                 continue

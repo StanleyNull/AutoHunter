@@ -67,28 +67,36 @@ function renderAssistantMd(text) {
 }
 
 async function saveEdits() {
-  const user_edits = {
-    title: edit.value.title, description: edit.value.description,
-    affected_scope: edit.value.affected_scope,
-    steps: edit.value.steps.split("\n").map((s) => s.trim()).filter(Boolean),
-    poc: edit.value.poc,
-  };
-  await api.userReview(f.value.id, { user_edits, user_severity: userSeverity.value, user_notes: userNotes.value });
-  f.value = await api.finding(f.value.id);
-  editing.value = false;
-  emit("toast", "已保存修改");
-  emit("updated");
+  try {
+    const user_edits = {
+      title: edit.value.title, description: edit.value.description,
+      affected_scope: edit.value.affected_scope,
+      steps: edit.value.steps.split("\n").map((s) => s.trim()).filter(Boolean),
+      poc: edit.value.poc,
+    };
+    await api.userReview(f.value.id, { user_edits, user_severity: userSeverity.value, user_notes: userNotes.value });
+    f.value = await api.finding(f.value.id);
+    editing.value = false;
+    emit("toast", "已保存修改");
+    emit("updated");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function decide(status) {
-  const res = await api.userReview(f.value.id, {
-    user_status: status, user_severity: userSeverity.value, user_notes: userNotes.value,
-  });
-  emit("toast", status === "passed"
-    ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? "，已断开通杀递归" : ""}`
-    : "已驳回");
-  emit("updated");
-  emit("close");
+  try {
+    const res = await api.userReview(f.value.id, {
+      user_status: status, user_severity: userSeverity.value, user_notes: userNotes.value,
+    });
+    emit("toast", status === "passed"
+      ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? "，已断开通杀递归" : ""}`
+      : "已驳回");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function submitDeepen() {
@@ -105,17 +113,25 @@ async function submitDeepen() {
 }
 
 async function markSubmitted() {
-  await api.userReview(f.value.id, { submitted: true });
-  emit("toast", "已标记为已提交");
-  emit("updated");
-  emit("close");
+  try {
+    await api.userReview(f.value.id, { submitted: true });
+    emit("toast", "已标记为已提交");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function restore() {
-  await api.userReview(f.value.id, { user_status: "pending" });
-  emit("toast", "已恢复到复审队列");
-  emit("updated");
-  emit("close");
+  try {
+    await api.userReview(f.value.id, { user_status: "pending" });
+    emit("toast", "已恢复到复审队列");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function restoreArchived() {

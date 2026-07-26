@@ -79,7 +79,10 @@ def _resolve_host(host: str) -> str | None:
     return None
 
 
+@lru_cache(maxsize=4096)
 def _lookup_ip(ip: str) -> sqlite3.Row | None:
+    # edu_ip.db 是随镜像打包的只读静态归属库，运行期不变 → 按 ip 缓存零风险，
+    # 消除评审队列/列表接口里每个 IP 目标一次同步 sqlite 查询在事件循环上的阻塞。
     conn = _get_conn()
     if conn is None:
         return None

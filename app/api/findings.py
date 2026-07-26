@@ -88,6 +88,34 @@ def _matches_query(data: dict, q: str | None) -> bool:
     return needle in haystack
 
 
+async def _paginated_finding_list(session, q, search, compact, limit, offset, *, post=None):
+    """统一列表：compact + 分页 + 全文搜索（与 submit_list/archived_list 同款语义）。
+
+    默认（limit=0、compact=False）保持向后兼容：返回裸 list、全字段。量大时可传
+    limit/offset 分页（>0 时返回 {items,has_more,limit,offset}）、compact=1 精简重字段。
+    无 search 走 DB 层分页；有 search 因需跨 JSON 字段全文匹配，先全量取再过滤再切片
+    （保证跨页命中，绝不因 DB offset/limit 漏搜）。post(f,r,d) 可给每行追加字段。
+    """
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
+    rows = (await session.execute(q)).all()
+
+    def _mk(f, r):
+        d = _finding_dict(f, r, compact=compact)
+        if post:
+            post(f, r, d)
+        return d
+
+    out = [_mk(f, r) for f, r in rows]
+    if search:
+        out = [d for d in out if _matches_query(d, search)]
+        if limit:
+            out = out[offset:offset + limit + 1]
+    if limit:
+        return {"items": out[:limit], "has_more": len(out) > limit, "limit": limit, "offset": offset}
+    return out
+
+
 def _finding_dict(f: Finding, r: Review | None, *, compact: bool = False) -> dict:
     user_edits = r.user_edits or {} if r else {}
     item = {
@@ -174,8 +202,11 @@ async def _resolve_edu_school_async(target_url: str | None) -> str | None:
 @router.get("/tasks/{task_id}/findings")
 async def list_findings(task_id: str, status: Optional[str] = None,
                         search: Optional[str] = Query(None, alias="q"),
+                        compact: bool = Query(False),
+                        limit: int = Query(0, ge=0, le=500),
+                        offset: int = Query(0, ge=0),
                         session: AsyncSession = Depends(get_session)):
-    """所有原始漏洞（可按 status 过滤）。"""
+    """所有原始漏洞（可按 status 过滤）。compact/limit/offset 可选，默认全量全字段。"""
     q = (
         select(Finding, Review)
         .outerjoin(Review, Review.finding_id == Finding.id)
@@ -184,14 +215,15 @@ async def list_findings(task_id: str, status: Optional[str] = None,
     if status:
         q = q.where(Finding.status == status)
     q = q.order_by(Finding.created_at.desc())
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/results")
 async def list_results(task_id: str, confidence: Optional[str] = None,
                        search: Optional[str] = Query(None, alias="q"),
+                       compact: bool = Query(False),
+                       limit: int = Query(0, ge=0, le=500),
+                       offset: int = Query(0, ge=0),
                        session: AsyncSession = Depends(get_session)):
     """最终列表：仅 accepted 的漏洞，按信度分档（confirmed/likely/uncertain）。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
@@ -199,27 +231,27 @@ async def list_results(task_id: str, confidence: Optional[str] = None,
     if confidence:
         q = q.where(Review.confidence == confidence)
     q = q.order_by(Review.score.desc())
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/deepen-list")
-async def deepen_list(task_id: str, session: AsyncSession = Depends(get_session)):
+async def deepen_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                      compact: bool = Query(False),
+                      limit: int = Query(0, ge=0, le=500),
+                      offset: int = Query(0, ge=0),
+                      session: AsyncSession = Depends(get_session)):
     """打回深挖列表：审核判 deepen 的线索（含审核给的深挖指令）。
     供用户观察深挖管线——哪些线索被回炉、要证明什么。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.verdict == "deepen"
     ).order_by(Review.reviewed_at.desc())
-    rows = (await session.execute(q)).all()
-    out = []
-    for f, r in rows:
-        d = _finding_dict(f, r)
+
+    def _post(f, r, d):
         d["deepen_directive"] = r.deepen_directive
         # superseded=已回炉重挖中；reviewed=深挖未生效已归档
         d["deepen_state"] = "reinvestigating" if f.status == "superseded" else "archived"
-        out.append(d)
-    return out
+
+    return await _paginated_finding_list(session, q, search, compact, limit, offset, post=_post)
 
 
 @router.get("/findings/{finding_id}")
@@ -237,14 +269,15 @@ async def get_finding(finding_id: str, session: AsyncSession = Depends(get_sessi
 
 @router.get("/tasks/{task_id}/review-queue")
 async def user_review_queue(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                            compact: bool = Query(False),
+                            limit: int = Query(0, ge=0, le=500),
+                            offset: int = Query(0, ge=0),
                             session: AsyncSession = Depends(get_session)):
     """用户复审队列：AI accepted 且用户尚未处理（pending）的漏洞。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.verdict == "accepted", Review.user_status == "pending"
     ).order_by(Review.score.desc())
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/submit-list")
@@ -280,14 +313,15 @@ async def submit_list(task_id: str, submitted: Optional[bool] = None,
 
 @router.get("/tasks/{task_id}/rejected")
 async def rejected_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                        compact: bool = Query(False),
+                        limit: int = Query(0, ge=0, le=500),
+                        offset: int = Query(0, ge=0),
                         session: AsyncSession = Depends(get_session)):
     """已驳回列表：用户复审判 rejected 的漏洞（可回看 / 恢复到复审队列）。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.user_status == "rejected"
     ).order_by(Review.user_reviewed_at.desc().nullslast(), Review.score.desc())
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/archived")

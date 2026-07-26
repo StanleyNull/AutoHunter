@@ -388,7 +388,8 @@ function connectWs() {
   ws = new WebSocket(wsUrl(props.id));
   ws.onopen = () => { wsReconnectAttempt = 0; };
   ws.onmessage = (e) => {
-    const ev = JSON.parse(e.data);
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }   // 畸形帧不炸整个处理器
     if (ev.kind === "ping") return;
     if (!isImportantEvent(ev)) return;
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
@@ -488,9 +489,13 @@ function elapsed(iso) {
 }
 
 async function ctl(action) {
-  await api[action](props.id);
-  toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
-  await Promise.all([loadTask(), loadBoard()]);
+  try {
+    await api[action](props.id);
+    toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
+    await Promise.all([loadTask(), loadBoard()]);
+  } catch (e) {
+    toast(`操作失败：${e?.message || e}`);   // 403/网络失败给用户反馈，别静默
+  }
 }
 
 function openEdit() {
@@ -648,11 +653,13 @@ async function exportAll() {
     toast("正在生成 Markdown 文件...");
     const reports = await fetchAllSubmitReports();
     const md = reports.map((f) => buildReportMd(f)).join("\n\n---\n\n");
-  const blob = new Blob([md], { type: "text/markdown" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `autohunter-${props.id.slice(0, 8)}-submit.md`;
-  a.click();
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `autohunter-${props.id.slice(0, 8)}-submit.md`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);   // 释放 object URL，避免内存泄漏
     toast(`已导出 ${reports.length} 份报告`);
   } finally {
     bulkWorking.value = false;
@@ -683,11 +690,13 @@ async function exportEdusrcAll() {
     toast("正在生成 reports.json...");
     const reports = await fetchAllSubmitReports();
     const text = JSON.stringify(edusrcReports(reports), null, 2);
-  const blob = new Blob([text], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `autohunter-${props.id.slice(0, 8)}-edusrc-reports.json`;
-  a.click();
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `autohunter-${props.id.slice(0, 8)}-edusrc-reports.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);   // 释放 object URL，避免内存泄漏
     toast(`已导出 ${reports.length} 份 EduSRC JSON`);
   } finally {
     bulkWorking.value = false;

@@ -13,6 +13,7 @@ const singleModels = ref([]);
 const singleModelsLoading = ref(false);
 const singleModelsError = ref("");
 let healthPoll = null;
+let restartPoll = null;   // pollHealth 的重启轮询计时器（组件卸载时清理，防泄漏）
 
 // ---- 一键更新 ----
 const updateState = reactive({
@@ -64,19 +65,20 @@ async function runUpdate() {
 
 function pollHealth() {
   let attempts = 0;
-  const timer = setInterval(async () => {
+  clearInterval(restartPoll);
+  restartPoll = setInterval(async () => {
     attempts++;
     try {
       const r = await fetch("/health");
       if (r.ok) {
-        clearInterval(timer);
+        clearInterval(restartPoll);
         updateState.restarting = false;
         toast("更新完成，服务已重启 🎉");
         updateState.info = null;
         load();
       }
     } catch {}
-    if (attempts > 60) { clearInterval(timer); updateState.restarting = false; updateState.error = "重启超时，请手动刷新页面"; }
+    if (attempts > 60) { clearInterval(restartPoll); updateState.restarting = false; updateState.error = "重启超时，请手动刷新页面"; }
   }, 3000);
 }
 
@@ -487,7 +489,7 @@ onMounted(async () => {
   // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
   checkUpdate();
 });
-onUnmounted(() => clearInterval(healthPoll));
+onUnmounted(() => { clearInterval(healthPoll); clearInterval(restartPoll); });
 </script>
 
 <template>
@@ -500,7 +502,28 @@ onUnmounted(() => clearInterval(healthPoll));
       </p>
     </header>
 
-    <div v-if="loading" class="empty">加载中…</div>
+    <!-- 骨架屏：镜像真实的「摘要侧栏 + 配置块」两栏布局，与加载后的结构对齐（不再是一行“加载中…”）。 -->
+    <div v-if="loading" class="settings-layout settings-skeleton" aria-hidden="true">
+      <aside class="settings-summary skeleton-panel">
+        <div class="skeleton-block lg" style="height:16px;width:58%"></div>
+        <div class="skeleton-line" style="margin-top:16px"></div>
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line" style="width:68%"></div>
+      </aside>
+      <div class="settings-form">
+        <div v-for="i in 3" :key="i" class="settings-block skeleton-panel">
+          <div class="skeleton-block lg" style="height:15px;width:38%;margin-bottom:16px"></div>
+          <div class="skeleton-line"></div>
+          <div class="skeleton-line"></div>
+          <div class="skeleton-line" style="width:84%"></div>
+          <div class="skeleton-row" style="margin-top:14px">
+            <div class="skeleton-chip"></div>
+            <div class="skeleton-chip wide"></div>
+          </div>
+        </div>
+      </div>
+    </div>
     <div v-else class="settings-layout">
       <aside class="settings-summary" aria-label="当前系统配置摘要">
         <div class="settings-summary-head">
