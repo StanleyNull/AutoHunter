@@ -203,10 +203,6 @@ onMounted(() => {
             <dt>低分跳过阈值</dt>
             <dd>{{ form.skip_score_threshold }}</dd>
           </div>
-          <div>
-            <dt>Worker 提示词</dt>
-            <dd>{{ form.worker_prompt_version }}</dd>
-          </div>
         </dl>
         <p class="settings-note">
           此处是运行期默认值。任务创建时若在高级区单独填写，则按任务配置覆盖。
@@ -270,13 +266,6 @@ onMounted(() => {
             <label>新建任务默认并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
             <label>低分跳过阈值
               <input v-model="form.skip_score_threshold" type="number" step="1" />
-            </label>
-            <label class="full">Worker 提示词版本
-              <select v-model="form.worker_prompt_version">
-                <option value="legacy">legacy（旧版 23/25 风格）</option>
-                <option value="current">current（当前省 token 版）</option>
-                <option value="modern">modern（当前完整版）</option>
-              </select>
             </label>
             <p class="field-hint full">Collector 评分低于此值的目标直接跳过，避免 worker 消耗在垃圾资产上。</p>
           </div>

@@ -1455,6 +1455,13 @@ main {
   background: var(--info); flex: none;
 }
 .wc-meta { font-size: 11px; color: var(--faint); white-space: nowrap; flex: none; display: flex; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; }
+.wc-del {
+  border: none; background: transparent; color: var(--faint); cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 2px 5px; border-radius: 5px; margin-left: 1px;
+  transition: color .12s ease, background-color .12s ease;
+}
+.wc-del:hover { color: var(--danger); background: var(--danger-bg); }
+.wc-del:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; }
 .wc-score {
   background: var(--warn-bg); color: var(--warn); border-radius: 5px;
   padding: 1px 6px; font-weight: 700;

@@ -251,13 +251,6 @@ onMounted(async () => {
         <label>模型 base_url <input v-model="form.base_url" placeholder="https://api.deepseek.com/v1" /></label>
         <label>模型 api_key <input v-model="form.api_key" type="password" /></label>
         <label>模型名 <input v-model="form.model" placeholder="deepseek-chat" /></label>
-        <label>Worker 提示词
-          <select v-model="form.prompt_version">
-            <option value="current">current（当前省 token 版）</option>
-            <option value="legacy">legacy（旧版 23/25 风格）</option>
-            <option value="modern">modern（当前完整版）</option>
-          </select>
-        </label>
         <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" /></label>
         <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
         <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" /></label>

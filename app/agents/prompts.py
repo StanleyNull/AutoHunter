@@ -932,13 +932,16 @@ def is_enterprise_src(src_type: str | bool | None) -> bool:
     return normalize_src_type(src_type) == "enterprise"
 
 
+# 提示词版本已统一收敛：经实战验证 legacy(2026-06-25 版) 出洞质量最好，定为 edu worker
+# 唯一正式默认。所有历史别名(current/compact/modern/full)一律解析为 legacy；
+# WORKER_SYSTEM_PROMPT_COMPACT / WORKER_SYSTEM_PROMPT 仅作归档保留，不再有任何路径选到。
 _PROMPT_VERSION_ALIASES = {
-    "": "current",
-    "current": "current",
-    "compact": "current",
-    "now": "current",
-    "modern": "modern",
-    "full": "modern",
+    "": "legacy",
+    "current": "legacy",
+    "compact": "legacy",
+    "now": "legacy",
+    "modern": "legacy",
+    "full": "legacy",
     "legacy": "legacy",
     "old": "legacy",
     "20260625": "legacy",
@@ -947,18 +950,15 @@ _PROMPT_VERSION_ALIASES = {
 
 
 def normalize_worker_prompt_version(version: str | None) -> str:
-    return _PROMPT_VERSION_ALIASES.get(str(version or "").strip().lower(), "current")
+    return _PROMPT_VERSION_ALIASES.get(str(version or "").strip().lower(), "legacy")
 
 
 def worker_system_prompt(src_type: str | bool | None, version: str | None = None) -> str:
     if is_enterprise_src(src_type):
         return ENTERPRISE_WORKER_SYSTEM_PROMPT_COMPACT
-    v = normalize_worker_prompt_version(version)
-    if v == "legacy":
-        return WORKER_SYSTEM_PROMPT_LEGACY
-    if v == "modern":
-        return WORKER_SYSTEM_PROMPT
-    return WORKER_SYSTEM_PROMPT_COMPACT
+    # edu worker 已统一收敛为 legacy(2026-06-25，经实战验证最佳)，为唯一正式版；
+    # version/历史别名一律 → legacy(见 _PROMPT_VERSION_ALIASES)，COMPACT/modern 仅归档保留。
+    return WORKER_SYSTEM_PROMPT_LEGACY
 
 
 def reviewer_system_prompt(src_type: str | bool | None) -> str:

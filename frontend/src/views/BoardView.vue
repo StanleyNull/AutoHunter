@@ -511,6 +511,24 @@ function openReview(id) { drawerId.value = id; drawerMode.value = "review"; }
 function openSubmit(id) { drawerId.value = id; drawerMode.value = "submit"; }
 function openRejected(id) { drawerId.value = id; drawerMode.value = "rejected"; }
 function openArchived(id) { drawerId.value = id; drawerMode.value = "archived"; }
+async function skipTarget(w) {
+  if (readonly.value) return;
+  const host = w.host || w.target_id;
+  const ok = window.confirm(
+    `确认删除目标「${host}」？\n\n` +
+    `· 立即取消它正在进行的挖掘，并跳过该目标（之后不再重新派发、回队，也不会被自动搜集回来）。\n` +
+    `· 仅对【本任务】的目标列表生效，不影响其它任务，也不影响已挖到的漏洞。`
+  );
+  if (!ok) return;
+  try {
+    await api.skipTarget(props.id, w.target_id);
+    liveWorkers.value = liveWorkers.value.filter((x) => x.target_id !== w.target_id);
+    toast(`已删除目标 ${host}，将跳过`);
+  } catch (e) {
+    toast(`删除失败：${e?.message || e}`);
+  }
+}
+
 async function restoreArchived(id) {
   try {
     await api.restoreArchived(id);
@@ -1094,6 +1112,8 @@ function parseEventTs(ts) {
               <span v-if="authBadge(w)" class="wc-auth" :class="authBadgeClass(w)" :title="w.auth_label || ''">{{ authBadge(w) }}</span>
               <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ w.score }}</span>
               第 {{ w.round }} 轮 · {{ elapsed(w.started_at) }}
+              <button v-if="!readonly" type="button" class="wc-del"
+                title="删除该目标（跳过本次任务的这个目标）" @click="skipTarget(w)">✕</button>
             </span>
           </div>
           <div class="wc-action">{{ w.action }}</div>

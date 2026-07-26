@@ -596,6 +596,16 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
     }
 
 
+@router.post("/{task_id}/targets/{target_id}/skip")
+async def skip_target(task_id: str, target_id: str):
+    """人工从看板删除某个目标：取消其正在进行的挖掘（若有）并标记跳过，使其不再被派发、
+    回队或被 collector 重新收集。仅影响【本任务】的目标列表，不影响其它任务与已挖到的漏洞。"""
+    res = await manager.skip_target(task_id, target_id)
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error") or "无法删除该目标")
+    return res
+
+
 @router.get("/{task_id}/targets")
 async def list_targets(task_id: str, request: Request, status: str | None = None, limit: int = 200,
                        session: AsyncSession = Depends(get_session)):

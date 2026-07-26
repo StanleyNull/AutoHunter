@@ -329,13 +329,6 @@ async function save() {
             <small v-if="modelsError" class="model-hint">{{ modelsError }}</small>
             <small v-else-if="models.length" class="model-hint">已获取 {{ models.length }} 个可用模型</small>
           </label>
-          <label>Worker 提示词
-            <select v-model="form.prompt_version">
-              <option value="current">current（当前省 token 版）</option>
-              <option value="legacy">legacy（旧版 23/25 风格）</option>
-              <option value="modern">modern（当前完整版）</option>
-            </select>
-          </label>
           <label>模型 api_key <input v-model="form.api_key" type="password" placeholder="留空保留原值" /></label>
           <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
           <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>

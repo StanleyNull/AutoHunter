@@ -980,6 +980,43 @@ class TaskRunner:
         for tid in target_ids:
             self._worker_cancel_events.pop(tid, None)
 
+    async def skip_target(self, target_id: str, reason: str = "用户手动删除该目标") -> dict:
+        """人工从看板删除某个目标：取消其在跑 worker（若有），并把目标标记 skipped——
+        使其不再被派发、回队或被 collector 重新收集。仅影响本任务的目标列表。
+
+        依赖 _cancelled_targets：被取消 worker 的迟到结果在 _run_worker_inner 里会被丢弃、
+        不会把 skipped 覆盖回 queued/done（已挖到的 findings 仍由 salvage 单独保住，不丢洞）。
+        """
+        async with SessionLocal() as session:
+            tgt = await session.get(Target, target_id)
+            if not tgt or tgt.task_id != self.task_id:
+                return {"ok": False, "error": "目标不存在或不属于该任务"}
+            host = tgt.host or tgt.url or target_id
+            # 1) 取消在跑 worker（若有）：标记 cancelled + 触发 cancel_event + 取消协程 + 清活态
+            self._cancelled_targets.add(target_id)
+            if ev := self._worker_cancel_events.get(target_id):
+                ev.set()
+            if t := self._active_workers.pop(target_id, None):
+                t.cancel()
+            self._live.pop(target_id, None)
+            self._worker_last_activity.pop(target_id, None)
+            self._worker_cancel_events.pop(target_id, None)
+            # 2) 标 skipped：_pop_queued 只取 queued，故不再派发；collector 的 seen 含 skipped，
+            #    故不会被重新收集回来（这正是“回收完还继续跑”的修复点）。
+            tgt.status = "skipped"
+            tgt.verdict = "user_skipped"
+            tgt.assigned_worker = ""
+            tgt.heartbeat_at = None
+            tgt.dead_reason = (reason or "用户手动删除")[:300]
+            tgt.last_error = ""
+            await session.commit()
+            await self._log(
+                session, "orchestrator", "target_skipped",
+                f"用户从看板删除目标 {host}，已跳过（取消挖掘，不再派发/回队/收集）",
+                level="warn", target_id=target_id, host=host,
+            )
+        return {"ok": True, "target_id": target_id, "host": host}
+
     def _cancel_review_tasks(self, reason: str) -> None:
         for finding_id, task in list(self._review_tasks.items()):
             task.cancel()
@@ -2867,6 +2904,27 @@ class OrchestratorManager:
 
     def get_runner(self, task_id: str) -> "TaskRunner | None":
         return self._runners.get(task_id)
+
+    async def skip_target(self, task_id: str, target_id: str,
+                          reason: str = "用户手动删除该目标") -> dict:
+        """删除/跳过某任务下的一个目标。任务在运行→交给 runner（会取消在跑 worker）；
+        任务已暂停/停止（无活跃 runner）→ 直接改 DB 状态即可（无 worker 需取消）。"""
+        runner = self.get_runner(task_id)
+        if runner is not None:
+            return await runner.skip_target(target_id, reason)
+        async with SessionLocal() as session:
+            tgt = await session.get(Target, target_id)
+            if not tgt or tgt.task_id != task_id:
+                return {"ok": False, "error": "目标不存在或不属于该任务"}
+            host = tgt.host or tgt.url or target_id
+            tgt.status = "skipped"
+            tgt.verdict = "user_skipped"
+            tgt.assigned_worker = ""
+            tgt.heartbeat_at = None
+            tgt.dead_reason = (reason or "用户手动删除")[:300]
+            tgt.last_error = ""
+            await session.commit()
+        return {"ok": True, "target_id": target_id, "host": host}
 
     def diagnostic_snapshot(self) -> dict:
         return {

@@ -622,8 +622,31 @@ class LLMClient:
 
     @staticmethod
     def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+        """OpenAI 风格历史 → Anthropic messages 格式。
+
+        Anthropic 要求 user/assistant 角色【严格交替】、不允许连续同角色消息，且同一轮的多个
+        tool_result 必须落在同一条 user 消息里。而 OpenAI 历史里连续同角色很常见（开局
+        system + 两条 user 前缀、一轮多个 tool 响应、工具响应后又追加 user 提示），因此这里把
+        相邻同角色消息统一合并进一条、content 归一为 block 列表，避免拼出连续 user/assistant
+        触发 400。
+        """
         system_parts: list[str] = []
         out: list[dict[str, Any]] = []
+
+        def _push(role: str, blocks: list[dict[str, Any]]) -> None:
+            # 丢掉空 text block（Anthropic 拒绝空文本）；tool_use / tool_result 一律保留。
+            blocks = [b for b in blocks if not (b.get("type") == "text" and not b.get("text"))]
+            if not blocks:
+                return
+            if out and out[-1]["role"] == role:
+                prev = out[-1]["content"]
+                if isinstance(prev, str):  # 防御：正常情况下 out 里的 content 恒为 list
+                    prev = [{"type": "text", "text": prev}] if prev else []
+                    out[-1]["content"] = prev
+                prev.extend(blocks)
+            else:
+                out.append({"role": role, "content": blocks})
+
         for msg in messages:
             role = msg.get("role")
             content = msg.get("content") or ""
@@ -632,14 +655,11 @@ class LLMClient:
                     system_parts.append(str(content))
                 continue
             if role == "tool":
-                out.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg.get("tool_call_id", ""),
-                        "content": str(content),
-                    }],
-                })
+                _push("user", [{
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id", ""),
+                    "content": str(content),
+                }])
                 continue
             if role == "assistant":
                 blocks: list[dict[str, Any]] = []
@@ -657,9 +677,9 @@ class LLMClient:
                         "name": fn.get("name", ""),
                         "input": tool_input,
                     })
-                out.append({"role": "assistant", "content": blocks or str(content)})
+                _push("assistant", blocks)
                 continue
-            out.append({"role": "user", "content": str(content)})
+            _push("user", [{"type": "text", "text": str(content)}])
         return "\n\n".join(system_parts), out
 
     def _messages_chat(
