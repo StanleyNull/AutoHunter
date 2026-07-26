@@ -9,7 +9,7 @@ import TaskEditModal from "../components/TaskEditModal.vue";
 
 const props = defineProps({ id: String });
 const task = ref(null);
-const tab = ref("board");          // board | review | submit | killsweep | rejected
+const tab = ref("board");          // board | review | submit | killsweep | rejected | archived
 const boardPanel = ref("workers"); // workers | stream（手机端看板切换）
 const events = ref([]);
 const liveWorkers = ref([]);       // 在跑 worker 活态

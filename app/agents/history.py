@@ -14,7 +14,8 @@ worker / killsweep 走 function-calling 循环，每轮把【完整 messages 历
      鉴权/指纹/跳转的依据。
    - run_shell：压 output（只留开头），保留 return_code / timed_out。
    - 错误 / blocked：保留 error + guidance 开头，模型需要知道为什么失败/被拦才能纠偏。
-3. 原始 messages 不变，只返回【发送副本】，保证 OpenAI 协议历史完整可继续 append。
+3. 不改动消息的语义/协议内容，只返回【发送副本】（仅可能在原始 tool 消息上附加内部缓存字段
+   _summary，绝不进 clean、不发给 LLM），保证 OpenAI 协议历史完整可继续 append。
 
 要求：append tool 消息时带上 "_round"(本轮序号) 和 "_tool"(工具名) 元字段。
 """

@@ -35,7 +35,8 @@ _SESSION_MAX_HEADERS = 30
 # 单目标工作目录落地日志体积上限（字节）。24x7 防撞盘：超限后停止写新日志文件，
 # 仍把截断输出回传给 LLM，不影响挖掘，只是不再落地完整证据。
 _WORKDIR_MAX_BYTES = int(os.environ.get("WORKER_WORKDIR_MAX_BYTES", str(50 * 1024 * 1024)))
-# 每写这么多次日志做一次真实全目录体积校准（捕获 shell 子进程 curl -o/wget/git 直落的文件）。
+# 每写这么多次日志做一次真实全目录体积校准（捕获 shell 子进程 curl -o/wget/重定向直落的顶层文件；
+# _dir_size 用非递归 glob，只数顶层文件，git clone 落的子目录树不在统计内）。
 _WORKDIR_RESCAN_EVERY = 32
 _SHELL_CAPTURE_MAX_BYTES = int(os.environ.get("WORKER_SHELL_CAPTURE_MAX_BYTES", str(512 * 1024)))
 _HTTP_MAX_BYTES = int(os.environ.get("WORKER_HTTP_MAX_BYTES", str(1024 * 1024)))
@@ -273,9 +274,9 @@ class ToolExecutor:
         """落地日志文件；工作目录超体积上限则跳过（返回 None），不再写盘。
 
         体积用增量计数 self._workdir_bytes 估算，避免每次写日志都全目录扫描（聚合 O(files²)）；
-        但每 _WORKDIR_RESCAN_EVERY 次、或估算值已达上限时，做一次真实全目录扫描校准——因为
-        run_shell 的子进程（curl -o / wget / git clone / 重定向）会直接往 work_dir 落文件、
-        不经过本函数，纯计数器会漏统计、弱化 _WORKDIR_MAX_BYTES 的防撞盘保护。
+        每 _WORKDIR_RESCAN_EVERY 次写入做一次真实全目录扫描校准——因为 run_shell 的子进程
+        （curl -o / wget / 输出重定向等直落顶层文件）会绕过本函数，纯计数器会漏统计、弱化
+        _WORKDIR_MAX_BYTES 的防撞盘保护。估算值一旦达上限即置 _over_cap 终态、停止写盘且不再全扫。
         """
         # 超上限是终态（work_dir 只增不删）：直接短路，绝不再触发全目录扫描。
         if self._over_cap:

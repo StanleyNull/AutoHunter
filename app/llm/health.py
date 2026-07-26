@@ -134,7 +134,8 @@ def acquire_provider_slot(
     protocol: str = "auto",
     owner: str = "",
 ) -> tuple[bool, str]:
-    """申请一次调用资格；冷却到期后仅放行一个 half-open 请求。"""
+    """申请一次调用资格。冷却到期后进入半开探测，含两条独立半开门：transport 半开严格单在途；
+    behavior 半开按 owner 隔离，只放行首个认领 owner 的探测（同 owner 在窗口内可反复通过）。"""
     ref = provider_ref(base_url, model, api_key, protocol)
     now = _now()
     with _LOCK:

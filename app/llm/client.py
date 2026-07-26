@@ -1,6 +1,7 @@
-"""OpenAI 兼容 LLM 客户端，封装 function calling 调用。
+"""LLM 客户端，封装 function calling 调用。
 
-支持 DeepSeek / Qwen / Kimi / GPT 等所有 OpenAI 兼容接口。
+同时支持 OpenAI Chat Completions 与 Anthropic Messages 两种协议，按 base_url/model/显式
+protocol 自动协商与运行时切换。支持 DeepSeek / Qwen / Kimi / GPT / Claude 等接口。
 
 24x7 健壮性：请求级超时 + 轻量重试。LLM 挂起会几分钟内失败重试或放弃，
 而不是把 worker 线程拖到 30min 墙钟超时才回收（白占一个并发位）。
@@ -69,11 +70,11 @@ _BROWSER_UA = (
 
 
 def _default_ua_for_model(model: str, base_url: str) -> str:
-    """按模型/中转特征给一个「不像 SDK」的 User-Agent。
+    """按模型/中转特征给一个贴近官方客户端的 User-Agent。
 
-    很多中转站/2api 网关（尤其套 Cloudflare 的）会封禁 OpenAI/Anthropic Python SDK
-    自带的 `User-Agent: OpenAI/Python x.y` 与 `x-stainless-*` 头，转发到上游 2api 时
-    直接回 403。这里按模型族给一个贴近官方客户端/浏览器的 UA，最大化通过率。
+    反指纹主要靠删除 `x-stainless-*` SDK 指纹头（见 _llm_default_headers）；UA 则钉一个
+    可信的官方客户端版本号（对 GPT/Claude 即其官方 SDK 的 UA 形态），避免中转站/2api 网关
+    （尤其套 Cloudflare 的）因缺失/异常 UA 而回 403，最大化通过率。
     """
     m = (model or "").lower()
     if any(k in m for k in ("deepseek",)):

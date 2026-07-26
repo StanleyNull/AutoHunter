@@ -113,7 +113,7 @@ def _observer_host(host: str) -> str:
         return ".".join(parts[:2] + ["*", "*"]) + port
     if len(parts) <= 1:
         return _mask_label(s) + port
-    # 保留公共后缀，业务/学校/子域 label 全部局部打码，例如 xb.ymun.edu.cn -> x*.y**n.edu.cn
+    # 保留公共后缀，业务/学校/子域 label 全部局部打码，例如 xb.ymun.edu.cn -> x*.y***.edu.cn
     keep_suffix = 2 if parts[-2:] in (["edu", "cn"], ["com", "cn"], ["net", "cn"], ["org", "cn"], ["gov", "cn"]) else 1
     masked = [_mask_label(p) for p in parts[:-keep_suffix]] + parts[-keep_suffix:]
     return ".".join(masked) + port

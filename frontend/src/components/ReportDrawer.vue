@@ -6,7 +6,7 @@ import { api, canWrite, isReadonly } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { buildEdusrcToolReport, buildReportMd, effectiveSeverity } from "../report.js";
 
-const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review
+const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review | submit | rejected | archived
 const emit = defineEmits(["close", "updated", "toast"]);
 
 const f = ref(null);

@@ -52,7 +52,7 @@ async def probe_models(
     session: AsyncSession = Depends(get_session),
 ):
     """拉取模型商可用模型列表，供前端下拉选择。base_url/api_key 留空用有效配置。
-    注意：api_key 为脱敏占位（如 ****）时视为未传，回退到服务端已存的真实 key。"""
+    注意：api_key 为脱敏占位（如 ••••••••）时视为未传，回退到服务端已存的真实 key。"""
     await refresh_cache(session)
     key = (body.api_key or "").strip()
     if key and is_masked_secret(key):

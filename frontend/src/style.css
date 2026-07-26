@@ -1754,11 +1754,23 @@ main {
 .wc-meta { font-size: 11px; color: var(--faint); white-space: nowrap; flex: none; display: flex; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; }
 .wc-del {
   border: none; background: transparent; color: var(--faint); cursor: pointer;
-  font-size: 12px; line-height: 1; padding: 2px 5px; border-radius: 5px; margin-left: 1px;
-  transition: color .12s ease, background-color .12s ease;
+  font-size: 12.5px; line-height: 1; width: 22px; height: 22px; padding: 0; margin-left: 3px;
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px; opacity: .5;
+  transition: color .14s ease, background-color .14s ease, opacity .14s ease, transform .1s ease;
 }
-.wc-del:hover { color: var(--danger); background: var(--danger-bg); }
-.wc-del:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; }
+.worker-card:hover .wc-del { opacity: .9; }           /* 卡片悬浮才凸显，平时低调不抢眼 */
+.wc-del:hover { color: var(--danger); background: var(--danger-bg); opacity: 1; transform: scale(1.12); }
+.wc-del:active { transform: scale(.9); }               /* 按下回弹反馈 */
+.wc-del:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; opacity: 1; }
+/* 手机端：触屏无 hover → 常显 + 覆盖全局 button 的 min-height:42px，做成方正舒适的点击区。 */
+@media (max-width: 640px) {
+  .wc-del {
+    min-height: 0; width: 34px; height: 34px; font-size: 16px; padding: 0;
+    margin-left: 4px; opacity: .8; border-radius: 8px;
+  }
+  .wc-del:active { background: var(--danger-bg); color: var(--danger); }
+}
 .wc-score {
   background: var(--warn-bg); color: var(--warn); border-radius: 5px;
   padding: 1px 6px; font-weight: 700;
@@ -2181,6 +2193,13 @@ main {
   .report-brief, .report-facts { grid-template-columns: 1fr; }
   .report-brief-side { justify-items: start; }
   .ra-head, .ra-actions, .ra-input { display: grid; grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  /* 顶部工具栏/复审栏按钮多，窄屏换行避免横向溢出（drawer≈94vw）。 */
+  .md-toolbar { flex-wrap: wrap; }
+  .review-bar { flex-wrap: wrap; row-gap: 10px; }
+  .review-bar .rb-btns { margin-left: 0; width: 100%; }
+  .review-bar .rb-btns button { flex: 1; }   /* 通过/不通过/深挖 换行后均分占满，更好点按 */
 }
 
 /* ---------- 手机端：触控优先、信息分层、避免横向溢出 ---------- */

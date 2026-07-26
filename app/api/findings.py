@@ -80,7 +80,8 @@ def _clip_json(value, limit: int) -> str:
 
 
 def _matches_query(data: dict, q: str | None) -> bool:
-    """列表搜索：跨标题、URL、类型、报告正文、审核理由等字段做轻量全文匹配。"""
+    """列表搜索：对传入 dict 实际存在的字段做轻量全文匹配（跨标题、URL、类型，以及非 compact
+    时的报告正文/审核理由等重字段；compact 模式下重字段已被剥离，仅匹配保留的轻字段）。"""
     needle = (q or "").strip().lower()
     if not needle:
         return True

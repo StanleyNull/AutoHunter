@@ -469,7 +469,7 @@ class TaskRunner:
             )
 
     async def recover(self, session: AsyncSession) -> None:
-        """重启恢复：assigned/scanning → queued；不动已有 Finding/Review。"""
+        """重启恢复：assigned/scanning → queued（超重试上限则转 dead 硬骨头库）；不动已有 Finding/Review。"""
         rows = (await session.execute(
             select(Target).where(
                 Target.task_id == self.task_id, Target.status.in_(["assigned", "scanning"])
@@ -658,7 +658,7 @@ class TaskRunner:
 
         # 是否真的需要簇状态：仅当【非企业】且本批存在“受同款簇冷却/并发限流”的候选时才需要。
         # 企业模式、或本批候选全是 manual/深挖/单站时，下面的全表 load + O(总目标数) 遍历
-        # 结果永远不会被读取（见下方 696-708 守卫），此处直接短路，避免 24×7 长跑越跑越慢。
+        # 结果永远不会被读取（见下方按目标的同款簇冷却/并发限流守卫），此处直接短路，避免长跑越跑越慢。
         need_cluster = (not self._is_enterprise) and any(
             (not t.deepen_context and t.source != "manual"
              and not site_collab.is_site_source(t.source)
@@ -1755,7 +1755,7 @@ class TaskRunner:
             finally:
                 # 正常完成的清理：只杀残留子进程，绝不 set cancel_event。
                 # （历史事故根因：这里曾调 cancel_running() 顺带 set 了 cancel_event，
-                #  导致每个正常完成的 worker 都被 L680 判成"被取消"而丢弃结果，
+                #  导致每个正常完成的 worker 都被下方 externally_cancelled 判定误判为"被取消"而丢弃结果，
                 #  findings/done 永远为 0、出洞概率暴跌。）
                 worker.executor.kill_processes()
 

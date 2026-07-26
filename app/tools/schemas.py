@@ -10,7 +10,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "http_request",
-            "description": "发一个 HTTP 请求并返回完整的请求包、响应包、状态码、响应头和响应体。挖洞取证的首选工具。会自动携带并吸收 Cookie（含整条重定向链每一跳的 Set-Cookie），登录后深挖无需每次手拼凭证。【登录/CAS/SSO 场景】务必把 follow_redirects 设为 true：一次 POST 账号密码即可自动走完 302 连环跳（lt→CASTGC→ST ticket→JSESSIONID），返回里的 redirect_chain/final_url 可看清跳到哪、是否登录成功；别再手动一跳跳拼 ticket。",
+            "description": "发一个 HTTP 请求并返回完整的请求包，以及状态码、响应头和响应体。挖洞取证的首选工具。会自动携带并吸收 Cookie（含整条重定向链每一跳的 Set-Cookie），登录后深挖无需每次手拼凭证。【登录/CAS/SSO 场景】务必把 follow_redirects 设为 true：一次 POST 账号密码即可自动走完 302 连环跳（lt→CASTGC→ST ticket→JSESSIONID），返回里的 redirect_chain/final_url 可看清跳到哪、是否登录成功；别再手动一跳跳拼 ticket。",
             "parameters": {
                 "type": "object",
                 "properties": {
