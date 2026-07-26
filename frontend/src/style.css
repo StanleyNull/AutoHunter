@@ -230,11 +230,6 @@ a:hover { text-decoration: underline; }
   font-size: 10px; letter-spacing: .06em;
 }
 .brand-tag { text-transform: uppercase; }
-.brand .sub {
-  font-size: 11px; font-weight: 700; color: var(--ok);
-  padding: 3px 8px; background: var(--ok-bg); border-radius: 999px;
-}
-.top-right { display: flex; align-items: center; gap: 14px; } /* legacy */
 .readonly-badge {
   font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px;
   background: var(--warn-bg); color: var(--warn); border: 1px solid color-mix(in oklch, var(--warn) 35%, transparent);
@@ -765,11 +760,13 @@ main {
 }
 .form details summary { cursor: pointer; color: var(--ink); font-weight: 500; }
 .form details label { margin-top: 12px; }
-.form label.check-line {
+.form label.check-line,
+.task-edit-modal label.check-line {
   display: flex; align-items: center; gap: 8px;
   font-size: 13px; font-weight: 500; color: var(--ink); cursor: pointer;
 }
-.form label.check-line input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
+.form label.check-line input[type="checkbox"],
+.task-edit-modal label.check-line input[type="checkbox"] { width: auto; margin: 0; flex: none; cursor: pointer; }
 .form .field-hint {
   margin: -4px 0 4px; font-size: 12px; line-height: 1.6;
   color: var(--muted); background: var(--surface-2);
@@ -1643,21 +1640,6 @@ main {
 }
 .ctl { display: flex; gap: 8px; flex: none; }
 
-/* ---------- 统计条：紧凑指标，无大数字渐变 ---------- */
-.stat-row { display: flex; gap: 10px; margin-bottom: 22px; flex-wrap: wrap; }
-.stat {
-  flex: 1; min-width: 104px; background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 13px 16px;
-}
-.stat b {
-  display: block; font-size: 23px; font-weight: 700; letter-spacing: -.02em;
-  font-variant-numeric: tabular-nums; color: var(--ink);
-}
-.stat span { font-size: 12px; color: var(--muted); }
-.stat.ok b   { color: var(--ok); }
-.stat.warn b { color: var(--warn); }
-.stat.hot b  { color: var(--accent-ink); }
-
 /* ---------- 标签页 ---------- */
 .tabs {
   display: flex; gap: 4px; margin-bottom: 16px; padding: 5px;
@@ -1986,7 +1968,6 @@ main {
   font-weight: 700;
 }
 .ks-invalid:hover { background: var(--danger); color: var(--on-accent); }
-.tag-done.cand { background: var(--surface-2); color: var(--muted); }
 
 /* ---------- 抽屉：实底面板，遮罩轻暗（非毛玻璃） ---------- */
 .drawer-mask { position: fixed; inset: 0; background: oklch(0% 0 0 / 0.5); z-index: var(--z-backdrop); animation: fade .15s ease; }

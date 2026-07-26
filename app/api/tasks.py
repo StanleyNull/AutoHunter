@@ -1,7 +1,6 @@
 """任务相关 API：创建 / 列表 / 详情 / 启停。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import case, delete, func, or_, select

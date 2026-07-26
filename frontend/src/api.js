@@ -76,10 +76,6 @@ export function canWrite() {
   return authRoleRef.value === "full";
 }
 
-export function getAuthRole() {
-  return authRoleRef.value;
-}
-
 export async function loadAuthRole() {
   try {
     const res = await req("GET", "/api/auth/status");
@@ -225,7 +221,6 @@ export const api = {
   start: (id) => req("POST", `/api/tasks/${id}/start`),
   pause: (id) => req("POST", `/api/tasks/${id}/pause`),
   stop: (id) => req("POST", `/api/tasks/${id}/stop`),
-  results: (id, conf, q) => req("GET", `/api/tasks/${id}/results${qs({ confidence: conf, q })}`),
   reviewQueue: (id, q) => req("GET", `/api/tasks/${id}/review-queue${qs({ q })}`),
   submitList: (id, submitted, q, opts = {}) =>
     req("GET", `/api/tasks/${id}/submit-list${qs({ submitted, q, ...opts })}`),
@@ -237,7 +232,6 @@ export const api = {
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),
   finding: (id) => req("GET", `/api/findings/${id}`),
-  reportAssistant: (id, message) => req("POST", `/api/findings/${id}/assistant`, { message }),
   reportAssistantStream: (id, message, onEvent) =>
     streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent),
   userReview: (id, data) => req("PATCH", `/api/results/${id}`, data),

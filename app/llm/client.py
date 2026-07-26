@@ -217,10 +217,6 @@ def _is_forced_tool_choice(tool_choice: Any) -> bool:
     return True
 
 
-def _is_thinking_tool_choice_error(err: LLMError) -> bool:
-    return "thinking mode does not support this tool_choice" in (err.detail or str(err)).lower()
-
-
 def _is_forced_tool_choice_unsupported(err: LLMError) -> bool:
     """强制指定函数的 tool_choice 不被上游模型/网关接受时的各种表现。
 
@@ -640,10 +636,12 @@ class LLMClient:
         if ref in self._auto_protocol_cache:
             return self._auto_protocol_cache[ref], False
         url = self.config.base_url.lower()
-        if "openmodel.ai" in url or "/messages" in url or "anthropic" in url:
-            return True, True
+        # 先判 OpenAI 兼容端点特征：像 xxx.anthropic-proxy.com/v1/chat/completions 这类
+        # 名字带 anthropic 但实际走 OpenAI Chat 的中转，不能因 "anthropic" 子串误锁成 messages。
         if "/chat/completions" in url or "chat/completions" in url:
             return False, True
+        if "openmodel.ai" in url or "/messages" in url or "anthropic" in url:
+            return True, True
         return False, False  # 默认 openai，未锁定，运行时可自适应切换
 
     def _remember_auto_protocol(self) -> None:
@@ -664,10 +662,16 @@ class LLMClient:
         if self._protocol_locked or self._protocol_autoswitched:
             return False
         text = f"{exc} {getattr(exc, '__cause__', '')} {getattr(exc, 'detail', '')}".lower()
+        # 排除“模型/参数”类错误（OpenAI 常见 "model 'x' does not exist" / invalid_request_error）：
+        # 这类不是协议/端点不匹配，切协议只会把清晰的参数错误变成另一协议上的二次失败。
+        if "invalid_request_error" in text or (
+            "model" in text and any(w in text for w in ("does not exist", "not found", "not a valid", "no such"))
+        ):
+            return False
         proto_markers = (
-            "404", "not found", "no such", "method not allowed", "405",
+            "404", "not found", "method not allowed", "405",
             "unknown path", "invalid path", "/messages", "chat/completions",
-            "not a valid", "unsupported endpoint", "does not exist",
+            "unsupported endpoint",
         )
         if any(m in text for m in proto_markers):
             self._messages_protocol = not self._messages_protocol
@@ -904,7 +908,8 @@ class LLMClient:
             try:
                 if self._messages_protocol:
                     return self._messages_chat(
-                        messages, tools, active_tool_choice, kwargs["temperature"], kwargs["max_tokens"]
+                        messages, tools, active_tool_choice,
+                        kwargs.get("temperature", 0.3), kwargs.get("max_tokens", 4096),
                     )
                 resp = self.client.chat.completions.create(**kwargs)
                 self._record_openai_usage(resp)
@@ -998,6 +1003,8 @@ class LLMClient:
             return {"type": "auto"}
         if tool_choice == "none":
             return {"type": "none"}
+        if tool_choice == "required":
+            return {"type": "any"}   # OpenAI 强制调用任意工具 → Anthropic any（勿静默降级为 auto）
         if isinstance(tool_choice, dict):
             fn = (tool_choice.get("function") or {}).get("name")
             if fn:
@@ -1095,7 +1102,7 @@ class LLMClient:
             "model": self.config.model,
             "max_tokens": max_tokens,
             "messages": converted,
-            "temperature": temperature,
+            "temperature": min(temperature, 1.0),  # Anthropic temperature 上限 1.0（OpenAI 是 2.0），>1.0 会 400
         }
         if system:
             payload["system"] = system

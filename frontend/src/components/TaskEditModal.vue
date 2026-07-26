@@ -66,7 +66,7 @@ const form = reactive({
   concurrency: 3,
   skip_site_recon: false,
 });
-const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions, manualTargetLines } =
+const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions } =
   useAuthBindings(() => form.manual_targets);
 const saving = ref(false);
 const original = reactive({

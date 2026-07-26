@@ -16,7 +16,6 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from urllib.parse import urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +25,7 @@ from app.agents import collector_llm, playbook_router, prefilter, scorer, site_c
 from app.agents import target_cluster
 from app.agents.prompts import is_enterprise_src
 from app.db.models import Target, Task
-from app.engines import get_engine, EngineResult, QuakeRateLimitError
+from app.engines import get_engine, QuakeRateLimitError
 from app.engines.translator import translate_fofa_query
 from app.tools.leakcreds import query_leaked_creds
 from app.agents import auth_bootstrap

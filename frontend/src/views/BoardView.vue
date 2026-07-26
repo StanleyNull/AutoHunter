@@ -159,11 +159,6 @@ async function loadTabData(t = tab.value) {
   markTabLoaded(t);
 }
 
-function refreshTabData() {
-  if (isListTab(tab.value)) return loadTabData(tab.value);
-  return Promise.resolve();
-}
-
 function shouldRefreshTab(t) {
   return tab.value === t || loadedTabs.value.has(t);
 }

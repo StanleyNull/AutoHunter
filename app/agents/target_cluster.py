@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import re
-from urllib.parse import urlparse
 
 CLUSTER_DEAD_THRESHOLD = int(os.environ.get("TARGET_CLUSTER_DEAD_THRESHOLD", "3"))
 CLUSTER_PENDING_LIMIT = int(os.environ.get("TARGET_CLUSTER_PENDING_LIMIT", "3"))

@@ -22,7 +22,7 @@ const form = reactive({
   skip_site_recon: false,
   skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
 });
-const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions, manualTargetLines } =
+const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions } =
   useAuthBindings(() => form.manual_targets);
 const submitting = ref(false);
 

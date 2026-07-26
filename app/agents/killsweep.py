@@ -15,7 +15,6 @@ import json
 import os
 import threading
 from typing import Any, Callable, Optional
-from urllib.parse import urlparse
 
 import httpx
 

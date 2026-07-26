@@ -90,7 +90,6 @@ const form = reactive({
   protocol: "openai_chat",
   temperature: 0.3,
   api_key_set: false,
-  llm_provider_count: 0,
   llm_providers: [],
   fofa_key: "",
   fofa_key_set: false,
@@ -420,7 +419,6 @@ async function load() {
     form.key_ref = s.llm?.key_ref || "";
     form.api_key_set = s.llm?.api_key_set;
     llmMode.value = s.llm?.mode === "pool" ? "pool" : "single";
-    form.llm_provider_count = s.llm?.provider_count || 0;
     loadLlmProviders(s.llm?.providers || []);
     form.fofa_key = "";
     form.fofa_key_set = s.fofa?.key_set;
@@ -471,7 +469,6 @@ async function save() {
     form.key_ref = s.llm?.key_ref || "";
     llmMode.value = s.llm?.mode === "pool" ? "pool" : "single";
     form.protocol = normalizeLlmProtocol(s.llm?.protocol);
-    form.llm_provider_count = s.llm?.provider_count || 0;
     loadLlmProviders(s.llm?.providers || []);
     form.fofa_key_set = s.fofa?.key_set;
     toast("系统配置已保存");

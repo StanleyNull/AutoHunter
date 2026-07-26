@@ -1,5 +1,6 @@
 // 把 finding（含 review + 用户编辑覆盖）拼成标准 Markdown 报告
-const CONF = { confirmed: "确认", likely: "疑似", uncertain: "不确定" };
+// 信度标签单一真相：ReportDrawer 也 import 这份，避免"报告写疑似/抽屉写较可信"两处措辞打架。
+export const CONF = { confirmed: "确认", likely: "疑似", uncertain: "不确定" };
 const LEVEL_MAP = { "严重": "grave", "高危": "high", "中危": "medium", "低危": "low" };
 const CATEGORY_MAP = {
   "SQL注入漏洞": 1,

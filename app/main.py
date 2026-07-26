@@ -13,7 +13,6 @@ import logging
 import os
 import signal
 import sys
-import time
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path

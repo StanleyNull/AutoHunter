@@ -41,7 +41,6 @@ _SENSITIVE_KEYWORDS = (
 
 _SENSITIVE_SKIP_REASON = "敏感域名（政府/军政/政法等），自动跳过"
 # 兼容旧常量名
-_GOV_SKIP_REASON = _SENSITIVE_SKIP_REASON
 
 
 def _extra_sensitive_suffixes() -> tuple[str, ...]:

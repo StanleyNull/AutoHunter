@@ -15,7 +15,6 @@ import sqlite3
 import threading
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
 
 _DB_PATH = Path(__file__).resolve().parent.parent / "data_static" / "edu_ip.db"
 
@@ -165,12 +164,6 @@ def lookup_school(target: str) -> dict | None:
         "city": row["city"],
         "ip": ip,
     }
-
-
-def school_name(target: str) -> str | None:
-    """便捷：只要主校名，查不到返回 None（同步，可能触发 DNS，勿在事件循环里直接调）。"""
-    info = lookup_school(target)
-    return info["school"] if info else None
 
 
 def _lookup_no_dns(target: str) -> dict | None:

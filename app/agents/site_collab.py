@@ -358,9 +358,7 @@ def build_collab_overview(rows: list[dict]) -> dict | None:
     if not site_rows:
         return None
 
-    ACTIVE = {"queued", "assigned", "scanning"}
     RUNNING = {"assigned", "scanning"}
-    DONE = {"done", "skipped", "dead"}
 
     def _status_of(r: dict) -> str:
         s = (r.get("status") or "").lower()

@@ -4,7 +4,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, canWrite, isReadonly } from "../api.js";
 import { copyText } from "../clipboard.js";
-import { buildEdusrcToolReport, buildReportMd, effectiveSeverity } from "../report.js";
+import { CONF, buildEdusrcToolReport, buildReportMd, effectiveSeverity } from "../report.js";
 
 const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review | submit | rejected | archived
 const emit = defineEmits(["close", "updated", "toast"]);
@@ -21,7 +21,6 @@ const assistantBusy = ref(false);
 const assistantMessages = ref([]);
 const DEFAULT_ASSISTANT_WELCOME = "我可以回答这份报告的证据、危害、复现、修复问题。你也可以让我再发一个请求或跑一个简短 curl 做补充验证。";
 const SEVS = ["严重", "高危", "中危", "低危"];
-const CONF = { confirmed: "确认", likely: "较可信", uncertain: "待复核" };
 const isEnterprise = computed(() => props.srcType === "enterprise");
 
 watch(() => props.findingId, async (id) => {

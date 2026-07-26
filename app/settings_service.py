@@ -7,10 +7,9 @@ import os
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import LLMConfig, llm_config
+from app.config import LLMConfig
 from app.agents.prompts import normalize_worker_prompt_version
 from app.db.models import SystemSettings, Task, to_cst_iso
 from app.db.session import SessionLocal
@@ -437,11 +436,6 @@ def resolve_fofa_key(task: Task | None = None) -> str:
 def resolve_fofa_base_url(task: Task | None = None) -> str:
     """兼容旧版：等价于 resolve_engine_base_url('fofa', task)。"""
     return resolve_engine_base_url("fofa", task)
-
-
-def resolve_fofa_defaults(task: Task | None = None) -> dict[str, Any]:
-    """兼容旧版。"""
-    return resolve_engine_config(task)
 
 
 # ── 其他 ──────────────────────────────────────────────────────
