@@ -569,6 +569,9 @@ function assetRows(k) {
 function assetStatusLabel(status) {
   return status === "verified" ? "已验证" : "候选";
 }
+function verifiedCount(k) {
+  return assetRows(k).filter((r) => r.status === "verified").length;
+}
 function formatTokenCount(n) {
   const v = Number(n || 0);
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
@@ -1203,7 +1206,7 @@ function parseEventTs(ts) {
             <span><b>{{ k.asset_count ?? 0 }}</b>全网</span>
           </span>
           <span class="ks-badges">
-            <span class="tag-done" v-if="k.verified">已验证</span>
+            <span class="tag-done" v-if="k.verified">已验证{{ verifiedCount(k) > 1 ? ` ${verifiedCount(k)} 个` : "" }}</span>
             <span class="sev-pill" :class="k.confidence">{{ k.confidence || "uncertain" }}</span>
           </span>
         </button>

@@ -27,7 +27,7 @@ from app.tools.schemas import KILLSWEEP_TOOL_SCHEMAS
 
 _FOFA_BASE = "https://fofa.info"
 # 通杀分析只做产品指纹、FOFA 圈定、抽样验证，必须有限轮数，避免模型递归空转。
-_MAX_ROUNDS = int(os.environ.get("KILLSWEEP_MAX_ROUNDS", "24"))
+_MAX_ROUNDS = int(os.environ.get("KILLSWEEP_MAX_ROUNDS", "30"))  # 多验证几个同款站点，给足轮数
 # 叠加到查询上、把统计限定在教育行业的条件
 _EDU_FILTER = '(domain=".edu.cn" || cert="edu" || org="edu")'
 
@@ -152,7 +152,7 @@ class KillsweepHunter:
             f"- 描述：{(f.get('description') or '')[:600]}\n"
             f"- PoC：{(f.get('poc') or '')[:500]}\n"
             f"- 原始响应(片段)：{(f.get('raw_response') or '')[:800]}\n\n"
-            f"请分析这套系统能否通杀。先认指纹→FOFA 圈定+统计→实打 1 个同款站点验证→调 submit_killsweep 下结论。"
+            f"请分析这套系统能否通杀。先认指纹→FOFA 圈定+统计→实打验证几个（2~4 个）可达同款站点（能验的多验几个）→调 submit_killsweep 下结论。"
         )
 
     def run(self) -> KillsweepResult:
