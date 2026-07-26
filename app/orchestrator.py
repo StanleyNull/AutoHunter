@@ -2122,13 +2122,17 @@ class TaskRunner:
                 no_vuln_retry_reason = self._no_vuln_retry_reason(tgt)
                 if (_is_actionable_worker_deepen_lead(deepen_lead) and verdict == Verdict.no_vuln.value
                         and tgt.deepen_count < DEEPEN_CAP):
+                    _prev_dctx = tgt.deepen_context or {}
+                    _prev_origin_fid = _prev_dctx.get("from_finding_id") or ""
+                    _prev_origin_src = _prev_dctx.get("source") or ""
                     tgt.deepen_context = {
                         "directive": deepen_lead,
                         "vuln_type": "",
                         "original_title": "",
                         "original_summary": summary_text[:1000],
-                        "from_finding_id": "",
-                        "source": "worker_lead",
+                        # 链式深挖时携带上一轮 AI/人工深挖的前身 finding，使终态救回仍能定位原始线索
+                        "from_finding_id": _prev_origin_fid,
+                        "source": _prev_origin_src if _prev_origin_src in ("ai", "user") else "worker_lead",
                     }
                     tgt.deepen_count += 1
                     tgt.verdict = ""
@@ -2200,6 +2204,13 @@ class TaskRunner:
             # 目标已离开「持续临时错误」状态（成功/无果/置dead），清理回队计数避免泄漏累积。
             if not transient_llm_error:
                 self._transient_llm_requeue.pop(target_id, None)
+            # 深挖回炉终态救回：目标已置 dead 且本轮没产出可替代的新 finding 时，把被
+            # superseded 的深挖前身复位为可人工复审——避免「AI 判定值得深挖」的好线索在
+            # 深挖没打穿后永久沉底、对所有人工面板不可见（对应问题：打回深挖未升级丢洞）。
+            revived_origin_fid = None
+            produced_new_finding = (verdict == Verdict.found.value) or bool(findings)
+            if tgt.status == "dead" and not produced_new_finding:
+                revived_origin_fid = await self._revive_deepen_origin(session, tgt)
             await session.commit()
             if auto_deepen_info:
                 host, dc, lead = auto_deepen_info
@@ -2229,6 +2240,34 @@ class TaskRunner:
                 await self._log(session, "worker", "target_done",
                                 f"目标 {tgt.host} 完成: {verdict}, {len(findings)} 个漏洞",
                                 target_id=target_id, verdict=verdict, findings=len(findings))
+            if revived_origin_fid:
+                await self._log(session, "orchestrator", "deepen_origin_revived",
+                                f"目标 {tgt.host} 深挖回炉未升级，已复位原线索到「AI 未采纳」归档供人工复审",
+                                level="info", target_id=target_id, finding_id=revived_origin_fid)
+
+    async def _revive_deepen_origin(self, session: AsyncSession, tgt: Target) -> str | None:
+        """深挖回炉走到终态(dead)且本轮未产出可替代的新 finding 时，把原始被 superseded 的
+        finding 复位为可人工复审。仅处理 AI/人工深挖来源(deepen_context 带 from_finding_id)；
+        worker_lead 自动深挖无前身 finding，不涉及。返回被复活的 finding_id 或 None。"""
+        dctx = tgt.deepen_context or {}
+        origin_fid = (dctx.get("from_finding_id") or "").strip()
+        origin_src = (dctx.get("source") or "").strip()
+        if not origin_fid or origin_src not in ("ai", "user"):
+            return None
+        origin = await session.get(Finding, origin_fid)
+        if origin is None or origin.status != "superseded":
+            return None
+        # superseded→reviewed：落进「AI 未采纳」归档(深挖未果·置顶)，可一键恢复到复审队列
+        origin.status = "reviewed"
+        orv = (await session.execute(
+            select(Review).where(Review.finding_id == origin_fid)
+        )).scalar_one_or_none()
+        if orv is not None:
+            orv.reviewer_notes = (
+                (orv.reviewer_notes or "").rstrip()
+                + "\n[系统] 深挖回炉未升级，已复位原线索为可人工复审（深挖未果，疑似好洞）。"
+            ).strip()
+        return origin_fid
 
     @staticmethod
     def _is_transient_worker_error(error: str) -> bool:

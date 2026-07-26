@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
+import { fmtLocalTime } from "../format.js";
 import ReportDrawer from "../components/ReportDrawer.vue";
 import TaskEditModal from "../components/TaskEditModal.vue";
 
@@ -1130,6 +1131,7 @@ function parseEventTs(ts) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
@@ -1154,6 +1156,7 @@ function parseEventTs(ts) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }} <span v-if="f.review?.submitted" class="tag-done">已提交</span></div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
@@ -1245,6 +1248,7 @@ function parseEventTs(ts) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
           <div v-if="f.review?.user_notes" class="meta rr-note">驳回备注：{{ f.review.user_notes }}</div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
@@ -1270,6 +1274,7 @@ function parseEventTs(ts) {
             {{ f.title }}
           </div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
           <div v-if="f.ignore_reasons?.length" class="meta rr-note">AI 理由：{{ f.ignore_reasons.join("；") }}</div>
         </div>
         <div class="rr-side" @click.stop>

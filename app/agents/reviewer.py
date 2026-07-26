@@ -80,7 +80,14 @@ def _ignored_deepen_directive(finding: Finding, review: Review, src_type: str) -
         return ""
 
     sc = finding.self_check
-    if sc.is_reflected_xss or sc.needs_admin_login or sc.needs_mitm or sc.scanner_only_no_poc:
+    rce_type = (finding.vuln_type or "").strip().lower() in {
+        "rce", "command_injection", "command_exec", "code_injection", "ssti", "deserialization",
+    }
+    if sc.is_reflected_xss or sc.needs_admin_login or sc.needs_mitm:
+        return ""
+    # 盲打/无回显 RCE 常由扫描器时间盲模板发现、worker 给不出回显 PoC 时会置 scanner_only_no_poc，
+    # 正是值得定向深挖坐实的线索，不因这个标记就完全不救（对应问题：无回显 RCE 被丢）。
+    if sc.scanner_only_no_poc and not rce_type:
         return ""
 
     text = _review_text(finding, review)
@@ -117,6 +124,24 @@ def _ignored_deepen_directive(finding: Finding, review: Review, src_type: str) -
     write_signal = _has_any(text, (
         "修改", "删除", "新增", "保存", "重置", "update", "delete", "remove", "save", "reset",
     ))
+    rce_signal = rce_type or _has_any(text, (
+        "rce", "命令执行", "命令注入", "command inject", "远程代码", "代码执行", "code execution",
+        "ssti", "模板注入", "反序列化", "deserial",
+    ))
+    side_channel = _has_any(text, (
+        "时间盲", "time-based", "time based", "sleep(", "延时", "响应时间", "响应延迟", "延迟",
+        "dnslog", "oast", "带外", "ceye", "interactsh", "burpcollaborator", "回连", "外连",
+        "落地文件", "写入文件", "结果写入", "outfile", "tee ", "touch ",
+    ))
+
+    # 无回显/盲打 RCE：有稳定侧信道证据(时间盲/带外/落地回读)但缺直接回显，不当垃圾丢，回炉坐实。
+    if rce_signal and side_channel:
+        return (
+            "这是疑似盲打/无回显 RCE/命令执行/SSTI/反序列化：已有侧信道线索但缺直接回显。"
+            "沿同一注入点把命令结果坐实——用稳定 time-based(sleep 递增验证时间差线性)、"
+            "DNS/HTTP 带外回连(dnslog/interactsh/ceye)、或把命令输出写入可回读的业务字段/落地文件后访问，"
+            "拿到明确执行结果证据。确认时间差不稳定或无任何侧信道差异才 finish no_vuln。"
+        )
 
     if config_signal and (auth_signal or secret_signal):
         return (

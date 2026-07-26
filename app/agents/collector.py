@@ -193,7 +193,11 @@ def _with_scope_anchors(query: str, anchors: dict[str, list[str]]) -> str:
 
 
 def _ensure_url(host: str) -> str:
-    return host if host.startswith("http") else f"http://{host}"
+    # 走 urlnorm.ensure_scheme：裸合法 IPv6 会补方括号(http://[2001:db8::1])，
+    # 已带协议/域名/IPv4 原样，畸形 IPv6 不加括号(交由 is_unusable_host 拦截)。
+    # 直接 f"http://{host}" 会对裸 IPv6 拼出非法 URL，下游 httpx/urlparse 崩或误解析。
+    from app.urlnorm import ensure_scheme
+    return ensure_scheme(host)
 
 
 async def _existing_hosts(session: AsyncSession, task_id: str) -> set[str]:

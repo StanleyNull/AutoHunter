@@ -47,12 +47,9 @@ def _host_from_target(target: str) -> str | None:
     t = (target or "").strip()
     if not t:
         return None
-    if "://" not in t:
-        t = "http://" + t
-    try:
-        host = urlparse(t).hostname
-    except Exception:
-        host = None
+    # 走 urlnorm：裸合法 IPv6 会先补方括号，safe_hostname 才能取到完整地址而非首段。
+    from app.urlnorm import ensure_scheme, safe_hostname
+    host = safe_hostname(ensure_scheme(t))
     return host or None
 
 
@@ -87,9 +84,14 @@ def _lookup_ip(ip: str) -> sqlite3.Row | None:
     if conn is None:
         return None
     try:
-        n = int(ipaddress.ip_address(ip))
+        ip_obj = ipaddress.ip_address(ip)
     except ValueError:
         return None
+    # 归属库为纯 IPv4 ranges；IPv6→int 是 128bit 大整数，传给 sqlite 会抛
+    # OverflowError（此前被外层 try 吞掉）。IPv6 直接短路无归属。
+    if ip_obj.version != 4:
+        return None
+    n = int(ip_obj)
     try:
         with _read_lock:
             # 优先真高校（非噪音）；命中范围最小者最精确；无则回退含噪音

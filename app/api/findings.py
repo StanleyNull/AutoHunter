@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
@@ -305,17 +305,21 @@ async def archived_list(task_id: str, search: Optional[str] = Query(None, alias=
         Review.verdict.in_(["ignored", "deepen"]),
         Review.user_status == "pending",   # 用户已处理过的不再摆进来
         Finding.status != "superseded",    # 正在回炉重挖的 deepen 前身不显示（避免和新一轮重复）
-    ).order_by(Review.reviewed_at.desc().nullslast(), Review.score.desc())
+    ).order_by(
+        # deepen（AI 认可、值得深挖但没打穿的好线索）置顶，排在 ignored（疑似误杀）之前
+        case((Review.verdict == "deepen", 0), else_=1),
+        Review.reviewed_at.desc().nullslast(), Review.score.desc(),
+    )
 
     def _to_dict(f, r):
         d = _finding_dict(f, r)
-        # 归档原因：ignored=AI 判非漏洞/误杀；deepen=打回深挖但未升级出新洞
+        # 归档原因：ignored=AI 判非漏洞/误杀；deepen=AI 认可值得深挖、但深挖那轮没打穿（疑似好洞）
         if r.verdict == "ignored":
             d["archive_reason"] = "ignored"
             d["archive_reason_text"] = "AI 判为非漏洞（可能误杀）"
         else:
             d["archive_reason"] = "deepen"
-            d["archive_reason_text"] = "打回深挖未升级"
+            d["archive_reason_text"] = "深挖未果 · 疑似好洞"
         d["ignore_reasons"] = r.ignore_reasons or []
         d["deepen_directive"] = r.deepen_directive or ""
         return d

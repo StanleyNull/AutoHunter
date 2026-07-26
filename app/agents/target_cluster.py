@@ -37,6 +37,9 @@ def root_domain(host_or_url: str) -> str:
     # IP/localhost 不做域名拆分
     if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?", host) or host == "localhost":
         return host
+    # IPv6(归一化后为带括号形式 [..] / [..]:port，映射型含 '.')不能按 '.' 拆域名
+    if host.startswith("["):
+        return host
     labels = host.split(".")
     if len(labels) <= 2:
         return host

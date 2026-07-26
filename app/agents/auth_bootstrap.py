@@ -142,14 +142,15 @@ def _norm_url(u: str) -> str:
 
 
 def _host_of(u: str) -> str:
-    from app.urlnorm import is_bare_ipv6, safe_urlparse
+    from app.urlnorm import ensure_scheme, safe_hostname
     u = _strip(u)
     if not u:
         return ""
     if "://" not in u and "/" not in u:
-        # 裸 IPv6 不能按 ':' 切（会截断成第一段）
-        return u.lower() if is_bare_ipv6(u) else u.lower().split(":")[0]
-    return (safe_urlparse(u).hostname or "").lower()
+        # 裸 IPv6(2001:db8::1) 与带括号 IPv6([2001:db8::1]/[..]:8080) 都不能按 ':' 切
+        # （会截断成第一段 '[2001'）；统一走 urlnorm ensure_scheme+safe_hostname 取主机名。
+        return safe_hostname(ensure_scheme(u)) or u.lower()
+    return safe_hostname(u)
 
 
 def _hostport_of(u: str) -> str:
@@ -400,9 +401,10 @@ def try_user_login(
     base = _strip(base_url)
     if not base:
         return {"ok": False, "reason": "无目标 URL"}
-    if "://" not in base:
-        base = "http://" + base
-    origin = f"{urlparse(base).scheme}://{urlparse(base).netloc}"
+    from app.urlnorm import ensure_scheme, safe_urlparse
+    base = ensure_scheme(base)  # 裸合法 IPv6 补方括号(http://[2001:db8::1])，避免登录候选 URL 非法
+    _p = safe_urlparse(base)
+    origin = f"{_p.scheme or 'http'}://{_p.netloc}" if _p.netloc else base
 
     candidates: list[str] = []
     if login_url:

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
+import { fmtLocalTime } from "../format.js";
 
 const router = useRouter();
 const stats = ref({ total: 0, submitted: 0, ready: 0, by_severity: {} });
@@ -74,11 +75,6 @@ function prevPage() {
 
 function sevMeta(s) {
   return SEV_META[(s || "").toLowerCase()] || { label: s || "未定级", hue: "ok" };
-}
-
-function fmtTime(iso) {
-  if (!iso) return "-";
-  return iso.slice(0, 19).replace("T", " ");
 }
 
 function openVuln(row) {
@@ -188,7 +184,7 @@ onMounted(reload);
             {{ row.submitted ? "✓ 已提交" : "◷ 待提交" }}
           </span>
           <span class="ir-hit" v-if="row.confidence">{{ row.confidence }}</span>
-          <time>{{ fmtTime(row.user_reviewed_at || row.created_at) }}</time>
+          <time>{{ fmtLocalTime(row.user_reviewed_at || row.created_at) }}</time>
         </div>
       </article>
     </div>

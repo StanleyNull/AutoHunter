@@ -75,7 +75,9 @@ def _observer_host(host: str) -> str:
     if not s:
         return ""
     port = ""
-    if ":" in s and not s.startswith("["):
+    from app.urlnorm import is_bare_ipv6
+    # 裸 IPv6(多冒号)不能 rsplit(':',1)——会把末段 hextet 误当端口剥掉。
+    if ":" in s and not s.startswith("[") and not is_bare_ipv6(s):
         h, maybe_port = s.rsplit(":", 1)
         if maybe_port.isdigit():
             s, port = h, f":{maybe_port}"

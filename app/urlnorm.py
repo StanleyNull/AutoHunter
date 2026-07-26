@@ -70,7 +70,11 @@ def ensure_scheme(url_or_host: str, default_scheme: str = "http") -> str:
         return ""
     if "://" in s:
         return s
-    host = f"[{s}]" if is_valid_ipv6(s) else s
+    # 只给「尚未加括号」的合法裸 IPv6 加括号：is_valid_ipv6 会先剥掉方括号再校验，
+    # 若不判 startswith("[")，已带括号的合法 IPv6 会被再套一层 → http://[[..]]，
+    # urlparse 解析期即抛 ValueError → safe_hostname 空 → is_unusable_host 误判每个
+    # 无端口的合法 IPv6 目标为「不可用」而静默丢弃（IPv6 兼容被整体击穿）。
+    host = f"[{s}]" if (not s.startswith("[") and is_valid_ipv6(s)) else s
     return f"{default_scheme}://{host}"
 
 
