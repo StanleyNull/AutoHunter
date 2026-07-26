@@ -12,7 +12,6 @@ from app.api.dto import SettingsUpdateRequest
 from app.config import LLMConfig
 from app.db.session import get_session
 from app.llm.client import _resolve_user_agent
-from app.llm.health import mark_provider_failed, mark_provider_ok
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 from app.settings_service import (
     _clean_llm_providers,
@@ -242,10 +241,7 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
             result["error"] = _safe_error(
                 f"HTTP {response.status_code}: {response.text[:300]}", provider.api_key
             )
-            mark_provider_failed(
-                provider.base_url, provider.model, result["error"], provider.api_key,
-                provider.protocol, kind="probe"
-            )
+            # 连接测试是管理员手动探测，只返回结果、不写生产熔断器（避免污染在跑 worker 的端点健康）。
             return result
         data = response.json()
         if protocol == "anthropic_messages":
@@ -258,17 +254,12 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
             choice = (data.get("choices") or [{}])[0]
             reply = str((choice.get("message") or {}).get("content") or choice.get("text") or "")
         result.update(ok=True, reply=reply[:80])
-        mark_provider_ok(
-            provider.base_url, provider.model, provider.api_key, provider.protocol
-        )
+        # 测试成功不清生产熔断器（否则会抹掉真实 cooldown，让 worker 立即冲击刚被限流的端点）。
         return result
     except Exception as exc:
         result["latency_ms"] = int((time.perf_counter() - started) * 1000)
         result["error"] = _safe_error(exc, provider.api_key)
-        mark_provider_failed(
-            provider.base_url, provider.model, result["error"], provider.api_key,
-            provider.protocol, kind="probe"
-        )
+        # 同上：手动测试失败不累加生产熔断计数。
         return result
 
 

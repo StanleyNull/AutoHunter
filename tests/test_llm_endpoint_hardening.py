@@ -493,7 +493,6 @@ def test_llm_connection_probe_uses_runtime_user_agent(protocol, model, expected_
         patch("httpx.AsyncClient", AsyncClient),
         patch.object(settings_api, "assert_safe_outbound_url"),
         patch.object(settings_api, "_resolve_user_agent", return_value="probe-UA/1.0") as resolve_ua,
-        patch.object(settings_api, "mark_provider_ok"),
     ):
         result = asyncio.run(settings_api._test_llm_one("probe", provider))
 
