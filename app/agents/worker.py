@@ -19,7 +19,7 @@ from app.agents.prompts import is_enterprise_src, normalize_worker_prompt_versio
 from app.agents import auth_bootstrap
 from app.config import worker_config
 from app import dedup
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, LLMError
 from app.schemas import Finding, Verdict, WorkerResult
 from app.tools.executor import ToolExecutor
 from app.tools.schemas import (
@@ -262,9 +262,12 @@ class Worker:
                 msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
             except Exception as e:
                 self._emit("llm_error", error=str(e))
+                failure_kind = e.kind if isinstance(e, LLMError) else ""
+                retry_after = e.retry_after if isinstance(e, LLMError) else 0
                 return WorkerResult(
                     target=self.target, verdict=Verdict.error,
                     findings=self.findings, rounds=rounds, error=f"LLM 调用失败: {e}",
+                    failure_kind=failure_kind, retry_after_seconds=retry_after,
                 )
             if self.cancel_event.is_set():
                 return self._cancelled_result(rounds)
@@ -302,7 +305,10 @@ class Worker:
             if not tool_calls:
                 no_tool_rounds += 1
                 if no_tool_rounds >= 6:
-                    self._auto_finish("模型连续 6 轮没有调用工具或 finish，系统自动收敛。")
+                    self._auto_finish(
+                        "模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。",
+                        "model_behavior",
+                    )
                     break
                 # 没有工具调用也没结束，提醒模型继续或收尾
                 messages.append({"role": "user", "content": "继续调用工具验证，或 finish。"})
@@ -375,7 +381,10 @@ class Worker:
                     consecutive_blocked = 0
                     continue
                 if consecutive_arg_errors >= 3:
-                    self._auto_finish("连续 3 次工具参数错误，模型未修正，系统自动收敛。")
+                    self._auto_finish(
+                        "连续 3 次工具参数错误，模型未修正，本轮未得到可靠结论。",
+                        "tool_argument",
+                    )
                     break
                 if consecutive_network_failures >= 3:
                     self._auto_finish("连续 3 次网络/超时失败，目标当前不可稳定验证，系统自动收敛。")
@@ -445,7 +454,10 @@ class Worker:
             findings=self.findings,
             summary=(self._finished or {}).get("summary", ""),
             rounds=rounds,
-            error=None if self._finished else f"达到最大轮数 {max_rounds} 未主动结束",
+            error=(self._finished or {}).get("error") or (
+                None if self._finished else f"达到最大轮数 {max_rounds} 未主动结束"
+            ),
+            failure_kind=(self._finished or {}).get("failure_kind", ""),
             deepen_lead=(self._finished or {}).get("deepen_lead", ""),
             reported_intel=self._reported_intel,
             reported_coverage=self._reported_coverage,
@@ -664,6 +676,7 @@ class Worker:
                 "summary": args.get("summary", ""),
                 "deepen_lead": (args.get("deepen_lead") or "").strip(),
             }
+            self._report_provider_success()
             self._emit("worker_finish", verdict=self._finished["verdict"],
                        summary=self._finished["summary"][:300],
                        deepen_lead=self._finished["deepen_lead"][:300])
@@ -780,10 +793,45 @@ class Worker:
             return "参数格式错误：检查工具参数是否合法 JSON、必填字段是否齐全。对照工具 schema 修正后重试一次。"
         return ""
 
-    def _auto_finish(self, reason: str) -> None:
+    def _auto_finish(self, reason: str, failure_kind: str = "") -> None:
+        if failure_kind:
+            self._finished = {
+                "verdict": "error",
+                "summary": reason,
+                "error": reason,
+                "failure_kind": failure_kind,
+            }
+            self._report_provider_failure(reason, failure_kind)
+            self._emit(
+                "worker_auto_finish",
+                verdict="error",
+                failure_kind=failure_kind,
+                summary=reason[:300],
+            )
+            return
         verdict = "found" if self.findings else "no_vuln"
         self._finished = {"verdict": verdict, "summary": reason}
         self._emit("worker_auto_finish", verdict=verdict, summary=reason[:300])
+
+    def _report_provider_failure(self, reason: str, failure_kind: str) -> None:
+        if failure_kind not in {"model_behavior", "tool_argument"}:
+            return
+        reporter = getattr(self.llm, "report_current_provider_failure", None)
+        if not reporter:
+            return
+        try:
+            reporter(reason, kind=failure_kind)
+        except Exception as exc:
+            self._emit("provider_degrade_error", error=str(exc), failure_kind=failure_kind)
+
+    def _report_provider_success(self) -> None:
+        reporter = getattr(self.llm, "report_current_provider_success", None)
+        if not reporter:
+            return
+        try:
+            reporter()
+        except Exception as exc:
+            self._emit("provider_health_error", error=str(exc))
 
     @staticmethod
     def _tool_outcome(result: dict) -> str:

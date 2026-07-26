@@ -1,15 +1,17 @@
 """API 请求/响应 DTO。"""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
 
 class ModelConfigDTO(BaseModel):
+    inherit_global: Optional[bool] = None
     base_url: str = "https://api.deepseek.com/v1"
     api_key: str = ""
     model: str = "deepseek-chat"
+    protocol: str = "auto"
     prompt_version: str = ""
 
 
@@ -57,10 +59,19 @@ class CreateTaskRequest(BaseModel):
 
 
 class PartialModelConfigDTO(BaseModel):
+    inherit_global: Optional[bool] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
+    protocol: Optional[str] = None
     prompt_version: Optional[str] = None
+
+
+class TaskModelsProbeRequest(BaseModel):
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    key_ref: Optional[str] = None
+    protocol: Optional[str] = None
 
 
 class PartialFofaConfigDTO(BaseModel):
@@ -135,10 +146,13 @@ class TaskResponse(BaseModel):
 
 
 class LLMSettingsDTO(BaseModel):
+    mode: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
+    protocol: Optional[str] = None
     temperature: Optional[float] = None
+    providers: Optional[list[dict[str, Any]]] = None
 
 
 class FofaSettingsDTO(BaseModel):
