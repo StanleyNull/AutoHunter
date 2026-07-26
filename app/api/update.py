@@ -131,8 +131,10 @@ def run_update():
                 "changed_files": changed[:10],
             }
 
-        # 工作树有未提交改动时 pull --ff-only 会失败；提前预检给出清晰提示，避免误覆盖本地改动。
-        _, dirty, _ = _git("status", "--porcelain")
+        # 工作树有【已跟踪文件】的未提交改动时 pull --ff-only 会失败；提前预检给清晰提示。
+        # 用 --untracked-files=no：未跟踪文件不阻塞 --ff-only（只有它会被覆盖时才失败），
+        # 避免仓库里一个无害的未跟踪文件把自动更新永久锁死。
+        _, dirty, _ = _git("status", "--porcelain", "--untracked-files=no")
         if dirty:
             return {
                 "ok": False,

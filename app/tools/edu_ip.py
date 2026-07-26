@@ -79,8 +79,16 @@ def _resolve_host(host: str) -> str | None:
     return None
 
 
-@lru_cache(maxsize=4096)
 def _lookup_ip(ip: str) -> sqlite3.Row | None:
+    # DB 暂不可用（瞬态：卷 late-mount / 首次连接瞬时失败）时返回 None 但【不缓存】——
+    # 否则会把这些 IP 永久缓存成 None，DB 恢复后仍查不到归属、无法自愈。
+    if _get_conn() is None:
+        return None
+    return _lookup_ip_cached(ip)
+
+
+@lru_cache(maxsize=4096)
+def _lookup_ip_cached(ip: str) -> sqlite3.Row | None:
     # edu_ip.db 是随镜像打包的只读静态归属库，运行期不变 → 按 ip 缓存零风险，
     # 消除评审队列/列表接口里每个 IP 目标一次同步 sqlite 查询在事件循环上的阻塞。
     conn = _get_conn()

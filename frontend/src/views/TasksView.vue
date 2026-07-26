@@ -51,7 +51,8 @@ async function openEdit(task) {
     editingTask.value = await api.getTask(task.id);
     editOpen.value = true;
   } catch (e) {
-    delError.value = `加载任务失败：${e?.message || e}`;   // 失败不静默、保持弹窗关闭
+    // 用可见的 alert 反馈；delError 只在删除确认弹窗内渲染，编辑失败时不可见。
+    alert(`加载任务失败：${e?.message || e}`);
   }
 }
 // ===== 删除任务：二次确认 + 输入 full 令牌校验 =====

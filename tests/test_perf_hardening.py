@@ -61,17 +61,28 @@ def test_compact_messages_not_windowed_unchanged():
 def test_lookup_ip_is_cached():
     from app.tools import edu_ip
 
-    edu_ip._lookup_ip.cache_clear()
+    edu_ip._lookup_ip_cached.cache_clear()
     edu_ip._lookup_ip("202.115.32.1")
-    before = edu_ip._lookup_ip.cache_info()
+    before = edu_ip._lookup_ip_cached.cache_info()
     edu_ip._lookup_ip("202.115.32.1")
-    after = edu_ip._lookup_ip.cache_info()
+    after = edu_ip._lookup_ip_cached.cache_info()
     assert after.hits == before.hits + 1, "同一 IP 第二次应命中缓存，不再查 sqlite"
 
-    edu_ip._lookup_ip.cache_clear()
+    edu_ip._lookup_ip_cached.cache_clear()
     edu_ip._lookup_ip("0.0.0.0")
     edu_ip._lookup_ip("0.0.0.0")
-    assert edu_ip._lookup_ip.cache_info().hits >= 1, "None 结果也应缓存"
+    assert edu_ip._lookup_ip_cached.cache_info().hits >= 1, "确定性查询 None 结果也应缓存"
+
+
+def test_lookup_ip_transient_db_unavailable_not_cached(monkeypatch):
+    """DB 瞬态不可用（卷 late-mount/首连失败）返回的 None 不能被缓存，
+    否则 DB 恢复后该 IP 永久查不到归属、无法自愈（回归防护）。"""
+    from app.tools import edu_ip
+
+    edu_ip._lookup_ip_cached.cache_clear()
+    monkeypatch.setattr(edu_ip, "_get_conn", lambda: None)  # 模拟 DB 暂不可用
+    assert edu_ip._lookup_ip("202.115.32.1") is None
+    assert edu_ip._lookup_ip_cached.cache_info().currsize == 0, "conn 为 None 时绝不写入缓存"
 
 
 # ---------- #3 executor 持久 http client ----------

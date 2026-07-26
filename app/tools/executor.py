@@ -129,6 +129,7 @@ class ToolExecutor:
         # 工作目录体积：增量估算 + 周期性全目录校准（见 _write_log），避免每次写日志都全目录扫描。
         self._workdir_bytes: int = self._dir_size()
         self._writes_since_scan: int = 0
+        self._over_cap: bool = False   # 一旦确认超上限即置位：work_dir 只增不删，此后直接短路不再全扫
 
     def cancel_running(self) -> None:
         """协作取消：置取消信号 + 杀子进程。仅用于控制面真取消（pause/stop/超时）。
@@ -276,11 +277,16 @@ class ToolExecutor:
         run_shell 的子进程（curl -o / wget / git clone / 重定向）会直接往 work_dir 落文件、
         不经过本函数，纯计数器会漏统计、弱化 _WORKDIR_MAX_BYTES 的防撞盘保护。
         """
+        # 超上限是终态（work_dir 只增不删）：直接短路，绝不再触发全目录扫描。
+        if self._over_cap:
+            return None
         data = content.encode("utf-8")
-        if self._writes_since_scan >= _WORKDIR_RESCAN_EVERY or self._workdir_bytes >= _WORKDIR_MAX_BYTES:
+        # 仅按“写入次数”周期性校准，不再因“已达上限”而每次全扫（否则撞盘后退化成每写必扫）。
+        if self._writes_since_scan >= _WORKDIR_RESCAN_EVERY:
             self._workdir_bytes = self._dir_size()
             self._writes_since_scan = 0
         if self._workdir_bytes >= _WORKDIR_MAX_BYTES:
+            self._over_cap = True
             return None
         self._log_seq += 1
         log_file = self.work_dir / f"shell_{self._log_seq}.log"
@@ -310,6 +316,9 @@ class ToolExecutor:
         return self._client
 
     def close_http_client(self) -> None:
+        # 经 kill_processes 调用。正常完成时无 in-flight 请求；取消路径（cancel_running →
+        # kill_processes）下 worker 线程可能正在 send/iter，此时 close 会让该请求抛异常并被
+        # http_request 的 except 兜成 {ok:false}——这正是取消语义（放弃在途请求），有意为之。
         if self._client is not None:
             try:
                 self._client.close()
