@@ -57,6 +57,11 @@ ProgressCallback = Callable[[str, str, dict], Awaitable[None]]
 ProgressReporter = Callable[..., Awaitable[None]]
 
 
+def _empty_streak_limit(max_pages: int) -> int:
+    """空轮停翻阈值：不超过 max_pages，避免用户把最大页数调到 <5 时永远攒不满 streak。"""
+    return max(1, min(_EMPTY_STREAK_STOP, max(1, int(max_pages or 1))))
+
+
 def _finish_current_query(
     cfg: dict,
     *,
@@ -500,9 +505,10 @@ async def _fofa_collect(
     cur_query = cfg.get("current_query", "")
     cursor = int(cfg.get("cursor", 0))
     empty_streak_now = int(cfg.get("empty_streak", 0) or 0)
+    streak_limit = _empty_streak_limit(max_pages)
 
     # 当前语法已连续空轮达阈值：不再继续翻页，结束本语法（可能再演化一轮）
-    if empty_streak_now >= _EMPTY_STREAK_STOP and cursor < max_pages:
+    if empty_streak_now >= streak_limit and cursor < max_pages:
         permanent, eq = _finish_current_query(
             cfg, max_pages=max_pages, cur_query=cur_query or "", history=history,
             empty_streak=empty_streak_now,
@@ -526,8 +532,8 @@ async def _fofa_collect(
 
     # 当前语法翻完了（或还没语法）→ 换/生成新语法
     if not cur_query or cursor >= max_pages:
-        # 若本语法已空翻到阈值但刚好卡在 max_pages 边界，补记一条空语法
-        if empty_streak_now >= _EMPTY_STREAK_STOP:
+        # 若本语法已空翻到阈值（或刚好卡在 max_pages 边界），补记一条空语法
+        if empty_streak_now >= streak_limit:
             cfg["empty_query_streak"] = max(int(cfg.get("empty_query_streak", 0) or 0), 1)
         eq = int(cfg.get("empty_query_streak", 0) or 0)
         if eq >= _EMPTY_QUERY_STOP:
@@ -829,7 +835,7 @@ async def _fofa_collect(
         empty_streak = int(cfg.get("empty_streak", 0)) + 1
         cfg["empty_streak"] = empty_streak
         # 连续空轮达阈值 → 结束当前语法（可再演化）；连续多条语法都空才永久停
-        if empty_streak >= _EMPTY_STREAK_STOP:
+        if empty_streak >= streak_limit:
             permanent, eq = _finish_current_query(
                 cfg, max_pages=max_pages, cur_query=cur_query, history=history,
                 empty_streak=empty_streak,
@@ -853,10 +859,10 @@ async def _fofa_collect(
             )
             return 0
         task.fofa_config = {**cfg}
-        remain = _EMPTY_STREAK_STOP - empty_streak
+        remain = streak_limit - empty_streak
         hint = "本轮无新增资产" + (f"（范围外丢弃 {dropped_oos} 个）" if dropped_oos else "")
         hint += (
-            f"；当前语法第 {cursor} 页无新目标，连续空轮 {empty_streak}/{_EMPTY_STREAK_STOP}"
+            f"；当前语法第 {cursor} 页无新目标，连续空轮 {empty_streak}/{streak_limit}"
             f"（再空 {remain} 轮将结束本语法）"
         )
         await report(
