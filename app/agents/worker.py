@@ -264,9 +264,12 @@ class Worker:
                 self._emit("llm_error", error=str(e))
                 failure_kind = e.kind if isinstance(e, LLMError) else ""
                 retry_after = e.retry_after if isinstance(e, LLMError) else 0
+                err_text = str(e)
+                if not err_text.startswith("LLM"):
+                    err_text = f"LLM 调用失败：{err_text}"
                 return WorkerResult(
                     target=self.target, verdict=Verdict.error,
-                    findings=self.findings, rounds=rounds, error=f"LLM 调用失败: {e}",
+                    findings=self.findings, rounds=rounds, error=err_text,
                     failure_kind=failure_kind, retry_after_seconds=retry_after,
                 )
             if self.cancel_event.is_set():

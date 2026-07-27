@@ -199,7 +199,8 @@ class LLMError(RuntimeError):
         return "；".join(parts)
 
     def __str__(self) -> str:
-        return self.diagnostic()
+        # 前端/事件流只展示短文案；完整 diagnostic 留给后端日志
+        return super().__str__()
 
 
 def _sanitize_error_detail(text: str, limit: int = 1200) -> str:
@@ -403,7 +404,18 @@ def _classify_error(e: Exception) -> LLMError:
         )
     if status == 403 or any(k in text for k in (
         "forbidden", "request blocked", "access denied", "content policy", "被拦截", "禁止访问",
+        "cybersecurity risk", "trusted access for cyber", "chatgpt.com/cyber",
+        "flagged for possible cybersecurity",
     )):
+        if any(k in text for k in (
+            "cybersecurity risk", "trusted access for cyber", "chatgpt.com/cyber",
+            "flagged for possible cybersecurity",
+        )):
+            return LLMError(
+                "blocked",
+                "此模型不让你搞网络安全。",
+                e, status=status, code=str(code), detail=detail,
+            )
         return LLMError(
             "blocked", "LLM 请求被上游网关或安全策略拒绝，请检查访问策略或稍后重试。",
             e, status=status, code=str(code), detail=detail,
@@ -416,6 +428,16 @@ def _classify_error(e: Exception) -> LLMError:
     if status in {400, 422} or any(k in text for k in (
         "invalid_request", "bad request", "unprocessable entity", "参数有误", "参数错误",
     )):
+        # OpenAI 常把安全策略拦截包装成 400 invalid_request
+        if any(k in text for k in (
+            "cybersecurity risk", "trusted access for cyber", "chatgpt.com/cyber",
+            "flagged for possible cybersecurity",
+        )):
+            return LLMError(
+                "blocked",
+                "此模型不让你搞网络安全。",
+                e, status=status, code=str(code), detail=detail,
+            )
         return LLMError(
             "invalid_request", "LLM 请求参数不被接受，请检查模型名、协议或请求配置。",
             e, status=status, code=str(code), detail=detail,
@@ -966,9 +988,10 @@ class LLMClient:
                     max_tokens_fallback_used = True
                     continue
                 if not _should_retry_current_provider(last_exc):
+                    diag = last_exc.diagnostic() if isinstance(last_exc, LLMError) else str(last_exc)
                     logger.warning(
-                        "LLM chat failed without same-provider retry (kind=%s, model=%s)",
-                        kind, self.config.model,
+                        "LLM chat failed without same-provider retry (kind=%s, model=%s, detail=%s)",
+                        kind, self.config.model, diag[:400],
                     )
                     break
                 if retry_count < max_retries:
@@ -977,8 +1000,11 @@ class LLMClient:
                     time.sleep(min(2 ** retry_count, 8))  # 1s, 2s, 4s... 封顶 8s
                     retry_count += 1
                 else:
-                    logger.warning("LLM chat giving up after %d retries (kind=%s, model=%s)",
-                                   max_retries, kind, self.config.model)
+                    diag = last_exc.diagnostic() if isinstance(last_exc, LLMError) else str(last_exc)
+                    logger.warning(
+                        "LLM chat giving up after %d retries (kind=%s, model=%s, detail=%s)",
+                        max_retries, kind, self.config.model, diag[:400],
+                    )
                     break
         raise last_exc  # type: ignore[misc]
 
