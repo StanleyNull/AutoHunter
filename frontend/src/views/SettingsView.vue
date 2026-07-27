@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
 
@@ -13,6 +13,11 @@ const llmTest = ref(null);
 const singleModels = ref([]);
 const singleModelsLoading = ref(false);
 const singleModelsError = ref("");
+/** 自动保存状态：idle | pending | saving | saved | error | incomplete */
+const autoSaveStatus = ref("idle");
+const autoSaveError = ref("");
+let autoSaveTimer = null;
+let suppressAutoSave = false; // load / 保存回写期间屏蔽 watch
 let healthPoll = null;
 let restartPoll = null;   // pollHealth 的重启轮询计时器（组件卸载时清理，防泄漏）
 
@@ -296,10 +301,16 @@ async function refreshProviderHealth() {
   if (llmMode.value !== "pool" || !form.llm_providers.length) return;
   const res = await api.providerHealth();
   const byRef = new Map((res.providers || []).map((item) => [item.health_ref, item.health || {}]));
-  for (const provider of form.llm_providers) {
-    if (provider.health_ref && byRef.has(provider.health_ref)) {
-      provider.health = byRef.get(provider.health_ref);
+  suppressAutoSave = true;
+  try {
+    for (const provider of form.llm_providers) {
+      if (provider.health_ref && byRef.has(provider.health_ref)) {
+        provider.health = byRef.get(provider.health_ref);
+      }
     }
+  } finally {
+    await nextTick();
+    suppressAutoSave = false;
   }
 }
 
@@ -335,6 +346,7 @@ async function loadSingleModels() {
 async function loadProviderModels(idx) {
   const provider = form.llm_providers[idx];
   if (!provider) return;
+  suppressAutoSave = true;
   provider.modelsLoading = true;
   provider.modelsError = "";
   try {
@@ -360,6 +372,9 @@ async function loadProviderModels(idx) {
     toast(`端点 #${idx + 1} 获取模型失败`);
   } finally {
     provider.modelsLoading = false;
+    await nextTick();
+    suppressAutoSave = false;
+    scheduleAutoSave(); // 可能自动选中了模型
   }
 }
 
@@ -388,6 +403,7 @@ async function testSingleLlm() {
 async function testLlmProvider(idx) {
   const provider = form.llm_providers[idx];
   if (!provider) return;
+  suppressAutoSave = true;
   provider.testing = true;
   llmTest.value = null;
   try {
@@ -404,11 +420,14 @@ async function testLlmProvider(idx) {
     toast(`端点 #${idx + 1} 测试失败`);
   } finally {
     provider.testing = false;
+    await nextTick();
+    suppressAutoSave = false;
   }
 }
 
 async function load() {
   loading.value = true;
+  suppressAutoSave = true;
   try {
     const s = await api.getSettings();
     meta.value = { updated_at: s.updated_at };
@@ -430,15 +449,47 @@ async function load() {
     form.concurrency = s.defaults?.concurrency ?? 3;
     form.skip_score_threshold = s.defaults?.skip_score_threshold ?? -10;
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
+    autoSaveStatus.value = "idle";
+    autoSaveError.value = "";
   } finally {
     loading.value = false;
+    await nextTick();
+    suppressAutoSave = false;
   }
 }
 
-async function save() {
-  saving.value = true;
+function secretReady(value) {
+  // 密钥输入中途不自动提交（避免 "sk-" 半成品写进 DB）；留空=不覆盖
+  const v = String(value || "").trim();
+  return v.length >= 8;
+}
+
+function scheduleAutoSave() {
+  if (suppressAutoSave || loading.value || saving.value) return;
+  autoSaveStatus.value = "pending";
+  autoSaveError.value = "";
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    save({ silent: true }).catch(() => {});
+  }, 1200);
+}
+
+async function save({ silent = false } = {}) {
+  if (saving.value) return;
+  // 配置不完整时：静默跳过自动保存，手动保存仍提示
   try {
     validateLlmProviders();
+  } catch (e) {
+    autoSaveStatus.value = "incomplete";
+    autoSaveError.value = String(e.message || e);
+    if (!silent) toast(autoSaveError.value);
+    return;
+  }
+
+  saving.value = true;
+  autoSaveStatus.value = "saving";
+  autoSaveError.value = "";
+  try {
     const body = {
       llm: {
         mode: llmMode.value,
@@ -460,8 +511,17 @@ async function save() {
         worker_prompt_version: form.worker_prompt_version,
       },
     };
-    if (form.api_key.trim()) body.llm.api_key = form.api_key.trim();
-    if (form.fofa_key.trim()) body.fofa.key = form.fofa_key.trim();
+    if (secretReady(form.api_key)) body.llm.api_key = form.api_key.trim();
+    if (secretReady(form.fofa_key)) body.fofa.key = form.fofa_key.trim();
+    // 端点池密钥：半成品不提交，靠 key_ref 让后端保留原值
+    if (llmMode.value === "pool") {
+      body.llm.providers = body.llm.providers.map((provider) => ({
+        ...provider,
+        api_key: secretReady(provider.api_key) ? provider.api_key : "",
+      }));
+    }
+
+    suppressAutoSave = true;
     const s = await api.updateSettings(body);
     meta.value = { updated_at: s.updated_at };
     form.api_key = "";
@@ -472,13 +532,33 @@ async function save() {
     form.protocol = normalizeLlmProtocol(s.llm?.protocol);
     loadLlmProviders(s.llm?.providers || []);
     form.fofa_key_set = s.fofa?.key_set;
-    toast("系统配置已保存");
+    autoSaveStatus.value = "saved";
+    if (!silent) toast("系统配置已保存");
   } catch (e) {
-    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+    const msg = String(e.message || e).replace(/^\d+\s*/, "");
+    autoSaveStatus.value = "error";
+    autoSaveError.value = msg;
+    toast(msg);
   } finally {
     saving.value = false;
+    await nextTick();
+    suppressAutoSave = false;
   }
 }
+
+watch([form, llmMode], () => scheduleAutoSave(), { deep: true });
+
+const autoSaveLabel = computed(() => {
+  if (autoSaveStatus.value === "pending") return "将自动保存…";
+  if (autoSaveStatus.value === "saving") return "自动保存中…";
+  if (autoSaveStatus.value === "saved") {
+    const t = meta.value.updated_at?.slice(11, 19) || "";
+    return t ? `已自动保存 ${t}` : "已自动保存";
+  }
+  if (autoSaveStatus.value === "incomplete") return autoSaveError.value || "完善配置后将自动保存";
+  if (autoSaveStatus.value === "error") return autoSaveError.value || "自动保存失败";
+  return "改动后约 1 秒自动保存";
+});
 
 onMounted(async () => {
   await load();
@@ -487,7 +567,11 @@ onMounted(async () => {
   // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
   checkUpdate();
 });
-onUnmounted(() => { clearInterval(healthPoll); clearInterval(restartPoll); });
+onUnmounted(() => {
+  clearInterval(healthPoll);
+  clearInterval(restartPoll);
+  clearTimeout(autoSaveTimer);
+});
 </script>
 
 <template>
@@ -495,7 +579,7 @@ onUnmounted(() => { clearInterval(healthPoll); clearInterval(restartPoll); });
     <header class="page-head">
       <h2>系统配置</h2>
       <p class="page-sub">
-        全局默认 LLM / FOFA / 调度参数。新建任务留空时会使用此处配置；任务内填写可单独覆盖。
+        全局默认 LLM / FOFA / 调度参数。改动后约 1 秒自动保存；新建任务留空时会使用此处配置，任务内填写可单独覆盖。
         <span v-if="meta.updated_at" class="settings-updated">上次保存 {{ meta.updated_at?.slice(0, 19).replace("T", " ") }}</span>
       </p>
     </header>
@@ -768,8 +852,11 @@ onUnmounted(() => { clearInterval(healthPoll); clearInterval(restartPoll); });
         </fieldset>
 
         <div class="settings-actions">
-          <button type="submit" class="primary" :disabled="saving">{{ saving ? "保存中…" : "保存配置" }}</button>
-          <span>密钥输入框留空时不会覆盖已有值。</span>
+          <button type="submit" class="primary" :disabled="saving">
+            {{ saving ? "保存中…" : "立即保存" }}
+          </button>
+          <span class="autosave-status" :class="autoSaveStatus">{{ autoSaveLabel }}</span>
+          <span class="settings-actions-hint">密钥留空不覆盖；输入完成后会随自动保存写入。</span>
         </div>
       </form>
     </div>

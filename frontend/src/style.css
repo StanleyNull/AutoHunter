@@ -1367,6 +1367,7 @@ main {
 .settings-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: 2px;
   padding: 14px 16px;
@@ -1381,6 +1382,17 @@ main {
 .settings-actions span {
   color: var(--muted);
   font-size: 12px;
+}
+.autosave-status {
+  font-weight: 600;
+}
+.autosave-status.pending,
+.autosave-status.saving { color: var(--info); }
+.autosave-status.saved { color: var(--ok); }
+.autosave-status.incomplete { color: var(--warn); }
+.autosave-status.error { color: var(--danger); }
+.settings-actions-hint {
+  flex: 1 1 180px;
 }
 .settings-toast {
   position: fixed;
