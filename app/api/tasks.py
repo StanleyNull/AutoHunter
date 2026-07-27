@@ -542,6 +542,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
             fc["cursor"] = 0
             fc["history"] = []
             fc.pop("empty_streak", None)
+            fc.pop("empty_query_streak", None)
             fc.pop("fofa_exhausted", None)
             task.fofa_config = fc
 
@@ -646,6 +647,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
             cfg["cursor"] = 0
             cfg["history"] = []
             cfg.pop("empty_streak", None)
+            cfg.pop("empty_query_streak", None)
             cfg.pop("fofa_exhausted", None)
         task.fofa_config = cfg
 

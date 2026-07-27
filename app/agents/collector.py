@@ -49,10 +49,37 @@ _TARGET_FILTER_HARD_TIMEOUT = float(os.environ.get("TARGET_FILTER_HARD_TIMEOUT",
 # 泄露凭证查询走外部 logs API，并发要小、节奏要慢，避免把对方打挂或被限流。
 _LEAK_CONCURRENCY = int(os.environ.get("LEAK_QUERY_CONCURRENCY", "2"))
 _LEAK_QUERY_DELAY = float(os.environ.get("LEAK_QUERY_DELAY", "0.6"))
-# 连续 N 轮 FOFA 无新增资产 → 停止翻页，避免把额度榨干（改语法/清 fofa_exhausted 后可恢复）
+# 连续 N 轮无新增资产 → 结束当前语法（不再空翻后续页）
 _EMPTY_STREAK_STOP = max(1, int(os.environ.get("FOFA_EMPTY_STREAK_STOP", "5")))
+# 连续 M 条语法都搜空 → 永久停止搜集（仍允许 intent 至少演化一轮）
+_EMPTY_QUERY_STOP = max(1, int(os.environ.get("FOFA_EMPTY_QUERY_STOP", "2")))
 ProgressCallback = Callable[[str, str, dict], Awaitable[None]]
 ProgressReporter = Callable[..., Awaitable[None]]
+
+
+def _finish_current_query(
+    cfg: dict,
+    *,
+    max_pages: int,
+    cur_query: str,
+    history: list[str],
+    empty_streak: int | None = None,
+) -> tuple[bool, int]:
+    """结束当前 FOFA 语法：强制 cursor=max_pages 以便下轮可演化；
+    连续多条语法都空才永久 fofa_exhausted。返回 (permanent_stop, empty_query_streak)。
+    """
+    cfg["current_query"] = cur_query
+    cfg["history"] = history
+    cfg["cursor"] = max(int(max_pages), 1)
+    cfg["collector_phase"] = "exhausted"
+    if empty_streak is not None:
+        cfg["empty_streak"] = int(empty_streak)
+    eq = int(cfg.get("empty_query_streak", 0) or 0) + 1
+    cfg["empty_query_streak"] = eq
+    permanent = eq >= _EMPTY_QUERY_STOP
+    if permanent:
+        cfg["fofa_exhausted"] = True
+    return permanent, eq
 
 
 def normalize_host(url_or_host: str) -> str:
@@ -467,43 +494,79 @@ async def _fofa_collect(
     # 资产已搜完：不再打 FOFA，避免空转榨干额度
     if cfg.get("fofa_exhausted"):
         return 0
-    empty_streak_now = int(cfg.get("empty_streak", 0) or 0)
-    if empty_streak_now >= _EMPTY_STREAK_STOP:
-        cfg["fofa_exhausted"] = True
-        cfg["collector_phase"] = "exhausted"
-        await report(
-            "exhausted",
-            f"连续 {empty_streak_now} 轮无新增资产，已停止 {engine.display_name} 翻页"
-            f"（阈值 {_EMPTY_STREAK_STOP}），避免继续消耗额度。修改语法后可恢复搜集。",
-            empty_streak=empty_streak_now, fofa_exhausted=True,
-        )
-        task.fofa_config = {**cfg}
-        return 0
 
     llm = _llm_for_task(task, on_provider_failure=on_provider_failure)
     history: list[str] = list(cfg.get("history", []))
     cur_query = cfg.get("current_query", "")
     cursor = int(cfg.get("cursor", 0))
+    empty_streak_now = int(cfg.get("empty_streak", 0) or 0)
+
+    # 当前语法已连续空轮达阈值：不再继续翻页，结束本语法（可能再演化一轮）
+    if empty_streak_now >= _EMPTY_STREAK_STOP and cursor < max_pages:
+        permanent, eq = _finish_current_query(
+            cfg, max_pages=max_pages, cur_query=cur_query or "", history=history,
+            empty_streak=empty_streak_now,
+        )
+        if permanent:
+            await report(
+                "exhausted",
+                f"连续 {empty_streak_now} 轮无新增资产，且已连续 {eq} 条语法搜空，"
+                f"已永久停止 {engine.display_name} 搜集。修改语法后可恢复。",
+                empty_streak=empty_streak_now, empty_query_streak=eq, fofa_exhausted=True,
+            )
+        else:
+            await report(
+                "exhausted",
+                f"连续 {empty_streak_now} 轮无新增资产，结束当前语法"
+                f"（连续空语法 {eq}/{_EMPTY_QUERY_STOP}），下轮尝试换角度继续。",
+                empty_streak=empty_streak_now, empty_query_streak=eq, fofa_exhausted=False,
+            )
+        task.fofa_config = {**cfg}
+        return 0
 
     # 当前语法翻完了（或还没语法）→ 换/生成新语法
-    # 若已经连续空轮过阈值，禁止再演化新语法继续烧额度
     if not cur_query or cursor >= max_pages:
+        # 若本语法已空翻到阈值但刚好卡在 max_pages 边界，补记一条空语法
         if empty_streak_now >= _EMPTY_STREAK_STOP:
+            cfg["empty_query_streak"] = max(int(cfg.get("empty_query_streak", 0) or 0), 1)
+        eq = int(cfg.get("empty_query_streak", 0) or 0)
+        if eq >= _EMPTY_QUERY_STOP:
             cfg["fofa_exhausted"] = True
             cfg["collector_phase"] = "exhausted"
             await report(
                 "exhausted",
-                f"当前语法已翻完且连续空轮 {empty_streak_now} 次，不再生成新语法，停止 {engine.display_name} 搜集。",
-                empty_streak=empty_streak_now, fofa_exhausted=True, cursor=cursor,
+                f"已连续 {eq} 条语法无新增资产，停止 {engine.display_name} 搜集。"
+                f"修改语法后可恢复。",
+                empty_query_streak=eq, fofa_exhausted=True, cursor=cursor,
             )
             task.fofa_config = {**cfg}
             return 0
+        prev_query = cur_query
         new_q, reason = await _resolve_query(task, llm)
         if not new_q:
+            cfg["fofa_exhausted"] = True
+            cfg["collector_phase"] = "exhausted"
+            await report(
+                "exhausted",
+                f"无法生成新的搜集语法，停止 {engine.display_name} 翻页。",
+                fofa_exhausted=True, empty_query_streak=eq,
+            )
+            task.fofa_config = {**cfg}
+            return 0
+        # 语法演化失败（仍是同一条）且上一条已搜空 → 永久停，避免 cursor 归零重扫烧额度
+        if prev_query and new_q == prev_query and eq > 0:
+            cfg["fofa_exhausted"] = True
+            cfg["collector_phase"] = "exhausted"
+            await report(
+                "exhausted",
+                f"无法换出新语法（仍是原语法），停止 {engine.display_name} 搜集以免重复消耗额度。",
+                fofa_exhausted=True, empty_query_streak=eq, query=new_q,
+            )
+            task.fofa_config = {**cfg}
             return 0
         cur_query = new_q
         cursor = 0
-        cfg.pop("empty_streak", None)  # 换语法后重新计空轮
+        cfg.pop("empty_streak", None)  # 新语法重置「页级」空轮；语法级 empty_query_streak 保留
         if new_q not in history:
             history.append(new_q)
 
@@ -671,23 +734,32 @@ async def _fofa_collect(
     cfg.pop("daily_limit_until", None)
     cfg.pop("daily_limit_exhausted", None)
 
-    # 引擎本页零结果 = 语法已翻尽，立刻停，别再空烧后续页
+    # 引擎本页零结果 = 当前语法已翻尽：结束本语法，允许 intent 再演化；
+    # 连续多条语法都空才永久停，避免首轮 0 命中就掐死演化。
     page_rows = list(getattr(res, "results", None) or [])
     if not page_rows:
-        cfg["current_query"] = cur_query
-        cfg["cursor"] = cursor
-        cfg["history"] = history
-        cfg["fofa_exhausted"] = True
-        cfg["collector_phase"] = "exhausted"
         empty_streak = int(cfg.get("empty_streak", 0)) + 1
-        cfg["empty_streak"] = empty_streak
-        task.fofa_config = {**cfg}
-        await report(
-            "exhausted",
-            f"{engine.display_name} 第 {cursor} 页已无结果，停止继续翻页以免消耗额度。"
-            f"修改语法后可恢复搜集。",
-            candidates=0, empty_streak=empty_streak, fofa_exhausted=True, cursor=cursor,
+        permanent, eq = _finish_current_query(
+            cfg, max_pages=max_pages, cur_query=cur_query, history=history,
+            empty_streak=empty_streak,
         )
+        task.fofa_config = {**cfg}
+        if permanent:
+            await report(
+                "exhausted",
+                f"{engine.display_name} 第 {cursor} 页已无结果，且连续 {eq} 条语法搜空，"
+                f"永久停止搜集。修改语法后可恢复。",
+                candidates=0, empty_streak=empty_streak, empty_query_streak=eq,
+                fofa_exhausted=True, cursor=cursor,
+            )
+        else:
+            await report(
+                "exhausted",
+                f"{engine.display_name} 第 {cursor} 页已无结果，结束当前语法"
+                f"（连续空语法 {eq}/{_EMPTY_QUERY_STOP}），下轮换角度继续。",
+                candidates=0, empty_streak=empty_streak, empty_query_streak=eq,
+                fofa_exhausted=False, cursor=cursor,
+            )
         return 0
 
     # 关键：抓这一页时 FOFA 额度已经花掉了。这里立刻把游标推进 + 当前语法落库并
@@ -756,19 +828,28 @@ async def _fofa_collect(
         cfg["collector_phase"] = "exhausted"
         empty_streak = int(cfg.get("empty_streak", 0)) + 1
         cfg["empty_streak"] = empty_streak
-        # 连续空轮达阈值 → 彻底停翻页，否则会一直打 FOFA 把额度榨干
+        # 连续空轮达阈值 → 结束当前语法（可再演化）；连续多条语法都空才永久停
         if empty_streak >= _EMPTY_STREAK_STOP:
-            cfg["fofa_exhausted"] = True
+            permanent, eq = _finish_current_query(
+                cfg, max_pages=max_pages, cur_query=cur_query, history=history,
+                empty_streak=empty_streak,
+            )
             task.fofa_config = {**cfg}
             hint = "本轮无新增资产" + (f"（范围外丢弃 {dropped_oos} 个）" if dropped_oos else "")
-            hint += (
-                f"；连续空轮 {empty_streak} 次已达阈值 {_EMPTY_STREAK_STOP}，"
-                f"已停止 {engine.display_name} 翻页。修改语法后可恢复搜集。"
-            )
+            if permanent:
+                hint += (
+                    f"；连续空轮 {empty_streak} 且已连续 {eq} 条语法搜空，"
+                    f"已永久停止 {engine.display_name} 搜集。修改语法后可恢复。"
+                )
+            else:
+                hint += (
+                    f"；连续空轮 {empty_streak}，结束当前语法"
+                    f"（连续空语法 {eq}/{_EMPTY_QUERY_STOP}），下轮换角度继续。"
+                )
             await report(
                 "exhausted", hint,
                 candidates=0, empty_streak=empty_streak, dropped_out_of_scope=dropped_oos,
-                fofa_exhausted=True,
+                empty_query_streak=eq, fofa_exhausted=permanent,
             )
             return 0
         task.fofa_config = {**cfg}
@@ -776,7 +857,7 @@ async def _fofa_collect(
         hint = "本轮无新增资产" + (f"（范围外丢弃 {dropped_oos} 个）" if dropped_oos else "")
         hint += (
             f"；当前语法第 {cursor} 页无新目标，连续空轮 {empty_streak}/{_EMPTY_STREAK_STOP}"
-            f"（再空 {remain} 轮将停止翻页）"
+            f"（再空 {remain} 轮将结束本语法）"
         )
         await report(
             "exhausted", hint,
@@ -784,6 +865,7 @@ async def _fofa_collect(
         )
         return 0
     cfg.pop("empty_streak", None)
+    cfg.pop("empty_query_streak", None)
     cfg.pop("fofa_exhausted", None)
 
     # 机械预筛（并发探活，过滤 CDN/死链/纯前端）
