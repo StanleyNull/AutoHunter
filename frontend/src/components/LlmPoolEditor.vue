@@ -134,10 +134,7 @@ function moveProvider(idx, delta) {
 
 function patchCurrent(patch) {
   if (!current.value || selected.value < 0) return;
-  const idx = selected.value;
-  const next = providers.value.slice();
-  next[idx] = ensureUid({ ...next[idx], ...patch });
-  providers.value = next;
+  patchAt(selected.value, patch);
 }
 
 function invalidateKey() {
@@ -148,6 +145,37 @@ function invalidateKey() {
     models: [],
     modelsError: "",
   });
+}
+
+function onBaseUrlInput(value) {
+  patchCurrent({
+    base_url: value,
+    key_ref: "",
+    api_key_set: false,
+    api_key_masked: "",
+    models: [],
+    modelsError: "",
+  });
+}
+
+function onProtocolChange(value) {
+  patchCurrent({
+    protocol: value,
+    key_ref: "",
+    api_key_set: false,
+    api_key_masked: "",
+    models: [],
+    modelsError: "",
+  });
+}
+
+function patchAt(idx, patch) {
+  if (idx < 0 || idx >= providers.value.length) return;
+  const row = providers.value[idx];
+  if (!row) return;
+  // 就地改字段，只浅拷贝数组触发父级更新；避免每键新建对象导致输入框丢光标
+  Object.assign(ensureUid(row), patch);
+  providers.value = providers.value.slice();
 }
 
 async function loadModels(idx) {
@@ -187,13 +215,6 @@ async function loadModels(idx) {
   } finally {
     selected.value = Math.min(keepSelected, Math.max(providers.value.length - 1, 0));
   }
-}
-
-function patchAt(idx, patch) {
-  if (idx < 0 || idx >= providers.value.length) return;
-  const next = providers.value.slice();
-  next[idx] = ensureUid({ ...next[idx], ...patch });
-  providers.value = next;
 }
 
 /** 导出给父组件提交用的干净 payload */
@@ -278,7 +299,7 @@ defineExpose({ exportProviders, addProvider });
           <select
             :value="current.protocol"
             :disabled="disabled"
-            @change="patchCurrent({ protocol: $event.target.value }); invalidateKey()"
+            @change="onProtocolChange($event.target.value)"
           >
             <option value="auto">自动判断</option>
             <option value="openai_chat">OpenAI Chat</option>
@@ -290,7 +311,7 @@ defineExpose({ exportProviders, addProvider });
             :value="current.base_url"
             :disabled="disabled"
             placeholder="https://api.deepseek.com/v1"
-            @input="patchCurrent({ base_url: $event.target.value }); invalidateKey()"
+            @input="onBaseUrlInput($event.target.value)"
           />
         </label>
         <label>api_key
