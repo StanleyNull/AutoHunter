@@ -535,6 +535,15 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     old_query = task.fofa_query or ""
     if req.fofa_query is not None:
         task.fofa_query = req.fofa_query
+        # 改语法后清 exhausted，允许重新翻页（即使本次未带 fofa_config patch）
+        if req.fofa_query != old_query:
+            fc = dict(task.fofa_config or {})
+            fc.pop("current_query", None)
+            fc["cursor"] = 0
+            fc["history"] = []
+            fc.pop("empty_streak", None)
+            fc.pop("fofa_exhausted", None)
+            task.fofa_config = fc
 
     if req.model_config_data is not None:
         patch = req.model_config_data.model_dump(exclude_unset=True)
@@ -632,9 +641,12 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
                 raise HTTPException(400, "intent_mode 必须是空/syntax/intent")
             cfg["intent_mode"] = intent_mode
         if req.fofa_query is not None and req.fofa_query != old_query:
+            # 与上方 fofa_query 变更清理保持一致（可能已被清过，幂等）
             cfg.pop("current_query", None)
             cfg["cursor"] = 0
             cfg["history"] = []
+            cfg.pop("empty_streak", None)
+            cfg.pop("fofa_exhausted", None)
         task.fofa_config = cfg
 
     await session.commit()

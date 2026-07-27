@@ -49,6 +49,8 @@ _TARGET_FILTER_HARD_TIMEOUT = float(os.environ.get("TARGET_FILTER_HARD_TIMEOUT",
 # 泄露凭证查询走外部 logs API，并发要小、节奏要慢，避免把对方打挂或被限流。
 _LEAK_CONCURRENCY = int(os.environ.get("LEAK_QUERY_CONCURRENCY", "2"))
 _LEAK_QUERY_DELAY = float(os.environ.get("LEAK_QUERY_DELAY", "0.6"))
+# 连续 N 轮 FOFA 无新增资产 → 停止翻页，避免把额度榨干（改语法/清 fofa_exhausted 后可恢复）
+_EMPTY_STREAK_STOP = max(1, int(os.environ.get("FOFA_EMPTY_STREAK_STOP", "5")))
 ProgressCallback = Callable[[str, str, dict], Awaitable[None]]
 ProgressReporter = Callable[..., Awaitable[None]]
 
@@ -462,18 +464,46 @@ async def _fofa_collect(
     size = int(defaults["page_size"])
     base_url = defaults.get("base_url") or engine.get_default_base_url()
 
+    # 资产已搜完：不再打 FOFA，避免空转榨干额度
+    if cfg.get("fofa_exhausted"):
+        return 0
+    empty_streak_now = int(cfg.get("empty_streak", 0) or 0)
+    if empty_streak_now >= _EMPTY_STREAK_STOP:
+        cfg["fofa_exhausted"] = True
+        cfg["collector_phase"] = "exhausted"
+        await report(
+            "exhausted",
+            f"连续 {empty_streak_now} 轮无新增资产，已停止 {engine.display_name} 翻页"
+            f"（阈值 {_EMPTY_STREAK_STOP}），避免继续消耗额度。修改语法后可恢复搜集。",
+            empty_streak=empty_streak_now, fofa_exhausted=True,
+        )
+        task.fofa_config = {**cfg}
+        return 0
+
     llm = _llm_for_task(task, on_provider_failure=on_provider_failure)
     history: list[str] = list(cfg.get("history", []))
     cur_query = cfg.get("current_query", "")
     cursor = int(cfg.get("cursor", 0))
 
     # 当前语法翻完了（或还没语法）→ 换/生成新语法
+    # 若已经连续空轮过阈值，禁止再演化新语法继续烧额度
     if not cur_query or cursor >= max_pages:
+        if empty_streak_now >= _EMPTY_STREAK_STOP:
+            cfg["fofa_exhausted"] = True
+            cfg["collector_phase"] = "exhausted"
+            await report(
+                "exhausted",
+                f"当前语法已翻完且连续空轮 {empty_streak_now} 次，不再生成新语法，停止 {engine.display_name} 搜集。",
+                empty_streak=empty_streak_now, fofa_exhausted=True, cursor=cursor,
+            )
+            task.fofa_config = {**cfg}
+            return 0
         new_q, reason = await _resolve_query(task, llm)
         if not new_q:
             return 0
         cur_query = new_q
         cursor = 0
+        cfg.pop("empty_streak", None)  # 换语法后重新计空轮
         if new_q not in history:
             history.append(new_q)
 
@@ -583,8 +613,10 @@ async def _fofa_collect(
             task.fofa_config = {**cfg}
             return 0
         # 通用频率限制检测（不限引擎，匹配常见限流关键词）
+        # FOFA [45012] 请求速度过快 必须进冷却，否则每轮空转继续打接口榨干额度
         _is_rate_limit = any(m in err_lower for m in (
-            "rate limit", "too many", "过于频繁", "请求太频繁", "q3005", "429", "retry after",
+            "rate limit", "too many", "过于频繁", "请求太频繁", "请求速度过快", "速度过快",
+            "请求过快", "45012", "q3005", "429", "retry after",
         ))
         if _is_rate_limit:
             rl_count = int(cfg.get("rate_limit_count", 0)) + 1
@@ -639,6 +671,25 @@ async def _fofa_collect(
     cfg.pop("daily_limit_until", None)
     cfg.pop("daily_limit_exhausted", None)
 
+    # 引擎本页零结果 = 语法已翻尽，立刻停，别再空烧后续页
+    page_rows = list(getattr(res, "results", None) or [])
+    if not page_rows:
+        cfg["current_query"] = cur_query
+        cfg["cursor"] = cursor
+        cfg["history"] = history
+        cfg["fofa_exhausted"] = True
+        cfg["collector_phase"] = "exhausted"
+        empty_streak = int(cfg.get("empty_streak", 0)) + 1
+        cfg["empty_streak"] = empty_streak
+        task.fofa_config = {**cfg}
+        await report(
+            "exhausted",
+            f"{engine.display_name} 第 {cursor} 页已无结果，停止继续翻页以免消耗额度。"
+            f"修改语法后可恢复搜集。",
+            candidates=0, empty_streak=empty_streak, fofa_exhausted=True, cursor=cursor,
+        )
+        return 0
+
     # 关键：抓这一页时 FOFA 额度已经花掉了。这里立刻把游标推进 + 当前语法落库并
     # commit，不要等后面那条慢管线（探活预筛 / LLM 评分 / 目标过滤 / 泄露凭证查询）
     # 跑完才存。否则用户在慢管线执行期间点停止、或进程重启，已花额度的这一页游标没
@@ -665,7 +716,7 @@ async def _fofa_collect(
     fields = res.fields
     candidates: list[dict] = []
     dropped_oos = 0
-    for row in res.results:
+    for row in page_rows:
         rec = dict(zip(fields, row)) if isinstance(row, list) else row
         raw_host = rec.get("host") or rec.get("domain") or rec.get("ip") or ""
         host = normalize_host(raw_host)
@@ -705,14 +756,35 @@ async def _fofa_collect(
         cfg["collector_phase"] = "exhausted"
         empty_streak = int(cfg.get("empty_streak", 0)) + 1
         cfg["empty_streak"] = empty_streak
-        task.fofa_config = {**cfg}
-        # 每 5 轮空转才报一次，且措辞明确指出「资产可能已搜完」，而非误导性的 0/0。
-        if empty_streak == 1 or empty_streak % 5 == 0:
+        # 连续空轮达阈值 → 彻底停翻页，否则会一直打 FOFA 把额度榨干
+        if empty_streak >= _EMPTY_STREAK_STOP:
+            cfg["fofa_exhausted"] = True
+            task.fofa_config = {**cfg}
             hint = "本轮无新增资产" + (f"（范围外丢弃 {dropped_oos} 个）" if dropped_oos else "")
-            hint += f"；当前语法第 {cursor} 页已无新目标，连续空轮 {empty_streak} 次，可能该目标资产已基本搜完"
-            await report("exhausted", hint, candidates=0, empty_streak=empty_streak, dropped_out_of_scope=dropped_oos)
+            hint += (
+                f"；连续空轮 {empty_streak} 次已达阈值 {_EMPTY_STREAK_STOP}，"
+                f"已停止 {engine.display_name} 翻页。修改语法后可恢复搜集。"
+            )
+            await report(
+                "exhausted", hint,
+                candidates=0, empty_streak=empty_streak, dropped_out_of_scope=dropped_oos,
+                fofa_exhausted=True,
+            )
+            return 0
+        task.fofa_config = {**cfg}
+        remain = _EMPTY_STREAK_STOP - empty_streak
+        hint = "本轮无新增资产" + (f"（范围外丢弃 {dropped_oos} 个）" if dropped_oos else "")
+        hint += (
+            f"；当前语法第 {cursor} 页无新目标，连续空轮 {empty_streak}/{_EMPTY_STREAK_STOP}"
+            f"（再空 {remain} 轮将停止翻页）"
+        )
+        await report(
+            "exhausted", hint,
+            candidates=0, empty_streak=empty_streak, dropped_out_of_scope=dropped_oos,
+        )
         return 0
     cfg.pop("empty_streak", None)
+    cfg.pop("fofa_exhausted", None)
 
     # 机械预筛（并发探活，过滤 CDN/死链/纯前端）
     await report("prefilter", f"正在探活预筛 {len(candidates)} 个候选目标", candidates=len(candidates))
