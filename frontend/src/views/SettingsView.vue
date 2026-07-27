@@ -232,6 +232,10 @@ function addLlmProvider() {
 }
 
 function removeLlmProvider(idx) {
+  const provider = form.llm_providers[idx];
+  if (!provider) return;
+  const label = provider.name || provider.model || `端点 #${idx + 1}`;
+  if (!confirm(`确认删除模型端点「${label}」？`)) return;
   form.llm_providers.splice(idx, 1);
   if (!form.llm_providers.length) {
     selectedLlmProvider.value = -1;

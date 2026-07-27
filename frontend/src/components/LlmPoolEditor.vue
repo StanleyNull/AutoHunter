@@ -116,6 +116,10 @@ function addProvider() {
 }
 
 function removeProvider(idx) {
+  const provider = providers.value[idx];
+  if (!provider) return;
+  const label = provider.name || provider.model || `端点 #${idx + 1}`;
+  if (!confirm(`确认删除模型端点「${label}」？`)) return;
   replaceAll((rows) => {
     rows.splice(idx, 1);
     if (!rows.length) selected.value = -1;
