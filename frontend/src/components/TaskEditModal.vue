@@ -401,6 +401,7 @@ async function save() {
           v-else-if="modelMode === 'pool'"
           ref="poolEditor"
           v-model="taskProviders"
+          :task-id="task?.id || ''"
           :defaults="{ base_url: form.base_url, model: form.model, protocol: form.protocol }"
         />
 

@@ -6,6 +6,8 @@ import LlmModelPicker from "./LlmModelPicker.vue";
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },
   disabled: { type: Boolean, default: false },
+  /** 编辑已有任务时传入，查询模型走任务级密钥解析 */
+  taskId: { type: String, default: "" },
   /** 新建端点时的默认值 */
   defaults: {
     type: Object,
@@ -190,14 +192,19 @@ async function loadModels(idx) {
   const keepUid = provider._uid;
   const keepSelected = selected.value;
   patchAt(idx, { modelsLoading: true, modelsError: "" });
+  const payload = {
+    base_url: provider.base_url,
+    api_key: String(provider.api_key || "").trim(),
+    protocol: provider.protocol,
+    key_ref: provider.key_ref,
+    model: provider.model,
+  };
   try {
-    const res = await api.listModels({
-      base_url: provider.base_url,
-      api_key: String(provider.api_key || "").trim(),
-      protocol: provider.protocol,
-      key_ref: provider.key_ref,
-      model: provider.model,
-    });
+    // 任务编辑：走 /tasks/{id}/models，才能解析任务端点池里的 key_ref
+    // 新建任务/系统配置：走 /settings/models
+    const res = props.taskId
+      ? await api.taskModels(props.taskId, payload)
+      : await api.listModels(payload);
     if (res?.ok && res.models?.length) {
       const model = (!provider.model || !res.models.includes(provider.model))
         ? res.models[0]

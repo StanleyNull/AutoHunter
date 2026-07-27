@@ -385,14 +385,37 @@ async def probe_task_models(
     api_key = str(body.api_key or "").strip()
     if is_masked_secret(api_key):
         api_key = ""
+    key_ref = str(body.key_ref or "").strip()
     if not api_key:
-        same_identity = _llm_identity(base_url, protocol) == _llm_identity(
-            config.base_url, config.protocol
+        # 端点池：按 key_ref + 身份匹配「任意」任务级端点，不能只认 resolve_llm_config 的第一个
+        raw_cfg = dict(task.model_config_json or {})
+        task_providers = _clean_llm_providers(
+            raw_cfg.get("providers") or raw_cfg.get("providers_json") or []
         )
-        same_ref = bool(body.key_ref and body.key_ref == secret_ref(config.api_key))
-        if not (same_identity and same_ref):
-            return {"ok": False, "error": "端点或协议已变化，请重新输入 API Key", "models": []}
-        api_key = config.api_key
+        want = _llm_identity(base_url, protocol)
+        for item in task_providers:
+            candidate = str(item.get("api_key") or "").strip()
+            if not candidate:
+                continue
+            if _llm_identity(item.get("base_url"), item.get("protocol")) != want:
+                continue
+            if key_ref and secret_ref(candidate) != key_ref:
+                continue
+            api_key = candidate
+            break
+        if not api_key:
+            same_identity = want == _llm_identity(config.base_url, config.protocol)
+            same_ref = bool(key_ref and key_ref == secret_ref(config.api_key))
+            if same_identity and (not key_ref or same_ref) and config.api_key:
+                api_key = config.api_key
+        if not api_key:
+            # 再兜底系统配置里的同身份密钥（任务端点可能与系统池共用）
+            return await list_available_models(
+                base_url=base_url,
+                api_key="",
+                protocol=protocol,
+                key_ref=key_ref or None,
+            )
     return await list_available_models(
         base_url=base_url,
         api_key=api_key,
