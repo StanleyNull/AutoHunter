@@ -113,8 +113,14 @@ function toast(m) {
   setTimeout(() => (toastMsg.value = ""), 2600);
 }
 
+let _providerUidSeq = 1;
+function nextProviderUid() {
+  return `llm-uid-${_providerUidSeq++}`;
+}
+
 function newLlmProvider() {
   return {
+    _uid: nextProviderUid(),
     name: `llm-${form.llm_providers.length + 1}`,
     base_url: form.base_url || "https://api.deepseek.com/v1",
     api_key: "",
@@ -142,8 +148,9 @@ function normalizeLlmProtocol(protocol) {
   return ["auto", "openai_chat", "anthropic_messages"].includes(protocol) ? protocol : "auto";
 }
 
-function loadLlmProviders(items = []) {
+function loadLlmProviders(items = [], { resetSelection = true } = {}) {
   form.llm_providers = items.map((provider, idx) => ({
+    _uid: provider._uid || nextProviderUid(),
     name: provider.name || `llm-${idx + 1}`,
     base_url: provider.base_url || "",
     api_key: "",
@@ -162,7 +169,32 @@ function loadLlmProviders(items = []) {
     modelsError: "",
     health: provider.health || {},
   }));
-  selectedLlmProvider.value = form.llm_providers.length ? 0 : -1;
+  if (resetSelection) {
+    selectedLlmProvider.value = form.llm_providers.length ? 0 : -1;
+  } else if (!form.llm_providers.length) {
+    selectedLlmProvider.value = -1;
+  } else {
+    selectedLlmProvider.value = Math.min(
+      Math.max(selectedLlmProvider.value, 0),
+      form.llm_providers.length - 1,
+    );
+  }
+}
+
+/** 保存成功后就地合并服务端回写，禁止整表替换（否则选中端点会跳回第 1 个，正在编辑的内容也丢）。 */
+function mergeProvidersAfterSave(saved = [], clearedKeyIndexes = []) {
+  const cleared = new Set(clearedKeyIndexes);
+  for (let i = 0; i < form.llm_providers.length; i++) {
+    const local = form.llm_providers[i];
+    const remote = saved[i];
+    if (!remote) continue;
+    if (cleared.has(i)) local.api_key = "";
+    local.api_key_set = !!remote.api_key_set;
+    local.api_key_masked = remote.api_key_masked || local.api_key_masked || "";
+    local.key_ref = remote.key_ref || local.key_ref || "";
+    local.health_ref = remote.health_ref || local.health_ref || "";
+    if (remote.health) local.health = remote.health;
+  }
 }
 
 function providerHealthClass(provider) {
@@ -469,9 +501,12 @@ function scheduleAutoSave() {
   autoSaveStatus.value = "pending";
   autoSaveError.value = "";
   clearTimeout(autoSaveTimer);
+  // 端点详情输入中拉长防抖，避免打字过程中频繁落库抢焦点/冲选中态
+  const typingPool = typeof document !== "undefined"
+    && !!document.activeElement?.closest?.(".provider-detail, .provider-fields, .llm-pool-pane .model-picker");
   autoSaveTimer = setTimeout(() => {
     save({ silent: true }).catch(() => {});
-  }, 1200);
+  }, typingPool ? 2500 : 1200);
 }
 
 async function save({ silent = false } = {}) {
@@ -489,6 +524,7 @@ async function save({ silent = false } = {}) {
   saving.value = true;
   autoSaveStatus.value = "saving";
   autoSaveError.value = "";
+  const clearedKeyIndexes = [];
   try {
     const body = {
       llm: {
@@ -515,10 +551,13 @@ async function save({ silent = false } = {}) {
     if (secretReady(form.fofa_key)) body.fofa.key = form.fofa_key.trim();
     // 端点池密钥：半成品不提交，靠 key_ref 让后端保留原值
     if (llmMode.value === "pool") {
-      body.llm.providers = body.llm.providers.map((provider) => ({
-        ...provider,
-        api_key: secretReady(provider.api_key) ? provider.api_key : "",
-      }));
+      body.llm.providers = body.llm.providers.map((provider, idx) => {
+        if (secretReady(provider.api_key)) {
+          clearedKeyIndexes.push(idx);
+          return provider;
+        }
+        return { ...provider, api_key: "" };
+      });
     }
 
     suppressAutoSave = true;
@@ -530,8 +569,11 @@ async function save({ silent = false } = {}) {
     form.key_ref = s.llm?.key_ref || "";
     llmMode.value = s.llm?.mode === "pool" ? "pool" : "single";
     form.protocol = normalizeLlmProtocol(s.llm?.protocol);
-    loadLlmProviders(s.llm?.providers || []);
     form.fofa_key_set = s.fofa?.key_set;
+    // 关键：禁止 loadLlmProviders 整表替换，否则选中端点会跳回第 1 个，正在编辑的内容被冲掉
+    if (llmMode.value === "pool") {
+      mergeProvidersAfterSave(s.llm?.providers || [], clearedKeyIndexes);
+    }
     autoSaveStatus.value = "saved";
     if (!silent) toast("系统配置已保存");
   } catch (e) {
@@ -719,7 +761,7 @@ onUnmounted(() => {
             <div v-else class="provider-selector" role="listbox" aria-label="LLM 端点列表">
               <button
                 v-for="(provider, idx) in form.llm_providers"
-                :key="`${idx}:${provider.name}:${provider.base_url}:${provider.protocol}:${provider.key_ref || 'new'}`"
+                :key="provider._uid || idx"
                 type="button"
                 role="option"
                 :aria-selected="selectedLlmProvider === idx"

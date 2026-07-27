@@ -21,6 +21,10 @@ const emit = defineEmits(["update:modelValue"]);
 
 const selected = ref(0);
 const toastMsg = ref("");
+let _uidSeq = 1;
+function nextUid() {
+  return `pool-uid-${_uidSeq++}`;
+}
 
 function toast(m) {
   toastMsg.value = m;
@@ -31,8 +35,14 @@ function normalizeProtocol(protocol) {
   return ["auto", "openai_chat", "anthropic_messages"].includes(protocol) ? protocol : "auto";
 }
 
+function ensureUid(row) {
+  if (row && !row._uid) row._uid = nextUid();
+  return row;
+}
+
 function normalizeRow(provider = {}, idx = 0) {
   return {
+    _uid: provider._uid || nextUid(),
     name: provider.name || `llm-${idx + 1}`,
     base_url: provider.base_url || "",
     api_key: provider.api_key || "",
@@ -45,8 +55,8 @@ function normalizeRow(provider = {}, idx = 0) {
     weight: provider.weight ?? 1,
     enabled: provider.enabled !== false,
     models: Array.isArray(provider.models) ? provider.models : [],
-    modelsLoading: false,
-    modelsError: "",
+    modelsLoading: !!provider.modelsLoading,
+    modelsError: provider.modelsError || "",
   };
 }
 
@@ -64,16 +74,34 @@ watch(
   { immediate: true },
 );
 
+// 给外来数据补稳定 uid，避免 key 抖动
+watch(
+  () => props.modelValue,
+  (rows) => {
+    if (!Array.isArray(rows)) return;
+    let changed = false;
+    for (const row of rows) {
+      if (row && !row._uid) {
+        row._uid = nextUid();
+        changed = true;
+      }
+    }
+    if (changed) emit("update:modelValue", rows.slice());
+  },
+  { immediate: true, deep: false },
+);
+
 const current = computed(() => providers.value[selected.value] || null);
 
-function sync(mutator) {
+/** 结构变更（增删移）时整表规范化；字段编辑走 patchCurrent，避免整表重建冲掉焦点/选中。 */
+function replaceAll(mutator) {
   const next = providers.value.map((row, idx) => normalizeRow(row, idx));
   mutator(next);
   providers.value = next;
 }
 
 function addProvider() {
-  sync((rows) => {
+  replaceAll((rows) => {
     rows.push(normalizeRow({
       name: `llm-${rows.length + 1}`,
       base_url: props.defaults.base_url || "https://api.deepseek.com/v1",
@@ -88,7 +116,7 @@ function addProvider() {
 }
 
 function removeProvider(idx) {
-  sync((rows) => {
+  replaceAll((rows) => {
     rows.splice(idx, 1);
     selected.value = rows.length ? Math.min(idx, rows.length - 1) : -1;
   });
@@ -97,7 +125,7 @@ function removeProvider(idx) {
 function moveProvider(idx, delta) {
   const next = idx + delta;
   if (next < 0 || next >= providers.value.length) return;
-  sync((rows) => {
+  replaceAll((rows) => {
     const [row] = rows.splice(idx, 1);
     rows.splice(next, 0, row);
     selected.value = next;
@@ -105,10 +133,11 @@ function moveProvider(idx, delta) {
 }
 
 function patchCurrent(patch) {
-  if (!current.value) return;
-  sync((rows) => {
-    Object.assign(rows[selected.value], patch);
-  });
+  if (!current.value || selected.value < 0) return;
+  const idx = selected.value;
+  const next = providers.value.slice();
+  next[idx] = ensureUid({ ...next[idx], ...patch });
+  providers.value = next;
 }
 
 function invalidateKey() {
@@ -124,7 +153,7 @@ function invalidateKey() {
 async function loadModels(idx) {
   const provider = providers.value[idx];
   if (!provider) return;
-  sync((rows) => { rows[idx].modelsLoading = true; rows[idx].modelsError = ""; });
+  patchAt(idx, { modelsLoading: true, modelsError: "" });
   try {
     const res = await api.listModels({
       base_url: provider.base_url,
@@ -134,30 +163,34 @@ async function loadModels(idx) {
       model: provider.model,
     });
     if (res?.ok && res.models?.length) {
-      sync((rows) => {
-        rows[idx].models = res.models;
-        rows[idx].modelsLoading = false;
-        if (!rows[idx].model || !res.models.includes(rows[idx].model)) {
-          rows[idx].model = res.models[0];
-        }
-      });
+      const model = (!provider.model || !res.models.includes(provider.model))
+        ? res.models[0]
+        : provider.model;
+      patchAt(idx, { models: res.models, modelsLoading: false, model });
       toast(`已获取 ${res.models.length} 个模型`);
     } else {
-      sync((rows) => {
-        rows[idx].models = [];
-        rows[idx].modelsError = res?.error || "未获取到模型列表";
-        rows[idx].modelsLoading = false;
+      patchAt(idx, {
+        models: [],
+        modelsError: res?.error || "未获取到模型列表",
+        modelsLoading: false,
       });
       toast(`端点 #${idx + 1} 获取模型失败`);
     }
   } catch (e) {
-    sync((rows) => {
-      rows[idx].models = [];
-      rows[idx].modelsError = String(e.message || e).replace(/^\d+\s*/, "");
-      rows[idx].modelsLoading = false;
+    patchAt(idx, {
+      models: [],
+      modelsError: String(e.message || e).replace(/^\d+\s*/, ""),
+      modelsLoading: false,
     });
     toast(`端点 #${idx + 1} 获取模型失败`);
   }
+}
+
+function patchAt(idx, patch) {
+  if (idx < 0 || idx >= providers.value.length) return;
+  const next = providers.value.slice();
+  next[idx] = ensureUid({ ...next[idx], ...patch });
+  providers.value = next;
 }
 
 /** 导出给父组件提交用的干净 payload */
@@ -196,7 +229,7 @@ defineExpose({ exportProviders, addProvider });
     <div v-else class="provider-selector" role="listbox" aria-label="LLM 端点列表">
       <button
         v-for="(provider, idx) in providers"
-        :key="`${idx}:${provider.name}:${provider.base_url}`"
+        :key="provider._uid || idx"
         type="button"
         role="option"
         :aria-selected="selected === idx"
