@@ -378,6 +378,8 @@ async function loadSingleModels() {
 async function loadProviderModels(idx) {
   const provider = form.llm_providers[idx];
   if (!provider) return;
+  // 锁定当前选中端点：查询/自动保存回写都不得把焦点端点打回第 1 个
+  const keepSelected = selectedLlmProvider.value;
   suppressAutoSave = true;
   provider.modelsLoading = true;
   provider.modelsError = "";
@@ -404,7 +406,15 @@ async function loadProviderModels(idx) {
     toast(`端点 #${idx + 1} 获取模型失败`);
   } finally {
     provider.modelsLoading = false;
+    selectedLlmProvider.value = Math.min(
+      keepSelected,
+      Math.max(form.llm_providers.length - 1, 0),
+    );
     await nextTick();
+    selectedLlmProvider.value = Math.min(
+      keepSelected,
+      Math.max(form.llm_providers.length - 1, 0),
+    );
     suppressAutoSave = false;
     scheduleAutoSave(); // 可能自动选中了模型
   }
@@ -561,6 +571,7 @@ async function save({ silent = false } = {}) {
     }
 
     suppressAutoSave = true;
+    const keepSelected = selectedLlmProvider.value;
     const s = await api.updateSettings(body);
     meta.value = { updated_at: s.updated_at };
     form.api_key = "";
@@ -573,6 +584,12 @@ async function save({ silent = false } = {}) {
     // 关键：禁止 loadLlmProviders 整表替换，否则选中端点会跳回第 1 个，正在编辑的内容被冲掉
     if (llmMode.value === "pool") {
       mergeProvidersAfterSave(s.llm?.providers || [], clearedKeyIndexes);
+      if (form.llm_providers.length) {
+        selectedLlmProvider.value = Math.min(
+          Math.max(keepSelected, 0),
+          form.llm_providers.length - 1,
+        );
+      }
     }
     autoSaveStatus.value = "saved";
     if (!silent) toast("系统配置已保存");

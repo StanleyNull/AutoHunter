@@ -153,6 +153,7 @@ function invalidateKey() {
 async function loadModels(idx) {
   const provider = providers.value[idx];
   if (!provider) return;
+  const keepSelected = selected.value;
   patchAt(idx, { modelsLoading: true, modelsError: "" });
   try {
     const res = await api.listModels({
@@ -183,6 +184,8 @@ async function loadModels(idx) {
       modelsLoading: false,
     });
     toast(`端点 #${idx + 1} 获取模型失败`);
+  } finally {
+    selected.value = Math.min(keepSelected, Math.max(providers.value.length - 1, 0));
   }
 }
 
