@@ -18,6 +18,7 @@ const autoSaveStatus = ref("idle");
 const autoSaveError = ref("");
 let autoSaveTimer = null;
 let suppressAutoSave = false; // load / 保存回写期间屏蔽 watch
+let dirtyDuringSave = false; // 保存飞行中又有改动 → finally 后补一次调度
 let healthPoll = null;
 let restartPoll = null;   // pollHealth 的重启轮询计时器（组件卸载时清理，防泄漏）
 
@@ -232,8 +233,13 @@ function addLlmProvider() {
 
 function removeLlmProvider(idx) {
   form.llm_providers.splice(idx, 1);
-  if (!form.llm_providers.length) selectedLlmProvider.value = -1;
-  else selectedLlmProvider.value = Math.min(idx, form.llm_providers.length - 1);
+  if (!form.llm_providers.length) {
+    selectedLlmProvider.value = -1;
+  } else if (selectedLlmProvider.value > idx) {
+    selectedLlmProvider.value -= 1;
+  } else if (selectedLlmProvider.value === idx) {
+    selectedLlmProvider.value = Math.min(idx, form.llm_providers.length - 1);
+  }
   llmTest.value = null;
 }
 
@@ -378,7 +384,8 @@ async function loadSingleModels() {
 async function loadProviderModels(idx) {
   const provider = form.llm_providers[idx];
   if (!provider) return;
-  // 锁定当前选中端点：查询/自动保存回写都不得把焦点端点打回第 1 个
+  // 用 _uid 锚定：请求期间用户若主动换端点，结束时不抢回选中态
+  const keepUid = provider._uid;
   const keepSelected = selectedLlmProvider.value;
   suppressAutoSave = true;
   provider.modelsLoading = true;
@@ -406,15 +413,12 @@ async function loadProviderModels(idx) {
     toast(`端点 #${idx + 1} 获取模型失败`);
   } finally {
     provider.modelsLoading = false;
-    selectedLlmProvider.value = Math.min(
-      keepSelected,
-      Math.max(form.llm_providers.length - 1, 0),
-    );
-    await nextTick();
-    selectedLlmProvider.value = Math.min(
-      keepSelected,
-      Math.max(form.llm_providers.length - 1, 0),
-    );
+    const nowUid = form.llm_providers[selectedLlmProvider.value]?._uid;
+    // 仅当选中仍是发起查询的端点、或被副作用冲掉时，才按 uid 纠正索引
+    if (nowUid === keepUid || selectedLlmProvider.value === keepSelected) {
+      const found = form.llm_providers.findIndex((p) => p._uid === keepUid);
+      if (found >= 0) selectedLlmProvider.value = found;
+    }
     suppressAutoSave = false;
     scheduleAutoSave(); // 可能自动选中了模型
   }
@@ -468,6 +472,9 @@ async function testLlmProvider(idx) {
 }
 
 async function load() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  dirtyDuringSave = false;
   loading.value = true;
   suppressAutoSave = true;
   try {
@@ -507,7 +514,14 @@ function secretReady(value) {
 }
 
 function scheduleAutoSave() {
-  if (suppressAutoSave || loading.value || saving.value) return;
+  if (loading.value) return;
+  if (saving.value) {
+    // 飞行中改动（含 suppressAutoSave=true 的回写窗口）：标记脏，finally 再调度
+    dirtyDuringSave = true;
+    autoSaveStatus.value = "pending";
+    return;
+  }
+  if (suppressAutoSave) return;
   autoSaveStatus.value = "pending";
   autoSaveError.value = "";
   clearTimeout(autoSaveTimer);
@@ -520,7 +534,7 @@ function scheduleAutoSave() {
 }
 
 async function save({ silent = false } = {}) {
-  if (saving.value) return;
+  if (saving.value || loading.value) return;
   // 配置不完整时：静默跳过自动保存，手动保存仍提示
   try {
     validateLlmProviders();
@@ -532,6 +546,7 @@ async function save({ silent = false } = {}) {
   }
 
   saving.value = true;
+  dirtyDuringSave = false;
   autoSaveStatus.value = "saving";
   autoSaveError.value = "";
   const clearedKeyIndexes = [];
@@ -571,7 +586,6 @@ async function save({ silent = false } = {}) {
     }
 
     suppressAutoSave = true;
-    const keepSelected = selectedLlmProvider.value;
     const s = await api.updateSettings(body);
     meta.value = { updated_at: s.updated_at };
     form.api_key = "";
@@ -581,17 +595,14 @@ async function save({ silent = false } = {}) {
     llmMode.value = s.llm?.mode === "pool" ? "pool" : "single";
     form.protocol = normalizeLlmProtocol(s.llm?.protocol);
     form.fofa_key_set = s.fofa?.key_set;
-    // 关键：禁止 loadLlmProviders 整表替换，否则选中端点会跳回第 1 个，正在编辑的内容被冲掉
+    // 关键：禁止 loadLlmProviders 整表替换；就地合并，不强制改写选中索引（用户飞行中换端点不被抢回）
     if (llmMode.value === "pool") {
       mergeProvidersAfterSave(s.llm?.providers || [], clearedKeyIndexes);
-      if (form.llm_providers.length) {
-        selectedLlmProvider.value = Math.min(
-          Math.max(keepSelected, 0),
-          form.llm_providers.length - 1,
-        );
+      if (form.llm_providers.length && selectedLlmProvider.value >= form.llm_providers.length) {
+        selectedLlmProvider.value = form.llm_providers.length - 1;
       }
     }
-    autoSaveStatus.value = "saved";
+    autoSaveStatus.value = dirtyDuringSave ? "pending" : "saved";
     if (!silent) toast("系统配置已保存");
   } catch (e) {
     const msg = String(e.message || e).replace(/^\d+\s*/, "");
@@ -602,6 +613,10 @@ async function save({ silent = false } = {}) {
     saving.value = false;
     await nextTick();
     suppressAutoSave = false;
+    if (dirtyDuringSave) {
+      dirtyDuringSave = false;
+      scheduleAutoSave();
+    }
   }
 }
 

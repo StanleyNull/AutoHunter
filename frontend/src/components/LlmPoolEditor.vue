@@ -118,7 +118,9 @@ function addProvider() {
 function removeProvider(idx) {
   replaceAll((rows) => {
     rows.splice(idx, 1);
-    selected.value = rows.length ? Math.min(idx, rows.length - 1) : -1;
+    if (!rows.length) selected.value = -1;
+    else if (selected.value > idx) selected.value -= 1;
+    else if (selected.value === idx) selected.value = Math.min(idx, rows.length - 1);
   });
 }
 
@@ -181,6 +183,7 @@ function patchAt(idx, patch) {
 async function loadModels(idx) {
   const provider = providers.value[idx];
   if (!provider) return;
+  const keepUid = provider._uid;
   const keepSelected = selected.value;
   patchAt(idx, { modelsLoading: true, modelsError: "" });
   try {
@@ -213,7 +216,11 @@ async function loadModels(idx) {
     });
     toast(`端点 #${idx + 1} 获取模型失败`);
   } finally {
-    selected.value = Math.min(keepSelected, Math.max(providers.value.length - 1, 0));
+    const nowUid = providers.value[selected.value]?._uid;
+    if (nowUid === keepUid || selected.value === keepSelected) {
+      const found = providers.value.findIndex((p) => p._uid === keepUid);
+      if (found >= 0) selected.value = found;
+    }
   }
 }
 
