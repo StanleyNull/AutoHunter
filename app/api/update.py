@@ -67,17 +67,36 @@ def _needs_rebuild(changed: list[str]) -> bool:
 @router.get("/check")
 def check_update():
     """检测是否有新版本。对比当前 HEAD vs origin/main。"""
+    releases_url = "https://github.com/StanleyNull/AutoHunter"
     if not _is_git_deploy():
-        return {"update_available": False, "error": "非 git 部署，无法自动更新。请手动下载新版本。"}
+        # Docker 镜像默认不带 .git（.dockerignore 排除），不能一键热更；
+        # 仍返回结构化说明，前端保留「检查更新」入口，避免整块消失。
+        return {
+            "update_available": False,
+            "error": "当前是镜像/非 git 部署，容器内无法一键热更新。",
+            "hint": "请到 GitHub 拉取最新代码后，在服务器执行 docker compose up -d --build 重建。若希望支持一键更新，请用 git clone 部署并保留 .git。",
+            "releases_url": releases_url,
+            "manual_only": True,
+        }
 
     rc, _, err = _git("fetch", "origin", "main", timeout=60)
     if rc != 0:
-        return {"update_available": False, "error": f"git fetch 失败: {err or '网络不通'}"}
+        return {
+            "update_available": False,
+            "error": f"git fetch 失败: {err or '网络不通'}",
+            "hint": "检查容器出网或 GitHub 访问；也可手动到仓库查看最新提交后重建。",
+            "releases_url": releases_url,
+        }
 
     _, current, _ = _git("rev-parse", "HEAD")
     _, latest, _ = _git("rev-parse", "origin/main")
     if not current or not latest:
-        return {"update_available": False, "error": "无法读取 git 版本信息"}
+        return {
+            "update_available": False,
+            "error": "无法读取 git 版本信息",
+            "hint": "请确认仓库完整，或手动到 GitHub 对照版本。",
+            "releases_url": releases_url,
+        }
 
     if current == latest:
         return {"update_available": False, "current_commit": current[:8]}
@@ -98,6 +117,7 @@ def check_update():
         "changed_files": changed[:30],
         "hot_updateable": not needs_rebuild,
         "needs_rebuild": needs_rebuild,
+        "releases_url": releases_url,
     }
 
 

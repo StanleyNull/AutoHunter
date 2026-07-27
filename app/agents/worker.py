@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
@@ -39,6 +41,13 @@ _JS_INTENT_RE = re.compile(
 _WORKER_STATIC_PREFIX = (
     "下一条是目标/情报。只打当前目标；确认无攻击面才快速 finish。工具按信号开放，JS 线索再用 analyze_javascript。"
 )
+
+# LLM 调用失败时，worker 内软重试次数（清粘性后换端点/同端点再试），耗尽才整轮收尾回队。
+_WORKER_LLM_SOFT_RETRIES = int(os.environ.get("WORKER_LLM_SOFT_RETRIES", "3"))
+_WORKER_LLM_SOFT_RETRY_KINDS = {
+    "rate_limit", "timeout", "network", "upstream", "provider_cooldown",
+    "blocked", "unknown", "quota",
+}
 
 
 class Worker:
@@ -217,6 +226,9 @@ class Worker:
                        kinds=[], reason=f"凭据启动异常: {type(e).__name__}: {e}"[:300],
                        message=f"凭据启动异常: {e}")
 
+        # 上一轮 LLM 中断留下的进度：笔记 + 会话态先恢复，再开挖
+        self._restore_interrupt_progress()
+
         if self.deepen_context:
             user_content = self._intel_block() + self._duplicate_block() + self._deepen_brief()
             self._emit("worker_start", target=self.target, mode="deepen", prompt_version=self.prompt_version)
@@ -240,6 +252,7 @@ class Worker:
         consecutive_blocked = 0
         consecutive_arg_errors = 0
         consecutive_network_failures = 0
+        consecutive_llm_failures = 0
         # 按 src_type 取预算：企业模式给更大深挖空间（110/60），edu 走量沿用 90/45。
         max_rounds, soft_rounds = self._route_rounds(*worker_config.rounds_for(self.src_type))
         while rounds < max_rounds:
@@ -260,17 +273,41 @@ class Worker:
                 # 持有哪些登录态、记录了哪些关键进度，不会跨轮"失忆"重复扫。
                 send_messages.append({"role": "user", "content": self.executor.session_status_block()})
                 msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
+                consecutive_llm_failures = 0
             except Exception as e:
                 self._emit("llm_error", error=str(e))
                 failure_kind = e.kind if isinstance(e, LLMError) else ""
                 retry_after = e.retry_after if isinstance(e, LLMError) else 0
+                if self._should_soft_retry_llm(e) and consecutive_llm_failures < _WORKER_LLM_SOFT_RETRIES:
+                    consecutive_llm_failures += 1
+                    clearer = getattr(self.llm, "clear_sticky_provider", None)
+                    if callable(clearer):
+                        clearer()
+                    wait_s = min(2 ** (consecutive_llm_failures - 1), 8)
+                    if retry_after:
+                        wait_s = max(wait_s, min(int(retry_after), 30))
+                    self._emit(
+                        "llm_soft_retry",
+                        round=rounds,
+                        attempt=consecutive_llm_failures,
+                        max_attempts=_WORKER_LLM_SOFT_RETRIES,
+                        kind=failure_kind or "unknown",
+                        wait_seconds=wait_s,
+                        error=str(e)[:240],
+                    )
+                    # 不消耗轮次预算：基础设施抖动不应吃掉挖掘配额
+                    rounds = max(0, rounds - 1)
+                    if self.cancel_event.wait(wait_s):
+                        return self._cancelled_result(rounds)
+                    continue
                 err_text = str(e)
                 if not err_text.startswith("LLM"):
                     err_text = f"LLM 调用失败：{err_text}"
-                return WorkerResult(
-                    target=self.target, verdict=Verdict.error,
-                    findings=self.findings, rounds=rounds, error=err_text,
-                    failure_kind=failure_kind, retry_after_seconds=retry_after,
+                return self._llm_interrupt_result(
+                    rounds=rounds,
+                    error=err_text,
+                    failure_kind=failure_kind,
+                    retry_after=retry_after,
                 )
             if self.cancel_event.is_set():
                 return self._cancelled_result(rounds)
@@ -493,6 +530,99 @@ class Worker:
             summary="任务已被 pause/stop 控制面取消，结果由 orchestrator 丢弃。",
             rounds=rounds,
             error="worker cancelled by task control",
+            resume_context=self._build_resume_context(rounds),
+        )
+
+    @staticmethod
+    def _should_soft_retry_llm(exc: BaseException) -> bool:
+        """限流/超时/网络/冷却/策略拦截等：同轮内再试（池模式会换端点）。"""
+        if isinstance(exc, LLMError):
+            return exc.kind in _WORKER_LLM_SOFT_RETRY_KINDS or not exc.kind
+        # 非 LLMError 的瞬时异常也给一次机会
+        text = str(exc).lower()
+        return any(k in text for k in ("timeout", "timed out", "connection", "network", "429", "rate"))
+
+    def _build_resume_context(self, rounds: int) -> dict:
+        snap = self.executor.export_resume_state()
+        notes = (snap.get("worker_notes") or "").strip()
+        cookies = snap.get("session_cookies") or {}
+        headers = snap.get("session_headers") or {}
+        has_progress = bool(notes or cookies or headers or self.findings or rounds >= 2)
+        if not has_progress:
+            return {}
+        directive_bits = [
+            "上一轮因 LLM 调用中断，请从已有进度继续，不要从头泛扫。",
+        ]
+        if notes:
+            directive_bits.append(f"工作笔记：\n{notes[:1500]}")
+        if cookies or headers:
+            directive_bits.append(
+                f"已恢复会话态（cookie {sorted(cookies.keys())}，鉴权头 {sorted(headers.keys())}），"
+                "优先用现有登录态继续深挖。"
+            )
+        if self.findings:
+            directive_bits.append(
+                f"本轮已提交 {len(self.findings)} 个漏洞，继续挖其它入口或 finish。"
+            )
+        return {
+            "directive": "\n".join(directive_bits)[:2000],
+            "worker_notes": notes[:4000],
+            "session_cookies": cookies,
+            "session_headers": headers,
+            "rounds_done": rounds,
+            "source": "llm_interrupt",
+            "original_summary": notes[:1000],
+        }
+
+    def _restore_interrupt_progress(self) -> None:
+        ctx = self.deepen_context or {}
+        if ctx.get("source") != "llm_interrupt" and not (
+            ctx.get("worker_notes") or ctx.get("session_cookies") or ctx.get("session_headers")
+        ):
+            return
+        notes = str(ctx.get("worker_notes") or "")
+        cookies = ctx.get("session_cookies") if isinstance(ctx.get("session_cookies"), dict) else {}
+        headers = ctx.get("session_headers") if isinstance(ctx.get("session_headers"), dict) else {}
+        self.executor.restore_resume_state(
+            worker_notes=notes,
+            session_cookies=cookies,
+            session_headers=headers,
+        )
+        self._emit(
+            "worker_resume",
+            notes_len=len(notes),
+            cookies=sorted(cookies.keys())[:20],
+            headers=sorted(headers.keys())[:20],
+            rounds_done=int(ctx.get("rounds_done") or 0),
+        )
+
+    def _llm_interrupt_result(
+        self,
+        *,
+        rounds: int,
+        error: str,
+        failure_kind: str,
+        retry_after: int,
+    ) -> WorkerResult:
+        resume = self._build_resume_context(rounds)
+        self._emit(
+            "llm_interrupt",
+            round=rounds,
+            failure_kind=failure_kind or "unknown",
+            has_resume=bool(resume),
+            findings=len(self.findings),
+            error=error[:240],
+        )
+        return WorkerResult(
+            target=self.target,
+            verdict=Verdict.error,
+            findings=self.findings,
+            summary="LLM 调用失败，已保存进度供回队续挖。" if resume else "",
+            rounds=rounds,
+            error=error,
+            failure_kind=failure_kind,
+            retry_after_seconds=int(retry_after or 0),
+            resume_context=resume,
         )
 
     def _deepen_brief(self) -> str:
@@ -500,6 +630,21 @@ class Worker:
         directive = ctx.get("directive", "").strip()
         original = ctx.get("original_title", "") or ctx.get("vuln_type", "")
         summary = (ctx.get("original_summary", "") or "").strip()
+        if ctx.get("source") == "llm_interrupt":
+            parts = [
+                f"目标：{self.target}",
+                "",
+                "⚡ 这是一次【断点续挖】：上一轮 LLM 中断，会话态与工作笔记已恢复。",
+            ]
+            if summary:
+                parts.append(f"已有进度摘要：{summary[:800]}")
+            parts += [
+                "",
+                f"👉 继续任务：{directive or '从已有笔记与登录态接着打，不要重新泛扫。'}",
+                "",
+                "要求：直接接上进度验证/深挖；打穿就 submit_finding；确认无增量就 finish。",
+            ]
+            return "\n".join(parts)
         parts = [
             f"目标：{self.target}",
             "",

@@ -74,6 +74,7 @@ def _normalize_headers(headers: Any) -> dict[str, str]:
     elif isinstance(headers, (list, tuple)):
         for item in headers:
             if isinstance(item, dict):
+                # list[{"name":..,"value":..}] 或 list[{"K":"V"}]
                 if "name" in item and "value" in item:
                     lines.append(f"{item['name']}: {item['value']}")
                 else:
@@ -118,7 +119,7 @@ class ToolExecutor:
         # 会话态：worker 登录/拿到 token 后自动携带到后续 http_request，
         # 解决"明明登进去了，深挖请求却忘带凭证导致越权失败"的断链问题。
         # 每个 target 独立 executor 实例、session jar 相互隔离，不会串号。
-        # 全模式启用（登录后同样必须带登录态深入）。
+        # 全模式启用（edu 用泄露凭证/用户凭证登录后同样必须带登录态深入）。
         self._session_cookies: dict[str, str] = {}
         self._session_headers: dict[str, str] = {}
         # 工作笔记：worker 用 update_notes 工具维护，每轮注入回 messages，
@@ -472,6 +473,7 @@ class ToolExecutor:
                     pass
             for name, value in resp.cookies.items():
                 self._put_cookie(name, value, updated)
+            # 兜底：client jar 里可能还有 history/resp.cookies 没暴露出来的（不同域）。
             try:
                 for ck in client.cookies.jar:
                     if ck.name and ck.value:
@@ -528,18 +530,43 @@ class ToolExecutor:
         进度（端点/凭据/已试方向/下一步计划），不会重复扫同一条路。
         """
         lines = ["# 当前状态（跨轮持久，每轮自动注入）"]
+        # 会话态
         cookies = sorted(self._session_cookies.keys()) if self._session_cookies else []
         headers = sorted(self._session_headers.keys()) if self._session_headers else []
         if cookies or headers:
             lines.append(f"- 会话态：持有 cookie {cookies}，鉴权头 {headers}（http_request 自动携带）")
         else:
             lines.append("- 会话态：暂无登录态（拿到凭证后用 session_set 登记）")
+        # 工作笔记
         if self._worker_notes:
             lines.append("- 工作笔记：")
             lines.append(self._worker_notes)
         else:
             lines.append("- 工作笔记：（暂无。发现端点/凭据/token/突破口后用 update_notes 记录，否则跨轮会忘）")
         return "\n".join(lines) + "\n\n"
+
+    def export_resume_state(self) -> dict[str, Any]:
+        """导出可跨 worker 续挖的进度快照（笔记 + 会话态）。"""
+        return {
+            "worker_notes": self._worker_notes or "",
+            "session_cookies": dict(self._session_cookies or {}),
+            "session_headers": dict(self._session_headers or {}),
+        }
+
+    def restore_resume_state(
+        self,
+        *,
+        worker_notes: str = "",
+        session_cookies: dict | None = None,
+        session_headers: dict | None = None,
+    ) -> None:
+        """从上一轮 LLM 中断快照恢复笔记与会话态。"""
+        if worker_notes:
+            self._worker_notes = str(worker_notes).strip()[:4000]
+        cookies = session_cookies if isinstance(session_cookies, dict) else {}
+        headers = session_headers if isinstance(session_headers, dict) else {}
+        if cookies or headers:
+            self.session_set(cookies=cookies or None, headers=headers or None)
 
     # ---- decode_transform ----
     def decode_transform(self, value: str = "", mode: str = "auto") -> dict[str, Any]:

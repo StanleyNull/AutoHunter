@@ -255,7 +255,7 @@ const IMPORTANT_KINDS = new Set([
   "reproduce_start", "reproduce_done",
   "killsweep_start", "killsweep_done", "killsweep_error", "killsweep_dedup",
   "killsweep_invalid", "killsweep_cancelled",
-  "llm_error", "llm_provider_failed", "quota_stop", "reclaim", "recover", "workers_cancelled",
+  "llm_error", "llm_soft_retry", "llm_interrupt", "worker_resume", "llm_provider_failed", "quota_stop", "reclaim", "recover", "workers_cancelled",
   "tool_exception",
   "auth_status",
 ]);
@@ -313,6 +313,9 @@ function fmtEvent(ev) {
     case "killsweep_dedup": return `通杀分析去重：${d.product || ""}`;
     case "killsweep_invalid": return `通杀记录已标记无效：${d.product || ""}`;
     case "llm_error": return `⚠ LLM 调用失败: ${d.error || ""}`;
+    case "llm_soft_retry": return `LLM 软重试 ${d.attempt || "?"}/${d.max_attempts || "?"}（${d.kind || "retry"}，等 ${d.wait_seconds || 0}s）: ${(d.error || "").slice(0, 120)}`;
+    case "llm_interrupt": return `LLM 中断收尾${d.has_resume ? "（已保存进度）" : ""}: ${(d.error || "").slice(0, 120)}`;
+    case "worker_resume": return `断点续挖：恢复笔记 ${d.notes_len || 0} 字 / cookie ${(d.cookies || []).length} / 头 ${(d.headers || []).length}`;
     case "llm_provider_failed": return `LLM 端点失败: ${d.model || ""} @ ${d.base_url || ""} (${d.error_kind || "failed"})`;
     case "tool_exception": return `工具异常: ${d.tool || ""} ${(d.error || "").slice(0, 80)}`;
     case "auth_status": {
@@ -1173,7 +1176,7 @@ function parseEventTs(ts) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
-          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
@@ -1198,7 +1201,7 @@ function parseEventTs(ts) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }} <span v-if="f.review?.submitted" class="tag-done">已提交</span></div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
-          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
@@ -1218,6 +1221,7 @@ function parseEventTs(ts) {
           <span class="ks-main">
             <span class="ks-title">{{ k.product_name || "未知产品" }}</span>
             <span class="meta">{{ k.vuln_type }} · {{ k.origin_title || k.vuln_summary || "通杀候选" }}</span>
+            <span class="meta rr-time">发现 {{ fmtLocalTime(k.created_at) }}</span>
           </span>
           <span class="ks-summary-metrics">
             <span><b>{{ assetRows(k).length }}</b>资产</span>
@@ -1232,6 +1236,10 @@ function parseEventTs(ts) {
 
         <div v-if="isKillsweepOpen(k.id)" class="ks-detail">
           <div class="ks-compact">
+            <div>
+              <span>发现时间</span>
+              <p>{{ fmtLocalTime(k.created_at) || "未知" }}</p>
+            </div>
             <div>
               <span>FOFA 语法</span>
               <code>{{ k.fofa_query || "无 FOFA 语法" }}</code>
@@ -1290,7 +1298,7 @@ function parseEventTs(ts) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
-          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
           <div v-if="f.review?.user_notes" class="meta rr-note">驳回备注：{{ f.review.user_notes }}</div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
@@ -1316,7 +1324,7 @@ function parseEventTs(ts) {
             {{ f.title }}
           </div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
-          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
           <div v-if="f.ignore_reasons?.length" class="meta rr-note">AI 理由：{{ f.ignore_reasons.join("；") }}</div>
         </div>
         <div class="rr-side" @click.stop>

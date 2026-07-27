@@ -130,6 +130,8 @@ def _finding_dict(f: Finding, r: Review | None, *, compact: bool = False) -> dic
         "owner": f.owner,
         "status": f.status,
         "created_at": to_cst_iso(f.created_at),
+        "llm_model": getattr(f, "llm_model", "") or "",
+        "llm_base_url": getattr(f, "llm_base_url", "") or "",
         "review": None if not r else {
             "verdict": r.verdict,
             "confidence": r.confidence,
@@ -440,6 +442,7 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
             "notes": k.notes,
             "status": k.status,
             "created_at": to_cst_iso(k.created_at),
+            "updated_at": to_cst_iso(k.updated_at),
         }
         if _matches_query(item, search):
             out.append(item)
@@ -696,6 +699,15 @@ def _build_assistant_messages(f: Finding, r: Review | None, req: ReportAssistant
     return messages
 
 
+def _assistant_unavailable_message(exc: BaseException) -> str:
+    """把 LLM/端点池失败收敛成前端可读短文案（流式与非流式共用）。"""
+    if isinstance(exc, LLMError):
+        return f"报告助手暂不可用：{exc}"
+    if isinstance(exc, RuntimeError):
+        return f"报告助手暂不可用：{exc}"
+    return "报告助手暂不可用：内部执行异常，已保护底层错误细节。"
+
+
 def _run_report_assistant(
     f: Finding,
     r: Review | None,
@@ -704,11 +716,13 @@ def _run_report_assistant(
     cancel_event: threading.Event,
     emit=None,
 ) -> dict:
-    """运行报告助手；emit(event:dict) 可选回调，每完成一步就推一条事件用于流式展示。"""
-    llm = _llm_for_task(task)
-    executor = ToolExecutor(f"report_assistant_{f.target_url or f.id}", cancel_event=cancel_event)
-    messages = _build_assistant_messages(f, r, req)
+    """运行报告助手；emit(event:dict) 可选回调，每完成一步就推一条事件用于流式展示。
+
+    使用与 Worker 相同的 llm_client_for_task：任务/全局端点池、failover、冷却均生效。
+    LLMError（含池内全部端点失败）在此收敛为 answer，避免 SSE 路径把异常吞成「已完成」。
+    """
     tool_logs: list[dict] = []
+    executor: ToolExecutor | None = None
 
     def _emit(ev: dict) -> None:
         if emit:
@@ -718,9 +732,17 @@ def _run_report_assistant(
                 pass
 
     try:
+        llm = _llm_for_task(task)
+        executor = ToolExecutor(f"report_assistant_{f.target_url or f.id}", cancel_event=cancel_event)
+        messages = _build_assistant_messages(f, r, req)
         return _run_report_assistant_loop(llm, executor, messages, tool_logs, cancel_event, _emit)
+    except (LLMError, RuntimeError) as e:
+        msg = _assistant_unavailable_message(e)
+        _emit({"type": "final", "text": msg})
+        return {"answer": msg, "tool_logs": tool_logs}
     finally:
-        executor.kill_processes()
+        if executor is not None:
+            executor.kill_processes()
 
 
 def _run_report_assistant_loop(
@@ -907,10 +929,10 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
         cancel_event.set()
         future.add_done_callback(_consume_future_exception)
         assistant_content = f"报告助手执行超时（>{int(_ASSISTANT_WALL_TIMEOUT)}s），已触发底层工具清理。"
-    except LLMError as e:
-        assistant_content = f"报告助手暂不可用：{e}"
-    except Exception:
-        assistant_content = "报告助手暂不可用：内部执行异常，已保护底层错误细节。"
+    except (LLMError, RuntimeError) as e:
+        assistant_content = _assistant_unavailable_message(e)
+    except Exception as e:
+        assistant_content = _assistant_unavailable_message(e)
     f.assistant_messages = _sanitize_assistant_messages(
         persisted + [{"role": "user", "content": msg}, {"role": "assistant", "content": assistant_content}],
     )
@@ -998,8 +1020,15 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
                 result = await asyncio.wait_for(asyncio.shield(future), timeout=5)
                 final_answer = result.get("answer") or final_answer
                 tool_count = len(result.get("tool_logs") or []) or tool_count
+            except (LLMError, RuntimeError) as e:
+                if not final_answer:
+                    final_answer = _assistant_unavailable_message(e)
             except Exception:
-                pass
+                # future 已失败但异常类型非预期时，仍避免把池耗尽伪装成「已完成」
+                if not final_answer and future.done() and not future.cancelled():
+                    exc = future.exception()
+                    if exc is not None:
+                        final_answer = _assistant_unavailable_message(exc)
             if timed_out and not final_answer:
                 final_answer = f"报告助手执行超时（>{int(_ASSISTANT_WALL_TIMEOUT)}s），已触发底层工具清理。"
             if not final_answer:

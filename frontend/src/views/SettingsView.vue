@@ -38,13 +38,16 @@ async function checkUpdate() {
   updateState.info = null;
   try {
     updateState.info = await api.checkUpdate();
-    if (updateState.info?.error && /非 git|无法/.test(updateState.info.error)) {
-      updateState.supported = false;
-    }
+    // 非 git / 网络失败：区块仍显示，把原因和手动更新指引给用户看
+    // 以前用 /非 git|无法/ 直接 supported=false，导致「检查更新整块消失」
   } catch (e) {
     const msg = String(e.message || e);
-    if (/404|not found/i.test(msg)) { updateState.supported = false; }
-    else { updateState.error = msg.replace(/^\d+\s*/, ""); }
+    // 仅原版未注册 update 路由（404）时隐藏；发布版始终保留入口
+    if (/^\s*404\b|not found/i.test(msg)) {
+      updateState.supported = false;
+    } else {
+      updateState.error = msg.replace(/^\d+\s*/, "");
+    }
   } finally {
     updateState.checking = false;
   }
@@ -939,11 +942,11 @@ onUnmounted(() => {
       </form>
     </div>
 
-    <!-- 一键更新（后端未注册 update 路由时自动隐藏，如原版 rsync 部署） -->
+    <!-- 一键更新（仅原版未注册 update 路由时隐藏；发布版即使非 git 也保留入口） -->
     <section v-if="updateState.supported" class="settings-block update-section">
       <legend>
         <span>版本更新</span>
-        <small>从 GitHub 拉取最新代码并自动重启</small>
+        <small>检查 GitHub 最新代码；git 部署可一键热更，镜像部署给出手动指引</small>
       </legend>
       <div v-if="updateState.restarting" class="update-restarting">
         <div class="update-spinner"></div>
@@ -954,6 +957,16 @@ onUnmounted(() => {
           {{ updateState.checking ? "检测中…" : "检查更新" }}
         </button>
         <div v-if="updateState.error" class="update-error">{{ updateState.error }}</div>
+        <div v-if="updateState.info?.error" class="update-error">
+          <p>{{ updateState.info.error }}</p>
+          <p v-if="updateState.info.hint" class="update-hint">{{ updateState.info.hint }}</p>
+          <a
+            class="update-link"
+            :href="updateState.info.releases_url || 'https://github.com/StanleyNull/AutoHunter'"
+            target="_blank"
+            rel="noopener"
+          >打开 GitHub 仓库 / Releases</a>
+        </div>
         <div v-if="updateState.info?.update_available" class="update-info">
           <div class="update-version">
             <span class="version-old">{{ updateState.info.current_commit }}</span>

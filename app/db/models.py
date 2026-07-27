@@ -147,6 +147,9 @@ class Finding(Base):
     assistant_messages: Mapped[list] = mapped_column(JSON, default=list)
     self_check: Mapped[dict] = mapped_column(JSON, default=dict)
     dedup_key: Mapped[str] = mapped_column(String(128), default="", index=True)  # 漏洞级去重
+    # 端点池归因：submit 当时实际打出该洞的模型（单端点模式也会记录）
+    llm_model: Mapped[str] = mapped_column(String(200), default="")
+    llm_base_url: Mapped[str] = mapped_column(String(300), default="")
     # pending_review / reviewed
     status: Mapped[str] = mapped_column(String(20), default="pending_review", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

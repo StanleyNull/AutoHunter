@@ -78,6 +78,8 @@ class WorkerResult(BaseModel):
     deepen_lead: str = Field("", description="突破入口但未打穿时的定向深挖线索，触发自动回火再派一轮")
     reported_intel: list[dict] = Field(default_factory=list, description="worker 主动上报的可复用情报，编排层落全局情报库")
     reported_coverage: list[dict] = Field(default_factory=list, description="单站协作覆盖记录，编排层写事件流供后续 worker 复用")
+    # LLM 中断回队时携带：工作笔记 / 会话 cookie·头 / 已挖轮次，避免重开后进度归零
+    resume_context: dict = Field(default_factory=dict, description="LLM 中断后回队续挖用的进度快照")
 
 
 class ReviewVerdict(str, Enum):

@@ -48,6 +48,8 @@ _SECRET_RE = re.compile(
 _REQUEST_TIMEOUT = float(os.environ.get("LLM_REQUEST_TIMEOUT", "120"))
 # 失败重试次数（网络抖动/限流/5xx）；默认 4 次（含网络抖动场景多给几次机会）。
 _MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "4"))
+# 端点池：同端点先轻量重试几次再切下一个（避免一次网络毛刺就换模型丢上下文）。
+_POOL_SAME_PROVIDER_RETRIES = int(os.environ.get("LLM_POOL_SAME_PROVIDER_RETRIES", "1"))
 _RR_LOCK = threading.Lock()
 # Smooth weighted round-robin current weights, keyed by pool/rank/provider.
 # The state is intentionally process-local; the production process runs one Uvicorn worker.
@@ -847,6 +849,10 @@ class LLMClient:
             )
         raise RuntimeError("没有可用的 LLM 端点")
 
+    def clear_sticky_provider(self) -> None:
+        """清掉粘性端点，下次 chat 重新按健康度/权重选端点（worker 软重试用）。"""
+        self._sticky_provider_ref = ""
+
     def _notify_provider_selected(self, provider: LLMConfig, slot_state: str) -> None:
         if not self.on_provider_selected:
             return
@@ -929,7 +935,7 @@ class LLMClient:
         active_tool_choice: Any = tool_choice
         tool_choice_fallback_used = False
         max_tokens_fallback_used = False
-        max_retries = 0 if self.pool_mode else _MAX_RETRIES
+        max_retries = _POOL_SAME_PROVIDER_RETRIES if self.pool_mode else _MAX_RETRIES
         retry_count = 0
         # TLS/协议/参数兼容降级各自最多触发一次，不占传输重试次数。
         for _attempt in range(max_retries + 5):

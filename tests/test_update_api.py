@@ -22,7 +22,10 @@ class _DummyThread:
 def test_check_non_git_deploy(monkeypatch):
     monkeypatch.setattr(upd, "_is_git_deploy", lambda: False)
     r = upd.check_update()
-    assert r["update_available"] is False and "非 git" in r["error"]
+    assert r["update_available"] is False
+    assert r.get("manual_only") is True
+    assert "releases_url" in r
+    assert "git" in r["error"].lower() or "镜像" in r["error"]
 
 
 def test_commits_behind_uses_range(monkeypatch):

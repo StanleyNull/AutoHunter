@@ -5,6 +5,7 @@ import DOMPurify from "dompurify";
 import { api, canWrite, isReadonly } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { CONF, buildEdusrcToolReport, buildReportMd, effectiveSeverity } from "../report.js";
+import { fmtLocalTime } from "../format.js";
 
 const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review | submit | rejected | archived
 const emit = defineEmits(["close", "updated", "toast"]);
@@ -50,6 +51,10 @@ watch(() => props.findingId, async (id) => {
 
 function renderSafeMd(text) {
   return DOMPurify.sanitize(marked.parse(text || ""));
+}
+
+function fmtFindingTime(value) {
+  return fmtLocalTime(value) || "-";
 }
 
 const html = computed(() => f.value ? renderSafeMd(buildReportMd(f.value)) : "");
@@ -277,6 +282,8 @@ async function askAssistant(preset = "") {
         <section class="report-facts">
           <div><span>漏洞类型</span><b>{{ f.vuln_type }}</b></div>
           <div><span>归属单位</span><b>{{ f.edu_school || f.owner || "待确认" }}</b></div>
+          <div><span>发现时间</span><b>{{ fmtFindingTime(f.created_at) }}</b></div>
+          <div v-if="f.llm_model"><span>产出模型</span><b :title="f.llm_base_url || ''">{{ f.llm_model }}</b></div>
           <div><span>信度</span><b>{{ confidenceText }}</b></div>
           <div><span>复现步骤</span><b>{{ stepCount }}</b></div>
           <div><span>攻击链路</span><b>{{ chainCount }}</b></div>

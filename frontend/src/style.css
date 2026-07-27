@@ -1394,6 +1394,64 @@ main {
 .settings-actions-hint {
   flex: 1 1 180px;
 }
+.update-section .update-body {
+  display: grid;
+  gap: 12px;
+}
+.update-section .btn-check {
+  width: fit-content;
+  min-width: 120px;
+  height: 36px;
+}
+.update-section .update-error {
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.5;
+  display: grid;
+  gap: 6px;
+}
+.update-section .update-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+.update-section .update-link {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  width: fit-content;
+}
+.update-section .update-uptodate { color: var(--ok); font-size: 13px; }
+.update-section .update-version {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+}
+.update-section .version-arrow { color: var(--muted); }
+.update-section .update-badge {
+  background: color-mix(in oklch, var(--accent) 16%, transparent);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+.update-section .update-restarting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+}
+.update-section .update-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 .settings-toast {
   position: fixed;
   left: 50%;

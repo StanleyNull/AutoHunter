@@ -411,6 +411,21 @@ class TaskRunner:
             "base_url": getattr(config, "base_url", "") or "",
         }
 
+    @staticmethod
+    def _finding_llm_fields(*, model: str = "", base_url: str = "") -> dict:
+        """写入 Finding 的模型归因字段（端点池模式下用于事后查看哪个洞由哪个模型打出）。"""
+        return {
+            "llm_model": str(model or "").strip()[:200],
+            "llm_base_url": str(base_url or "").strip()[:300],
+        }
+
+    def _live_llm_fields(self, target_id: str) -> dict:
+        state = self._live.get(target_id) or {}
+        return self._finding_llm_fields(
+            model=state.get("model") or "",
+            base_url=state.get("model_base_url") or state.get("base_url") or "",
+        )
+
     def _provider_selected_callback(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -1637,6 +1652,13 @@ class TaskRunner:
                     # finding_submitted 携带完整 finding：实时落库（不丢洞），并从看板推送里剥离大字段。
                     finding_payload = payload.pop("finding", None) if kind == "finding_submitted" else None
                     if finding_payload:
+                        # submit 当下的 selected_provider 写入洞记录，端点池切换后仍可追溯
+                        llm_meta = self._llm_payload(llm, "挖掘模型")
+                        finding_payload = {
+                            **finding_payload,
+                            "_llm_model": llm_meta.get("model") or "",
+                            "_llm_base_url": llm_meta.get("base_url") or "",
+                        }
                         ft = asyncio.create_task(
                             self._persist_single_finding(task_id, target_id, finding_payload)
                         )
@@ -1825,11 +1847,17 @@ class TaskRunner:
             worker = worker_holder.get("worker")
             if worker:
                 worker.executor.cancel_running()
+            result = {"verdict": "timeout", "findings": [], "error": timeout_reason}
             try:
-                await asyncio.wait_for(asyncio.shield(worker_future), timeout=WORKER_CLEANUP_TIMEOUT)
+                cleaned = await asyncio.wait_for(asyncio.shield(worker_future), timeout=WORKER_CLEANUP_TIMEOUT)
+                # 超时回收后仍要保住已出洞 + 进度快照，避免「挖了一半全丢」
+                if isinstance(cleaned, dict):
+                    if cleaned.get("findings"):
+                        result["findings"] = cleaned.get("findings") or []
+                    if cleaned.get("resume_context"):
+                        result["resume_context"] = cleaned.get("resume_context") or {}
             except Exception:
                 worker_future.add_done_callback(_consume_task_exception)
-            result = {"verdict": "timeout", "findings": [], "error": timeout_reason}
             async with SessionLocal() as s:
                 await self._log(s, "worker", "timeout",
                                 f"目标超时强制回收：{timeout_reason}，已触发工具子进程清理",
@@ -1928,6 +1956,7 @@ class TaskRunner:
                             kill_chain=f.get("kill_chain", []),
                             self_check=f.get("self_check", {}),
                             dedup_key=dedup_key, status="pending_review",
+                            **self._live_llm_fields(target_id),
                         ))
                     saved += 1
                 except IntegrityError:
@@ -1995,6 +2024,12 @@ class TaskRunner:
                 if duplicate:
                     return
                 dedup_key = dedup.dedup_key(target_ref, f)
+                llm_fields = self._finding_llm_fields(
+                    model=f.get("_llm_model") or f.get("llm_model") or "",
+                    base_url=f.get("_llm_base_url") or f.get("llm_base_url") or "",
+                )
+                if not llm_fields["llm_model"] and not llm_fields["llm_base_url"]:
+                    llm_fields = self._live_llm_fields(target_id)
                 try:
                     async with session.begin_nested():
                         session.add(Finding(
@@ -2009,12 +2044,14 @@ class TaskRunner:
                             kill_chain=f.get("kill_chain", []),
                             self_check=f.get("self_check", {}),
                             dedup_key=dedup_key, status="pending_review",
+                            **llm_fields,
                         ))
                     await session.commit()
                 except IntegrityError:
                     return
-                logger.info("[realtime_persist] target=%s title=%s 实时落库成功",
-                            target_id[:8], (f.get("title") or "")[:40])
+                logger.info("[realtime_persist] target=%s title=%s model=%s 实时落库成功",
+                            target_id[:8], (f.get("title") or "")[:40],
+                            llm_fields.get("llm_model") or "-")
         except Exception:
             logger.warning("[realtime_persist] target=%s 实时落库失败（整轮 result 仍会兜底）",
                             target_id[:8], exc_info=True)
@@ -2163,6 +2200,8 @@ class TaskRunner:
                 and (
                     failure_kind in {
                         "model_behavior", "tool_argument",
+                        "rate_limit", "timeout", "network", "upstream",
+                        "blocked", "unknown",
                     }
                     or self._is_transient_worker_error(error_text)
                 )
@@ -2218,6 +2257,10 @@ class TaskRunner:
                             kill_chain=f.get("kill_chain", []),
                             self_check=f.get("self_check", {}),
                             dedup_key=dedup_key, status="pending_review",
+                            **self._finding_llm_fields(
+                                model=f.get("_llm_model") or f.get("llm_model") or runtime_model,
+                                base_url=f.get("_llm_base_url") or f.get("llm_base_url") or runtime_base_url,
+                            ),
                         ))
                 except IntegrityError:
                     continue  # 唯一索引拦下并发/重复，跳过即可
@@ -2303,6 +2346,7 @@ class TaskRunner:
                 tgt.heartbeat_at = None
                 tgt.last_error = error_text[:500]
                 tgt.dead_reason = ""
+                self._apply_resume_context(tgt, result)
                 await self._stop_task_for_quota(session, error_text, target_id=target_id)
             elif provider_cooldown:
                 retry_after = max(1, int(result.get("retry_after_seconds") or 0))
@@ -2319,6 +2363,7 @@ class TaskRunner:
                 tgt.heartbeat_at = None
                 tgt.last_error = error_text[:500]
                 tgt.dead_reason = ""
+                self._apply_resume_context(tgt, result)
             elif transient_llm_error:
                 tgt.verdict = ""
                 tgt.status = "queued"
@@ -2326,6 +2371,7 @@ class TaskRunner:
                 tgt.heartbeat_at = None
                 tgt.last_error = error_text[:500]
                 tgt.dead_reason = ""
+                self._apply_resume_context(tgt, result)
             else:
                 tgt.verdict = verdict
             if quota_llm_error:
@@ -2404,6 +2450,7 @@ class TaskRunner:
                     tgt.heartbeat_at = None
                     tgt.last_error = (result.get("error") or summary_text or "worker 超时，回队重试")[:500]
                     tgt.dead_reason = ""
+                    self._apply_resume_context(tgt, result)
                     worker_requeue_info = (tgt.host, "worker 超时", tgt.retry_count)
                 else:
                     tgt.status = "dead"
@@ -2507,24 +2554,55 @@ class TaskRunner:
         return origin_fid
 
     @staticmethod
+    def _apply_resume_context(tgt: Target, result: dict) -> None:
+        """LLM 中断回队时，把 worker 进度快照写入 deepen_context，下一轮续挖。"""
+        resume = result.get("resume_context") if isinstance(result.get("resume_context"), dict) else {}
+        if not resume:
+            return
+        prev = dict(tgt.deepen_context or {})
+        cookies = resume.get("session_cookies") if isinstance(resume.get("session_cookies"), dict) else {}
+        headers = resume.get("session_headers") if isinstance(resume.get("session_headers"), dict) else {}
+        notes = str(resume.get("worker_notes") or "")[:4000]
+        directive = str(
+            resume.get("directive")
+            or prev.get("directive")
+            or "上一轮因 LLM 中断，请从工作笔记与会话态继续，不要从头泛扫。"
+        )[:2000]
+        tgt.deepen_context = {
+            "directive": directive,
+            "vuln_type": prev.get("vuln_type") or "",
+            "original_title": prev.get("original_title") or "LLM中断续挖",
+            "original_summary": str(
+                resume.get("original_summary") or notes or prev.get("original_summary") or ""
+            )[:1000],
+            "from_finding_id": prev.get("from_finding_id") or "",
+            "source": "llm_interrupt",
+            "worker_notes": notes,
+            "session_cookies": cookies,
+            "session_headers": headers,
+            "rounds_done": int(resume.get("rounds_done") or 0),
+        }
+
+    @staticmethod
     def _is_transient_worker_error(error: str) -> bool:
         text = (error or "").lower()
-        if not any(k in text for k in ("llm 调用失败", "llm 请求", "llm 网络", "llm 上游")):
+        if not any(k in text for k in ("llm 调用失败", "llm 请求", "llm 网络", "llm 上游", "llm 端点")):
             return False
         if TaskRunner._is_quota_error(error):
             return False
-        if any(k in text for k in ("api key", "unauthorized", "无效", "无权限", "invalid")):
+        if any(k in text for k in ("api key", "unauthorized", "无权限", "invalid api")):
             return False
         markers = (
             "rate limit", "限流", "too many requests", "429",
             "timeout", "timed out", "超时",
             "network", "connection", "连接失败",
             "temporarily", "temporary", "upstream", "临时异常", "上游",
+            "冷却", "cooldown", "blocked", "策略", "cyber",
             # 模型服务偶发抽风返回的「未知错误」也是临时性的：不该消耗 retry/置 dead，
             # 否则模型一抖动就把还能挖的目标白白打死（实测 20 个目标这么死的）。
             "未知错误", "模型服务返回", "底层细节已脱敏",
         )
-        return "llm 调用失败" in text and any(m in text for m in markers)
+        return any(m in text for m in markers)
 
     @staticmethod
     def _is_quota_error(error: str) -> bool:
@@ -3099,6 +3177,8 @@ class TaskRunner:
                         kill_chain=finding_payload["kill_chain"],
                         self_check={},
                         dedup_key=new_key, status="pending_review",
+                        llm_model=getattr(origin, "llm_model", "") or "",
+                        llm_base_url=getattr(origin, "llm_base_url", "") or "",
                     ))
                 await session.commit()
             except IntegrityError:
