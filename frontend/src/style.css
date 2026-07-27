@@ -1066,8 +1066,8 @@ main {
 .llm-mode-switch {
   clear: both;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  width: min(320px, 100%);
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  width: min(420px, 100%);
   margin-bottom: 16px;
   padding: 3px;
   border: 1px solid var(--border-soft);
@@ -1279,18 +1279,28 @@ main {
 .provider-fields .wide {
   grid-column: 1 / -1;
 }
+.model-picker-wrap {
+  display: grid;
+  gap: 4px;
+}
 .model-picker {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.model-picker input {
+.model-picker input,
+.model-picker select {
   flex: 1;
   min-width: 0;
 }
-.model-picker button {
+.model-picker button,
+.model-picker .ghost-btn {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+.model-picker .ghost-btn {
+  padding: 6px 10px;
+  font-size: 12px;
 }
 .model-hint {
   margin-top: 4px;

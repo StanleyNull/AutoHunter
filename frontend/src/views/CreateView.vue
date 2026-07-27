@@ -3,6 +3,8 @@ import { computed, reactive, ref, watch, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
 import { useAuthBindings } from "../composables/useAuthBindings.js";
+import LlmModelPicker from "../components/LlmModelPicker.vue";
+import LlmPoolEditor from "../components/LlmPoolEditor.vue";
 
 const router = useRouter();
 const adv = ref(false);
@@ -16,12 +18,18 @@ const form = reactive({
   intent_mode: "",
   manual_targets: "",
   src_rules: "",
-  inherit_model_global: true,
+  // inherit | single | pool
+  model_mode: "inherit",
   base_url: "", api_key: "", key_ref: "", model: "", protocol: "auto", prompt_version: "legacy",
   fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3,
   skip_site_recon: false,
   skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
 });
+const taskProviders = ref([]);
+const singleModels = ref([]);
+const singleModelsLoading = ref(false);
+const singleModelsError = ref("");
+const poolEditor = ref(null);
 const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions } =
   useAuthBindings(() => form.manual_targets);
 const submitting = ref(false);
@@ -45,7 +53,59 @@ const showAuthBindings = computed(() => !isFofaMode.value);
 
 function invalidateModelKey() {
   form.key_ref = "";
+  singleModels.value = [];
+  singleModelsError.value = "";
 }
+
+async function loadSingleModels() {
+  singleModelsLoading.value = true;
+  singleModelsError.value = "";
+  try {
+    const res = await api.listModels({
+      base_url: form.base_url,
+      api_key: form.api_key.trim(),
+      key_ref: form.key_ref,
+      model: form.model,
+      protocol: form.protocol,
+    });
+    if (res?.ok && res.models?.length) {
+      singleModels.value = res.models;
+      if (!form.model || !singleModels.value.includes(form.model)) form.model = singleModels.value[0];
+    } else {
+      singleModels.value = [];
+      singleModelsError.value = res?.error || "未获取到模型列表";
+    }
+  } catch (e) {
+    singleModels.value = [];
+    singleModelsError.value = String(e.message || e).replace(/^\d+\s*/, "");
+  } finally {
+    singleModelsLoading.value = false;
+  }
+}
+
+function ensurePoolSeed() {
+  if (taskProviders.value.length) return;
+  taskProviders.value = [{
+    name: "llm-1",
+    base_url: form.base_url || inherited.base_url || "https://api.deepseek.com/v1",
+    api_key: "",
+    api_key_set: false,
+    api_key_masked: "",
+    key_ref: "",
+    model: form.model || inherited.model || "deepseek-chat",
+    protocol: form.protocol || inherited.protocol || "auto",
+    temperature: 0.3,
+    weight: 1,
+    enabled: true,
+    models: [],
+    modelsLoading: false,
+    modelsError: "",
+  }];
+}
+
+watch(() => form.model_mode, (mode) => {
+  if (mode === "pool") ensurePoolSeed();
+});
 
 // 粗略识别用户是否在方向说明或凭据区给了登录凭据。
 const looksHasCreds = computed(() => {
@@ -62,15 +122,32 @@ watch([() => form.fofa_query, isSiteMode, authBindings], () => {
 });
 
 async function submit() {
-  if (!form.inherit_model_global && !form.api_key.trim() && !form.key_ref) return;
+  if (form.model_mode === "single" && !form.api_key.trim() && !form.key_ref) return;
+  if (form.model_mode === "pool") {
+    const rows = poolEditor.value?.exportProviders?.() || taskProviders.value;
+    if (!rows.length || rows.some((p) => !p.base_url || !p.model || (!p.api_key && !p.key_ref))) {
+      alert("端点池每个端点都需要名称/base_url/模型/api_key");
+      return;
+    }
+  }
   if (submitting.value) return;   // 防抖：慢网络/双击不重复建任务
   submitting.value = true;
   try {
-  const modelConfig = { inherit_global: form.inherit_model_global };
-  if (!form.inherit_model_global && form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
-  if (!form.inherit_model_global && form.base_url) modelConfig.base_url = form.base_url;
-  if (!form.inherit_model_global && form.model) modelConfig.model = form.model;
-  if (!form.inherit_model_global) modelConfig.protocol = form.protocol;
+  let modelConfig;
+  if (form.model_mode === "inherit") {
+    modelConfig = { inherit_global: true };
+  } else if (form.model_mode === "pool") {
+    const rows = poolEditor.value?.exportProviders?.() || taskProviders.value;
+    modelConfig = { inherit_global: false, providers: rows };
+  } else {
+    modelConfig = {
+      inherit_global: false,
+      base_url: form.base_url,
+      model: form.model,
+      protocol: form.protocol,
+    };
+    if (form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
+  }
   if (form.prompt_version !== inherited.prompt_version) modelConfig.prompt_version = form.prompt_version;
 
   const maxPages = parseInt(form.max_pages) || 20;
@@ -237,22 +314,43 @@ onMounted(async () => {
         <summary @click="adv = !adv">高级：模型 / FOFA / 并发（留空用服务端默认）</summary>
         <p class="field-hint">
           当前系统方案：{{ inherited.llm_mode === "pool" ? inherited.llm_provider_count + " 个模型端点" : "单模型" }}。
-          跟随后，系统配置变更会在任务下一轮调用时生效。
+          「跟随系统」时，系统配置变更会在任务下一轮调用时生效；也可为本任务单独选单端点或端点池。
         </p>
-        <label class="check-line">
-          <input v-model="form.inherit_model_global" type="checkbox" />
-          跟随系统模型方案
-        </label>
-        <label>模型 base_url <input v-model="form.base_url" :disabled="form.inherit_model_global" :required="!form.inherit_model_global" placeholder="https://api.deepseek.com/v1" @input="invalidateModelKey" /></label>
-        <label>模型 api_key <input v-model="form.api_key" :disabled="form.inherit_model_global" :required="!form.inherit_model_global && !form.key_ref" type="password" :placeholder="form.key_ref ? '已配置，留空复用' : 'sk-...'" /></label>
-        <label>模型名 <input v-model="form.model" :disabled="form.inherit_model_global" :required="!form.inherit_model_global" placeholder="deepseek-chat" /></label>
-        <label>模型协议
-          <select v-model="form.protocol" :disabled="form.inherit_model_global" @change="invalidateModelKey">
-            <option value="auto">自动识别</option>
-            <option value="openai_chat">OpenAI Chat Completions</option>
-            <option value="anthropic_messages">Anthropic Messages</option>
-          </select>
-        </label>
+        <div class="llm-mode-switch" role="tablist" aria-label="任务模型方案">
+          <button type="button" role="tab" :aria-selected="form.model_mode === 'inherit'" :class="{ active: form.model_mode === 'inherit' }" @click="form.model_mode = 'inherit'">跟随系统</button>
+          <button type="button" role="tab" :aria-selected="form.model_mode === 'single'" :class="{ active: form.model_mode === 'single' }" @click="form.model_mode = 'single'">单端点</button>
+          <button type="button" role="tab" :aria-selected="form.model_mode === 'pool'" :class="{ active: form.model_mode === 'pool' }" @click="form.model_mode = 'pool'">端点池</button>
+        </div>
+
+        <template v-if="form.model_mode === 'single'">
+          <label>模型 base_url <input v-model="form.base_url" required placeholder="https://api.deepseek.com/v1" @input="invalidateModelKey" /></label>
+          <label>模型 api_key <input v-model="form.api_key" :required="!form.key_ref" type="password" :placeholder="form.key_ref ? '已配置，留空复用' : 'sk-...'" /></label>
+          <label>模型名
+            <LlmModelPicker
+              v-model="form.model"
+              :models="singleModels"
+              :loading="singleModelsLoading"
+              :error="singleModelsError"
+              required
+              @refresh="loadSingleModels"
+            />
+          </label>
+          <label>模型协议
+            <select v-model="form.protocol" @change="invalidateModelKey">
+              <option value="auto">自动识别</option>
+              <option value="openai_chat">OpenAI Chat Completions</option>
+              <option value="anthropic_messages">Anthropic Messages</option>
+            </select>
+          </label>
+        </template>
+
+        <LlmPoolEditor
+          v-else-if="form.model_mode === 'pool'"
+          ref="poolEditor"
+          v-model="taskProviders"
+          :defaults="{ base_url: form.base_url || inherited.base_url, model: form.model || inherited.model, protocol: form.protocol || inherited.protocol }"
+        />
+
         <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" /></label>
         <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
         <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" /></label>

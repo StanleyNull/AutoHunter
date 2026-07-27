@@ -21,13 +21,17 @@ from app.llm.usage import usage_snapshot
 from app.orchestrator import manager
 from app.security import resolve_role, token_from_headers
 from app.settings_service import (
+    _clean_llm_providers,
     _llm_identity,
+    _preserve_provider_keys,
+    _public_llm_provider,
     is_masked_secret,
     list_available_models,
     normalize_llm_protocol,
     resolve_engine_config,
     resolve_llm_config,
     resolve_llm_providers,
+    resolve_llm_runtime_mode,
     resolve_worker_prompt_version,
     secret_ref,
 )
@@ -150,6 +154,10 @@ def _observer_ip(ip: str) -> str:
 def _public_model_config(task: Task) -> dict:
     cfg = resolve_llm_config(task)
     raw_cfg = dict(task.model_config_json or {})
+    inherit = _model_inherits_global(raw_cfg)
+    task_providers = _clean_llm_providers(
+        raw_cfg.get("providers") or raw_cfg.get("providers_json") or []
+    )
     return {
         "base_url": cfg.base_url,
         "model": cfg.model,
@@ -157,8 +165,10 @@ def _public_model_config(task: Task) -> dict:
         "api_key_set": bool(cfg.api_key),
         "key_ref": secret_ref(cfg.api_key),
         "provider_count": len(resolve_llm_providers(task)),
+        "providers": [_public_llm_provider(item) for item in task_providers],
+        "mode": resolve_llm_runtime_mode(task),
         "prompt_version": resolve_worker_prompt_version(task),
-        "inherit_global": _model_inherits_global(raw_cfg),
+        "inherit_global": inherit,
     }
 
 
@@ -314,20 +324,36 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
     if eng_cfg.get("base_url"):
         fofa_cfg["base_url"] = eng_cfg["base_url"]
     inherit_global = req.model_config_data.inherit_global
+    raw_providers = list(req.model_config_data.providers or [])
+    has_providers = bool(raw_providers)
     if inherit_global is None:
         inherit_global = not bool(
-            req.model_config_data.model_fields_set
-            & {"base_url", "api_key", "model", "protocol"}
+            (req.model_config_data.model_fields_set
+             & {"base_url", "api_key", "model", "protocol", "providers"})
+            or has_providers
         )
     if inherit_global:
         model_config = req.model_config_data.model_dump(exclude_defaults=True)
         model_config = {k: v for k, v in model_config.items() if k == "prompt_version"}
         model_config["inherit_global"] = True
+    elif has_providers:
+        cleaned = _clean_llm_providers(raw_providers)
+        if not cleaned:
+            raise HTTPException(400, "端点池至少需要一个配置完整且已启用的 LLM 端点")
+        if not any(item.get("enabled", True) for item in cleaned):
+            raise HTTPException(400, "端点池至少需要启用一个端点")
+        model_config = {
+            "inherit_global": False,
+            "providers": cleaned,
+        }
+        if req.model_config_data.prompt_version:
+            model_config["prompt_version"] = req.model_config_data.prompt_version
     else:
         model_config = req.model_config_data.model_dump(
-            exclude={"inherit_global"},
+            exclude={"inherit_global", "providers"},
             exclude_unset=True,
         )
+        model_config.pop("providers", None)
         model_config["inherit_global"] = False
     task = Task(
         name=req.name, src_type=normalize_src_type(req.src_type), vuln_types=req.vuln_types,
@@ -517,33 +543,67 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         current_identity = _llm_identity(
             current_runtime.base_url, current_runtime.protocol
         )
+        prompt_version = cfg.get("prompt_version")
+        if "prompt_version" in patch and patch.get("prompt_version") is not None:
+            prompt_version = str(patch["prompt_version"]).strip()
+
+        wants_single = (
+            patch.get("inherit_global") is False
+            or any(k in patch for k in ("base_url", "api_key", "model", "protocol"))
+        ) and not ("providers" in patch and patch.get("providers") is not None)
+
         if patch.get("inherit_global") is True:
-            cfg = {k: v for k, v in cfg.items() if k == "prompt_version"}
-            cfg["inherit_global"] = True
-        elif patch.get("inherit_global") is False:
+            cfg = {"inherit_global": True}
+            if prompt_version:
+                cfg["prompt_version"] = prompt_version
+        elif "providers" in patch and patch.get("providers") is not None:
+            old_providers = _clean_llm_providers(
+                cfg.get("providers") or cfg.get("providers_json") or []
+            )
+            preserved = _preserve_provider_keys(patch.get("providers") or [], old_providers)
+            cleaned = _clean_llm_providers(preserved)
+            if not cleaned:
+                raise HTTPException(400, "端点池至少需要一个配置完整且已启用的 LLM 端点")
+            if not any(item.get("enabled", True) for item in cleaned):
+                raise HTTPException(400, "端点池至少需要启用一个端点")
+            cfg = {
+                "inherit_global": False,
+                "providers": cleaned,
+            }
+            if prompt_version:
+                cfg["prompt_version"] = prompt_version
+        elif wants_single:
+            # 单端点覆盖：清掉任务级端点池，写入 base_url/model/key
             cfg.pop("providers", None)
             cfg.pop("providers_json", None)
             cfg["inherit_global"] = False
-        next_identity = _llm_identity(
-            patch.get("base_url")
-            if patch.get("base_url") is not None
-            else cfg.get("base_url") or current_runtime.base_url,
-            patch.get("protocol")
-            if patch.get("protocol") is not None
-            else cfg.get("protocol") or current_runtime.protocol,
-        )
-        supplied_key = str(patch.get("api_key") or "").strip()
-        has_new_key = bool(supplied_key and not is_masked_secret(supplied_key))
-        if current_identity != next_identity and not has_new_key:
-            cfg.pop("api_key", None)
-        for key in ("base_url", "model", "protocol"):
-            if not cfg.get("inherit_global") and key in patch and patch[key] is not None:
-                value = str(patch[key]).strip()
-                cfg[key] = normalize_llm_protocol(value) if key == "protocol" else value
-        if not cfg.get("inherit_global") and has_new_key:
-            cfg["api_key"] = supplied_key
-        if "prompt_version" in patch and patch.get("prompt_version") is not None:
-            cfg["prompt_version"] = str(patch["prompt_version"]).strip()
+            next_identity = _llm_identity(
+                patch.get("base_url")
+                if patch.get("base_url") is not None
+                else cfg.get("base_url") or current_runtime.base_url,
+                patch.get("protocol")
+                if patch.get("protocol") is not None
+                else cfg.get("protocol") or current_runtime.protocol,
+            )
+            supplied_key = str(patch.get("api_key") or "").strip()
+            has_new_key = bool(supplied_key and not is_masked_secret(supplied_key))
+            if current_identity != next_identity and not has_new_key:
+                cfg.pop("api_key", None)
+            for key in ("base_url", "model", "protocol"):
+                if key in patch and patch[key] is not None:
+                    value = str(patch[key]).strip()
+                    cfg[key] = normalize_llm_protocol(value) if key == "protocol" else value
+            if has_new_key:
+                cfg["api_key"] = supplied_key
+            if prompt_version:
+                cfg["prompt_version"] = prompt_version
+        else:
+            # 仅改 prompt_version 等非模式字段，保留原 inherit/providers/single
+            if "prompt_version" in patch:
+                if prompt_version:
+                    cfg["prompt_version"] = prompt_version
+                else:
+                    cfg.pop("prompt_version", None)
         task.model_config_json = cfg
 
     if req.engine_config is not None:

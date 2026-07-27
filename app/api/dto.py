@@ -13,6 +13,8 @@ class ModelConfigDTO(BaseModel):
     model: str = "deepseek-chat"
     protocol: str = "auto"
     prompt_version: str = ""
+    # 任务级端点池：非空时覆盖单端点字段，走池化调度
+    providers: Optional[list[dict[str, Any]]] = None
 
 
 class FofaConfigDTO(BaseModel):
@@ -65,6 +67,7 @@ class PartialModelConfigDTO(BaseModel):
     model: Optional[str] = None
     protocol: Optional[str] = None
     prompt_version: Optional[str] = None
+    providers: Optional[list[dict[str, Any]]] = None
 
 
 class TaskModelsProbeRequest(BaseModel):

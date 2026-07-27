@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { api } from "../api.js";
+import LlmModelPicker from "../components/LlmModelPicker.vue";
 
 const loading = ref(true);
 const saving = ref(false);
@@ -601,16 +602,14 @@ onUnmounted(() => { clearInterval(healthPoll); clearInterval(restartPoll); });
               <input v-model="form.temperature" type="number" step="0.1" min="0" max="2" />
             </label>
             <label class="full">模型名
-              <div class="model-picker">
-                <input v-model="form.model" required list="single-llm-models" placeholder="deepseek-chat" />
-                <datalist id="single-llm-models">
-                  <option v-for="model in singleModels" :key="model" :value="model" />
-                </datalist>
-                <button type="button" :disabled="singleModelsLoading" @click="loadSingleModels">
-                  {{ singleModelsLoading ? "查询中…" : "查询模型" }}
-                </button>
-              </div>
-              <small v-if="singleModelsError" class="model-hint">{{ singleModelsError }}</small>
+              <LlmModelPicker
+                v-model="form.model"
+                :models="singleModels"
+                :loading="singleModelsLoading"
+                :error="singleModelsError"
+                required
+                @refresh="loadSingleModels"
+              />
             </label>
             <div class="settings-test full">
               <button type="button" :disabled="testingLlm" @click="testSingleLlm">
@@ -698,20 +697,14 @@ onUnmounted(() => { clearInterval(healthPoll); clearInterval(restartPoll); });
                   <input v-model="selectedLlm.weight" type="number" min="1" max="100" />
                 </label>
                 <label class="wide">模型名
-                  <div class="model-picker">
-                    <input
-                      v-model="selectedLlm.model"
-                      :list="`llm-provider-models-${selectedLlmProvider}`"
-                      placeholder="deepseek-chat"
-                    />
-                    <datalist :id="`llm-provider-models-${selectedLlmProvider}`">
-                      <option v-for="model in selectedLlm.models" :key="model" :value="model" />
-                    </datalist>
-                    <button type="button" :disabled="selectedLlm.modelsLoading" @click="loadProviderModels(selectedLlmProvider)">
-                      {{ selectedLlm.modelsLoading ? "查询中…" : "查询模型" }}
-                    </button>
-                  </div>
-                  <small v-if="selectedLlm.modelsError" class="model-hint">{{ selectedLlm.modelsError }}</small>
+                  <LlmModelPicker
+                    v-model="selectedLlm.model"
+                    :models="selectedLlm.models"
+                    :loading="selectedLlm.modelsLoading"
+                    :error="selectedLlm.modelsError"
+                    required
+                    @refresh="loadProviderModels(selectedLlmProvider)"
+                  />
                 </label>
                 <div class="provider-test wide">
                   <button type="button" :disabled="selectedLlm.testing" @click="testLlmProvider(selectedLlmProvider)">
