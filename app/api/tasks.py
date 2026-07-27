@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dto import (
     CreateTaskRequest,
+    DirectiveRequest,
     TaskModelsProbeRequest,
     TaskResponse,
     TaskStats,
@@ -49,15 +50,33 @@ _STREAM_IMPORTANT_KINDS = frozenset({
     "reclaim", "recover", "workers_cancelled", "quota_stop",
     "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
     "auth_status",
+    "escalate_done", "escalate_skip", "escalate_cancelled", "escalate_start",
+    "worker_directive_queued", "worker_directive",
+})
+# Verbose / Worker Trace：细粒度事件（默认活动流不回放，verbose 或 trace API 才返回）。
+_STREAM_TRACE_KINDS = frozenset({
+    "worker_start", "worker_finish", "worker_cancelled", "worker_auto_finish",
+    "worker_thought", "worker_directive", "worker_resume",
+    "tool_http", "tool_shell", "tool_shell_blocked", "tool_arg_error",
+    "tool_exception", "tool_js_analyze", "tool_decode", "tool_waf_advice",
+    "tool_fofa_lookup", "tool_session_set",
+    "llm_round_start", "llm_error", "llm_soft_retry", "llm_interrupt",
+    "finding_submitted", "finding_duplicate", "finding_invalid",
+    "auth_status", "finish_blocked",
+    "escalate_http", "escalate_shell", "escalate_session", "escalate_error", "escalate_abandon",
 })
 
 
-def _stream_event_visible(kind: str, level: str) -> bool:
+def _stream_event_visible(kind: str, level: str, *, verbose: bool = False) -> bool:
     if kind in _STREAM_NOISE_KINDS:
         return False
     if level in ("warn", "error"):
         return True
-    return kind in _STREAM_IMPORTANT_KINDS or kind == "error"
+    if kind in _STREAM_IMPORTANT_KINDS or kind == "error":
+        return True
+    if verbose and kind in _STREAM_TRACE_KINDS:
+        return True
+    return False
 
 
 def _is_observer(request: Request | None) -> bool:
@@ -729,7 +748,12 @@ async def _compute_site_collab(session: AsyncSession, task_id: str) -> dict | No
 
 
 @router.get("/{task_id}/board")
-async def task_board(task_id: str, request: Request, session: AsyncSession = Depends(get_session)):
+async def task_board(
+    task_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    verbose: bool = Query(False),
+):
     """实时看板快照：在跑 worker 活态 + 目标进度 + 最近事件（用于刷新后恢复）。"""
     from app.db.models import TaskEvent
     task = await session.get(Task, task_id)
@@ -739,6 +763,7 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
     runner = manager.get_runner(task_id)
     observer = _is_observer(request)
     live = runner.live_workers() if runner else []
+    live_escalations = runner.live_escalations() if runner else []
     if observer:
         safe_live = []
         for w in live:
@@ -759,24 +784,38 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
                 "mode": w.get("mode", ""),
             })
         live = safe_live
+        live_escalations = [{
+            "finding_id": e.get("finding_id", ""),
+            "title": "hidden",
+            "severity": e.get("severity", ""),
+            "action": "扩大危害进行中",
+            "started_at": e.get("started_at", ""),
+        } for e in live_escalations]
 
     stats = await _compute_stats(session, task_id)
 
     # 最近重要事件（倒序，给前端做历史回放；多取一些再过滤噪音）
+    fetch_limit = 500 if verbose else 200
+    event_cap = 120 if verbose else 60
     ev_rows = (await session.execute(
         select(TaskEvent).where(TaskEvent.task_id == task_id)
-        .order_by(TaskEvent.id.desc()).limit(200)
+        .order_by(TaskEvent.id.desc()).limit(fetch_limit)
     )).scalars().all()
     events = []
     for e in ev_rows:
-        if not _stream_event_visible(e.kind or "", e.level or "info"):
+        if not _stream_event_visible(e.kind or "", e.level or "info", verbose=verbose):
             continue
+        payload = e.payload or {}
         events.append({
             "agent": e.agent, "kind": e.kind, "level": e.level,
             "message": "" if observer else e.message,
             "ts": to_cst_iso(e.ts),
+            "target_id": "" if observer else (payload.get("target_id") or ""),
+            **({} if observer else {k: payload.get(k) for k in (
+                "url", "method", "command", "text", "title", "verdict", "round", "tool", "error"
+            ) if k in payload}),
         })
-        if len(events) >= 60:
+        if len(events) >= event_cap:
             break
 
     # 单站协作态势（仅 site 任务）：三阶段路线流水线，不含敏感数据，观察者也可看。
@@ -787,6 +826,7 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
     return {
         "task_status": task.status,
         "live_workers": live,
+        "live_escalations": live_escalations,
         "stats": stats.model_dump(),
         "fofa_config": _observer_fofa_config() if observer else _public_fofa_config(task),
         "model_config_data": _observer_model_config() if observer else _public_model_config(task),
@@ -803,6 +843,72 @@ async def skip_target(task_id: str, target_id: str):
     res = await manager.skip_target(task_id, target_id)
     if not res.get("ok"):
         raise HTTPException(404, res.get("error") or "无法删除该目标")
+    return res
+
+
+@router.post("/{task_id}/targets/{target_id}/directive")
+async def inject_target_directive(task_id: str, target_id: str, body: DirectiveRequest):
+    """向运行中的 worker 注入人工实时指令；下一轮 LLM 调用前生效。"""
+    res = manager.inject_directive(task_id, target_id, body.directive)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "无法注入指令")
+    return res
+
+
+@router.get("/{task_id}/targets/{target_id}/trace")
+async def target_trace(
+    task_id: str,
+    target_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    limit: int = Query(200, ge=1, le=500),
+):
+    """单个目标的 worker 执行轨迹（落库的细粒度事件，刷新后可回看）。"""
+    if _is_observer(request):
+        raise HTTPException(403, "观摩令牌不允许查看执行轨迹")
+    tgt = await session.get(Target, target_id)
+    if not tgt or tgt.task_id != task_id:
+        raise HTTPException(404, "目标不存在或不属于该任务")
+    rows = (await session.execute(
+        select(TaskEvent)
+        .where(TaskEvent.task_id == task_id, TaskEvent.agent == "worker")
+        .order_by(TaskEvent.id.desc())
+        .limit(min(limit * 3, 1500))
+    )).scalars().all()
+    events = []
+    for e in rows:
+        payload = e.payload or {}
+        if payload.get("target_id") != target_id:
+            continue
+        events.append({
+            "agent": e.agent,
+            "kind": e.kind,
+            "level": e.level,
+            "message": e.message,
+            "ts": to_cst_iso(e.ts),
+            "target_id": target_id,
+            **{k: payload.get(k) for k in (
+                "url", "method", "command", "text", "title", "verdict", "round", "tool", "error"
+            ) if k in payload},
+        })
+        if len(events) >= limit:
+            break
+    events.reverse()  # 时间正序，便于 round-by-round 阅读
+    return {
+        "target_id": target_id,
+        "host": tgt.host or "",
+        "url": tgt.url or "",
+        "status": tgt.status,
+        "events": events,
+    }
+
+
+@router.post("/{task_id}/escalations/{finding_id}/cancel")
+async def cancel_escalation(task_id: str, finding_id: str):
+    """取消单个正在进行的扩大危害任务。"""
+    res = manager.cancel_escalation(task_id, finding_id)
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error") or "无法取消扩大危害")
     return res
 
 
