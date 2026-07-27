@@ -405,7 +405,7 @@ def _classify_error(e: Exception) -> LLMError:
         "forbidden", "request blocked", "access denied", "content policy", "被拦截", "禁止访问",
     )):
         return LLMError(
-            "blocked", "LLM 请求被上游网关或安全策略拒绝，请切换端点或检查访问策略。",
+            "blocked", "LLM 请求被上游网关或安全策略拒绝，请检查访问策略或稍后重试。",
             e, status=status, code=str(code), detail=detail,
         )
     if status == 429 or any(k in text for k in ("rate limit", "too many requests", "限流")):
@@ -417,7 +417,7 @@ def _classify_error(e: Exception) -> LLMError:
         "invalid_request", "bad request", "unprocessable entity", "参数有误", "参数错误",
     )):
         return LLMError(
-            "invalid_request", "LLM 请求参数不被当前端点接受，请切换端点或检查协议配置。",
+            "invalid_request", "LLM 请求参数不被接受，请检查模型名、协议或请求配置。",
             e, status=status, code=str(code), detail=detail,
         )
     if any(k in text for k in ("timeout", "timed out", "readtimeout", "connecttimeout", "超时")):
@@ -813,9 +813,14 @@ class LLMClient:
             raise last_exc
         if cooldown_delays:
             retry_after = min(cooldown_delays)
+            msg = (
+                f"LLM 端点池正在冷却，预计 {retry_after} 秒后重试。"
+                if self.pool_mode
+                else f"LLM 暂时不可用，预计 {retry_after} 秒后重试。"
+            )
             raise LLMError(
                 "provider_cooldown",
-                f"LLM 端点池正在冷却，预计 {retry_after} 秒后重试。",
+                msg,
                 retry_after=retry_after,
             )
         raise RuntimeError("没有可用的 LLM 端点")
@@ -848,6 +853,7 @@ class LLMClient:
                 "consecutive_failures": state.get("consecutive_failures", 0),
                 "cooldown_seconds": state.get("cooldown_seconds", 0),
                 "cooldown_until": state.get("cooldown_until", ""),
+                "pool_mode": bool(self.pool_mode),
             })
         except Exception:
             logger.exception("LLM provider failure callback failed")

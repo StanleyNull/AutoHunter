@@ -43,6 +43,7 @@ from app.settings_service import (
     llm_client_for_task,
     resolve_fofa_base_url,
     resolve_fofa_key,
+    resolve_llm_runtime_mode,
     resolve_worker_prompt_version,
 )
 from app.schemas import Finding as FindingSchema
@@ -446,14 +447,21 @@ class TaskRunner:
         consecutive = int(payload.get("consecutive_failures") or 0)
         cooldown_seconds = int(payload.get("cooldown_seconds") or 0)
         transition = payload.get("transition") or ""
+        pool_mode = bool(payload.get("pool_mode"))
         if transition in {"cooldown_probe_failed", "behavior_cooldown_started"}:
             message = (
-                f"LLM 端点进入冷却：{model} @ {base_url}"
+                f"LLM 进入冷却：{model} @ {base_url}"
                 f"（{kind}，连续失败 {consecutive} 次，冷却 {cooldown_seconds} 秒）"
             )
-        else:
+        elif pool_mode:
             message = (
                 f"LLM 端点运行失败，正在尝试池内其它端点：{model} @ {base_url}"
+                f"（{kind}，连续失败 {consecutive} 次）"
+            )
+        else:
+            # 单端点：不要提「池内换端」，沿用普通失败文案
+            message = (
+                f"LLM 调用失败：{model} @ {base_url}"
                 f"（{kind}，连续失败 {consecutive} 次）"
             )
         event_payload = dict(payload)
@@ -2443,8 +2451,11 @@ class TaskRunner:
                                 level="error", target_id=target_id, verdict="quota_stop", findings=0)
             elif provider_cooldown:
                 retry_after = max(1, int(result.get("retry_after_seconds") or 0))
+                task_row = await session.get(Task, self.task_id)
+                pool_mode = resolve_llm_runtime_mode(task_row) == "pool"
+                cooldown_label = "模型端点池冷却" if pool_mode else "LLM 暂时不可用"
                 await self._log(session, "worker", "target_requeued",
-                                f"目标 {tgt.host} 因模型端点池冷却回队，约 {retry_after} 秒后重试: "
+                                f"目标 {tgt.host} 因{cooldown_label}回队，约 {retry_after} 秒后重试: "
                                 f"{error_text[:120]}",
                                 level="warn", target_id=target_id, verdict="retry", findings=0)
             elif transient_llm_error:
