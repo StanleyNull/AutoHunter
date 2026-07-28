@@ -122,6 +122,24 @@ def _is_max_tokens_unsupported(err: LLMError) -> bool:
     )
 
 
+def _is_extra_body_unsupported(err: LLMError) -> bool:
+    """extra_body 里的思考开关等字段不被上游接受时，降级为去掉 extra_body 重试。"""
+    text = (err.detail or str(err)).lower()
+    markers = (
+        "enable_thinking", "reasoning_effort", "thinking",
+        "unsupported", "unrecognized", "unknown", "unexpected", "extra",
+        "not support", "invalid parameter", "invalid_request", "参数有误", "参数错误",
+    )
+    status = getattr(err, "status", None)
+    if str(status) == "400" or " 400 " in f" {text} ":
+        return any(m in text for m in markers)
+    return any(m in text for m in (
+        "enable_thinking", "reasoning_effort",
+    )) and any(m in text for m in (
+        "unsupported", "unrecognized", "unknown", "unexpected", "invalid",
+    ))
+
+
 def _classify_error(e: Exception) -> LLMError:
     response = getattr(e, "response", None)
     status = getattr(e, "status_code", None) or getattr(response, "status_code", None)
@@ -270,6 +288,35 @@ class LLMClient:
             return True
         return False
 
+    @staticmethod
+    def message_text(msg: Any) -> str:
+        """从 LLM message 中提取可读文本。
+
+        兼容：普通 content 字符串、content 多模态块列表、以及部分推理模型把答案
+        写进 reasoning_content（content 为空）的情况。
+        """
+        content = getattr(msg, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") in (None, "text") and block.get("text"):
+                        parts.append(str(block["text"]))
+                else:
+                    text = getattr(block, "text", None)
+                    if text:
+                        parts.append(str(text))
+            joined = "".join(parts).strip()
+            if joined:
+                return joined
+        for attr in ("reasoning_content", "reasoning"):
+            alt = getattr(msg, attr, None)
+            if isinstance(alt, str) and alt.strip():
+                return alt
+        return (content or "") if isinstance(content, str) else ""
+
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -277,30 +324,47 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        extra_body: Optional[dict[str, Any]] = None,
+        *,
+        omit_max_tokens: bool = False,
     ):
         """单次对话调用，返回完整 message 对象（可能含 tool_calls）。
 
         带超时 + 指数退避重试；耗尽重试后抛出最后一次异常（调用方已有兜底）。
+        extra_body 会透传给 OpenAI 兼容接口（如 enable_thinking / reasoning_effort），
+        用于关闭混合推理模型的思考模式等；Anthropic Messages 协议路径会忽略未知字段。
+        omit_max_tokens=True 时不传输出上限（交给模型/网关默认）；Anthropic Messages
+        协议强制要求 max_tokens，此时仍会给一个很大的兜底值。
         """
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature if temperature is None else temperature,
-            "max_tokens": int(max_tokens or os.environ.get("LLM_MAX_TOKENS", "4096")),
         }
+        if not omit_max_tokens:
+            kwargs["max_tokens"] = int(max_tokens or os.environ.get("LLM_MAX_TOKENS", "4096"))
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
+        if extra_body:
+            kwargs["extra_body"] = dict(extra_body)
 
         last_exc: Optional[Exception] = None
         active_tool_choice: Any = tool_choice
         tool_choice_fallback_used = False
         max_tokens_fallback_used = False
+        extra_body_fallback_used = False
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 if self._messages_protocol:
+                    # Anthropic Messages 协议要求 max_tokens；调用方选择不设上限时用大兜底值。
+                    mt = kwargs.get("max_tokens")
+                    if mt is None:
+                        mt = int(max_tokens or os.environ.get("LLM_MAX_TOKENS", "65536"))
                     return self._messages_chat(
-                        messages, tools, active_tool_choice, kwargs["temperature"], kwargs["max_tokens"]
+                        messages, tools, active_tool_choice,
+                        kwargs["temperature"], mt,
+                        extra_body=kwargs.get("extra_body"),
                     )
                 resp = self.client.chat.completions.create(**kwargs)
                 self._record_openai_usage(resp)
@@ -349,6 +413,21 @@ class LLMClient:
                     )
                     kwargs.pop("max_tokens", None)
                     max_tokens_fallback_used = True
+                    continue
+                if (
+                    not extra_body_fallback_used
+                    and kwargs.get("extra_body")
+                    and isinstance(last_exc, LLMError)
+                    and _is_extra_body_unsupported(last_exc)
+                ):
+                    # 部分网关不认识 enable_thinking / reasoning_effort，400 后去掉 extra_body 重试。
+                    logger.warning(
+                        "LLM extra_body rejected; retrying without it "
+                        "(model=%s, detail=%s)",
+                        self.config.model, last_exc.detail[:300],
+                    )
+                    kwargs.pop("extra_body", None)
+                    extra_body_fallback_used = True
                     continue
                 if attempt < _MAX_RETRIES:
                     logger.info("LLM chat retry %d/%d (kind=%s, model=%s)",
@@ -441,8 +520,11 @@ class LLMClient:
         tool_choice: Any,
         temperature: float,
         max_tokens: int,
+        extra_body: Optional[dict[str, Any]] = None,
     ):
-        payload, headers = self._build_messages_payload(messages, tools, tool_choice, temperature, max_tokens)
+        payload, headers = self._build_messages_payload(
+            messages, tools, tool_choice, temperature, max_tokens, extra_body=extra_body,
+        )
         with httpx.Client(timeout=_REQUEST_TIMEOUT, verify=not self._insecure_tls) as client:
             resp = client.post(self._messages_url(), headers=headers, json=payload)
         resp.raise_for_status()
@@ -457,6 +539,7 @@ class LLMClient:
         tool_choice: Any,
         temperature: float,
         max_tokens: int,
+        extra_body: Optional[dict[str, Any]] = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         system, converted = self._convert_messages(messages)
         payload: dict[str, Any] = {
@@ -473,6 +556,14 @@ class LLMClient:
             choice = self._to_messages_tool_choice(tool_choice)
             if choice:
                 payload["tool_choice"] = choice
+        # Anthropic Messages：把 OpenAI 兼容的思考开关映射到 thinking 参数。
+        # enable_thinking=false / reasoning_effort=none → 关闭思考（若上游不支持会 400，
+        # 由 chat() 的 extra_body fallback 去掉后重试）。
+        body = extra_body or {}
+        enable_thinking = body.get("enable_thinking")
+        reasoning_effort = str(body.get("reasoning_effort") or "").lower()
+        if enable_thinking is False or reasoning_effort == "none":
+            payload["thinking"] = {"type": "disabled"}
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",

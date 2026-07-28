@@ -342,7 +342,7 @@ async function viewDetail(doc) {
     <div class="kb-info-panel">
       <div class="kb-info-title">AI 调用时机</div>
       <div class="kb-info-body">
-        <div class="kb-info-item"><span class="kb-info-icon">🔒</span>仅在<b>第二次深挖</b>（deepen_count ≥ 2）<b>且工具轮数 > 10</b>时才解锁 knowledge_lookup 工具</div>
+        <div class="kb-info-item"><span class="kb-info-icon">🔒</span><b>第一轮挖掘</b>（deepen_count = 0）工具轮数 &gt; 8 可调用；<b>第二轮及以后</b>（deepen_count ≥ 1）工具轮数 &gt; 3 可调用 knowledge_lookup</div>
         <div class="kb-info-item"><span class="kb-info-icon">🧠</span>AI 必须先依赖<b>自身推理能力</b>测试，知识库仅作辅助手段</div>
         <div class="kb-info-item"><span class="kb-info-icon">📋</span><b>渐进式披露</b>：第一次调用返回标题+摘要，AI 选择后用 doc_id 获取完整原文</div>
         <div class="kb-info-item"><span class="kb-info-icon">⚡</span><b>Type A</b>（漏洞前）：未发现漏洞时可查阅；<b>Type B</b>（漏洞后）：已提交 finding 或深挖上下文含 vuln_type 时才可查阅</div>

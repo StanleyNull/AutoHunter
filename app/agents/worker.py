@@ -96,6 +96,17 @@ class Worker:
     def _emit(self, kind: str, **data: Any) -> None:
         self.on_event(kind, data)
 
+    def _knowledge_unlocked(self, rounds: int) -> bool:
+        """人工知识库解锁：第一轮挖掘轮数>8；第二轮及以后深挖轮数>3。"""
+        if self._deepen_count >= 1:
+            return rounds > 3
+        return rounds > 8
+
+    def _knowledge_unlock_hint(self) -> str:
+        if self._deepen_count >= 1:
+            return "第二轮挖掘需工具轮数超过3轮后才可使用"
+        return "第一轮挖掘需工具轮数超过8轮后才可使用"
+
     def _initial_js_tool_enabled(self) -> bool:
         if worker_config.js_tool_always_on:
             return True
@@ -261,9 +272,9 @@ class Worker:
                     tools += PROXY_TOOL_SCHEMAS
                 if self._js_tool_enabled:
                     tools += JS_ANALYZER_TOOL_SCHEMAS
-                # 人工知识库工具：仅在第二次深挖且工具轮数超过10轮时解锁
+                # 人工知识库工具：第一轮挖掘轮数>8 解锁；第二轮及以后深挖轮数>3 解锁
                 # 知识库仅作辅助，AI必须先依赖自身推理能力测试
-                if self._deepen_count >= 2 and rounds > 10:
+                if self._knowledge_unlocked(rounds):
                     tools += KNOWLEDGE_TOOL_SCHEMAS
                 send_messages = compact_messages(messages, rounds)
                 # 每轮注入当前状态块（会话态 + 工作笔记）——临时消息，不存入 messages 历史，
@@ -698,11 +709,11 @@ class Worker:
         if name == "knowledge_lookup":
             self._mark_tool_used(name, rnd)
             # 双重检查触发约束（即使 schema 被注入也拦截）
-            if self._deepen_count < 2 or rnd <= 10:
+            if not self._knowledge_unlocked(rnd):
                 return {
                     "ok": False,
                     "blocked": True,
-                    "error": "知识库工具尚未解锁：需要在第二次深挖且工具轮数超过10轮后才可使用。",
+                    "error": f"知识库工具尚未解锁：{self._knowledge_unlock_hint()}",
                     "guidance": "继续用自身推理能力测试；知识库是辅助手段，不是首选工具。",
                 }
             doc_id = (args.get("doc_id") or "").strip()

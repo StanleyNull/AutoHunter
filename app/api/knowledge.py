@@ -332,6 +332,37 @@ def _sanitize_content(content: str) -> str:
     return "\n".join(clean)
 
 
+def _extract_json_object(raw: str) -> dict | None:
+    """从 LLM 文本中尽量提取 JSON 对象（兼容 markdown 代码块 / 前后缀说明）。"""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    candidates = [text]
+    if "```" in text:
+        # 优先取 ```json ... ``` / ``` ... ``` 代码块内容
+        parts = text.split("```")
+        for i, part in enumerate(parts):
+            if i % 2 == 0:
+                continue
+            body = part.strip()
+            if body.lower().startswith("json"):
+                body = body[4:].lstrip("\n\r")
+            candidates.append(body)
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        candidates.append(text[start:end])
+
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 async def _process_doc(doc_id: str) -> None:
     """调用 LLM 生成摘要 + 判定分类，然后自动启用文档。后台异步执行。"""
     from app.db.session import SessionLocal
@@ -363,44 +394,35 @@ async def _process_doc(doc_id: str) -> None:
 
             prompt = _SUMMARY_PROMPT.replace("{available_tags}", ", ".join(available_tags))
             client = LLMClient(cfg)
-            sanitized = _sanitize_content(doc.content[:20_000])
+            sanitized = _sanitize_content(doc.content or "")
             messages = [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": f"文档标题：{doc.title}\n\n文档内容：\n{sanitized}"},
             ]
-            resp = await asyncio.to_thread(client.chat, messages, temperature=0.1, max_tokens=1024)
-            raw = (resp.content or "").strip()
+            # 摘要/打标是结构化抽取，不需要深度推理。glm-5.x / DeepSeek-R1 等混合推理模型
+            # 默认开启 thinking，会把输出预算吃光，导致 content 为空或 JSON 截断。
+            # 关闭思考且不设 max_tokens（不截断输入、不限输出）；网关不支持 extra_body 时自动降级。
+            resp = await asyncio.to_thread(
+                client.chat,
+                messages,
+                temperature=0.1,
+                omit_max_tokens=True,
+                extra_body={
+                    "enable_thinking": False,
+                    "reasoning_effort": "none",
+                },
+            )
+            raw = LLMClient.message_text(resp).strip()
             if not raw:
-                raise ValueError("LLM 返回空响应")
-            # 尝试多种方式提取 JSON
-            data = None
-            # 方式1：直接解析
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                pass
-            # 方式2：从代码块中提取
-            if data is None and "```" in raw:
-                start = raw.find("{")
-                end = raw.rfind("}") + 1
-                if start >= 0 and end > start:
-                    try:
-                        data = json.loads(raw[start:end])
-                    except json.JSONDecodeError:
-                        pass
-            # 方式3：从整个文本中找第一个 JSON 对象
+                raise ValueError(
+                    "LLM 返回空响应（常见于思考模型把输出预算耗尽在 reasoning 上；"
+                    "已尝试关闭 thinking，请检查模型/网关是否兼容，或手动填写摘要）"
+                )
+            data = _extract_json_object(raw)
             if data is None:
-                start = raw.find("{")
-                end = raw.rfind("}") + 1
-                if start >= 0 and end > start:
-                    try:
-                        data = json.loads(raw[start:end])
-                    except json.JSONDecodeError:
-                        pass
-            if data is None or not isinstance(data, dict):
                 raise ValueError(f"无法从LLM响应中提取JSON，原始响应前200字: {raw[:200]}")
 
-            doc.summary = str(data.get("summary", "")).strip()[:500]
+            doc.summary = str(data.get("summary", "")).strip()
             dt = str(data.get("doc_type", "pre_vuln")).strip()
             doc.doc_type = dt if dt in ("pre_vuln", "post_vuln") else "pre_vuln"
             # 拆分已有标签和建议标签
