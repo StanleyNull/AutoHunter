@@ -300,9 +300,10 @@ body="管理" && org="China Education and Research Network Center"
 
 | 变量 | 必填 | 说明 | 获取方式 |
 |------|:---:|------|---------|
-| `LLM_API_KEY` | ✅ **必填** | 大模型 API Key，平台核心 | [DeepSeek](https://platform.deepseek.com/) / OpenAI / 通义 / Kimi 等 |
-| `LLM_BASE_URL` | 默认 DeepSeek | OpenAI 兼容接口地址（需含 `/v1`） | 默认 `https://api.deepseek.com/v1` |
-| `LLM_MODEL` | 默认 deepseek-chat | 模型名 | 按模型商填 |
+| `LLM_API_KEY` | ✅ **必填** | 大模型 API Key，平台核心 | [DeepSeek](https://platform.deepseek.com/) / OpenAI / Claude / 通义 / Kimi 等 |
+| `LLM_BASE_URL` | 默认 DeepSeek | 模型接口地址（OpenAI 兼容一般含 `/v1`） | 默认 `https://api.deepseek.com/v1` |
+| `LLM_MODEL` | 默认 deepseek-chat | 模型名（须支持 tool calling） | 按厂商填写 |
+| `LLM_PROTOCOL` | 默认 `auto` | `auto` / `openai_chat` / `anthropic_messages` | 控制台「设置」也可改 |
 | `FOFA_KEY` | ⭐ 推荐 | 资产测绘，自动搜集目标 | [FOFA 个人中心](https://fofa.info/) |
 | `FOFA_BASE_URL` | 可选 | 自定义 FOFA API 端点（私有/镜像/代理） | 默认 `https://fofa.info` |
 | `AUTOHUNTER_API_TOKEN` | ⭐ 强烈建议 | 控制台全权限令牌，**不设则任何人可访问** | `install.sh` 自动生成，或自填随机串 |
@@ -385,7 +386,7 @@ hunt.example.com {
 |---|---|
 | 后端 | Python 3.12 · FastAPI · SQLAlchemy(SQLite) · asyncio |
 | 前端 | Vue 3 · Vite |
-| 模型 | 任意 OpenAI 兼容接口（DeepSeek / OpenAI / 通义 / Kimi …） |
+| 模型 | 需支持 **tool calling**；协议为 OpenAI Chat Completions 或 Anthropic Messages（`LLM_PROTOCOL=auto` 可自动识别）。常见：DeepSeek / OpenAI / Claude / 通义 / Kimi 等 |
 | 工具链（容器内置） | nmap · nuclei · sqlmap · httpx · whatweb · curl/wget/jq |
 
 ---
