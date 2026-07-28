@@ -178,6 +178,7 @@ class PersistTraceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_persist_writes_task_event(self):
         runner = TaskRunner("task-vis")
+        runner._live["t1"] = {"target_id": "t1"}  # 细粒度仅在活态中落库
         session = SimpleNamespace(add=Mock(), commit=AsyncMock())
         with patch("app.orchestrator.SessionLocal", return_value=_SessionContext(session)):
             await runner._persist_worker_trace(

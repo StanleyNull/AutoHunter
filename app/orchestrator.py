@@ -38,6 +38,7 @@ from app.agent_runtime import (
 from app.db.models import CST, Finding, Killsweep, Review, Target, Task, TaskEvent
 from app.db.session import SessionLocal
 from app.events import bus
+from app.maintenance.cleanup import TRACE_FINE_KINDS, prune_target_traces
 from app.llm.client import LLMClient
 from app.settings_service import (
     llm_client_for_task,
@@ -92,7 +93,8 @@ def _escalation_is_significant(orig_severity: str, res: dict) -> bool:
 LOOP_INTERVAL = 3.0
 LOW_WATERMARK = 5
 MAX_RETRY = 1  # 单 target 最多再挖 1 次
-# Worker 细粒度轨迹：落库供刷新回看（payload 已截断，避免 DB 膨胀）。
+# Worker 细粒度轨迹：运行中落库供刷新回看；worker 结束后由 maintenance.cleanup
+# 删除 TRACE_FINE_KINDS，保留 start/finish/finding_* 摘要。
 _WORKER_TRACE_KINDS = frozenset({
     "worker_start", "worker_finish", "worker_cancelled", "worker_auto_finish",
     "worker_thought", "worker_directive", "worker_resume",
@@ -465,9 +467,20 @@ class TaskRunner:
                           if isinstance(sv, (str, int, float, bool, type(None)))}
         return out
 
+    def _schedule_prune_target_traces(self, task_id: str, target_id: str) -> None:
+        """worker 结束后异步清细粒度轨迹（保留摘要）；失败不影响主路径。"""
+        try:
+            t = asyncio.get_running_loop().create_task(prune_target_traces(task_id, target_id))
+            t.add_done_callback(lambda f: _log_bg_task_exc(f, "prune_target_traces"))
+        except RuntimeError:
+            pass
+
     async def _persist_worker_trace(self, task_id: str, target_id: str, kind: str, payload: dict) -> None:
         """选择性落库 worker 细粒度事件，刷新后可回看。"""
         if kind not in _WORKER_TRACE_KINDS:
+            return
+        # 细粒度：活态已摘掉说明 worker 已收尾，跳过迟到的落库，避免清完又写回。
+        if kind in TRACE_FINE_KINDS and target_id not in self._live:
             return
         safe = self._truncate_trace_payload(payload)
         msg = ""
@@ -1671,6 +1684,7 @@ class TaskRunner:
             self._live.pop(target_id, None)
             self._worker_last_activity.pop(target_id, None)
             self._worker_cancel_events.pop(target_id, None)
+            self._schedule_prune_target_traces(task_id, target_id)
             raise
         except Exception as e:
             # 关键兜底：setup 阶段(建上下文/查重/取LLM/信号量)或任何未捕获异常，
@@ -1700,6 +1714,7 @@ class TaskRunner:
             except Exception:
                 logger.warning("TaskRunner[%s] worker crash persist failed target=%s",
                                self.task_id, target_id[:8])
+            self._schedule_prune_target_traces(task_id, target_id)
 
     async def _run_worker_inner(self, task_id: str, target_id: str, url: str,
                                 cancel_event: threading.Event) -> None:
@@ -2048,6 +2063,7 @@ class TaskRunner:
                     await self._salvage_findings(task_id, target_id, salvage)
                 except Exception:
                     pass
+            self._schedule_prune_target_traces(task_id, target_id)
             return
         final_result = result or {"verdict": "error", "findings": []}
         final_result.setdefault("_runtime", {})
@@ -2060,6 +2076,7 @@ class TaskRunner:
             "model_role": live_snapshot.get("model_role") or "挖掘模型",
         })
         await self._persist_worker_result(task_id, target_id, final_result)
+        self._schedule_prune_target_traces(task_id, target_id)
 
     async def _salvage_findings(self, task_id: str, target_id: str, findings: list) -> None:
         """被取消的 worker 已发现的 findings 抢救落库（只存洞，不改目标状态）。
