@@ -776,11 +776,18 @@ class LLMClient:
         self._provider_slot_owner = uuid.uuid4().hex
         self._activate_provider(self.providers[0])
         # 工具调用兼容：不支持原生 function calling 的模型走「提示词模拟」兜底。
+        # 自动切换的记录按「端点」而非整个 client 维度——池化时某个哑端点触发模拟，
+        # 不会连累池里其它支持原生工具调用的端点。
         self._tool_compat = _resolve_tool_compat(self.config)
-        self._prompt_tools_active = self._tool_compat == "prompt"
+        self._prompt_tools_providers: set[str] = set()
+
+    def _current_provider_ref(self) -> str:
+        return provider_ref(
+            self.config.base_url, self.config.model, self.config.api_key, self.config.protocol
+        )
 
     def _prompt_tools_enabled(self) -> bool:
-        return self._tool_compat == "prompt" or self._prompt_tools_active
+        return self._tool_compat == "prompt" or self._current_provider_ref() in self._prompt_tools_providers
 
     def _provider_order(self) -> list[LLMConfig]:
         if len(self.providers) <= 1:
@@ -1203,28 +1210,6 @@ class LLMClient:
                 # 协议自适应：端点用错协议（走错路径 404 等）时自动切 messages/openai 重试。
                 if self._maybe_switch_protocol(last_exc):
                     continue
-                # 工具调用兼容：端点对 tools 参数硬报错「不支持」时，自动切提示词模拟重试。
-                # 仅 auto 模式、仅命中明确「不支持工具」的信号才切，原生可用模型不受影响。
-                if (
-                    tools_orig
-                    and not prompt_tools
-                    and self._tool_compat == "auto"
-                    and isinstance(last_exc, LLMError)
-                    and _is_tools_unsupported(last_exc)
-                ):
-                    logger.warning(
-                        "LLM tools 参数不被支持，切换为提示词模拟工具调用 (model=%s, detail=%s)",
-                        self.config.model, (getattr(last_exc, "detail", "") or "")[:200],
-                    )
-                    self._prompt_tools_active = True
-                    prompt_tools = True
-                    messages = _build_prompt_tools_messages(messages_orig, tools_orig)
-                    tools = None
-                    active_tool_choice = "auto"
-                    kwargs["messages"] = messages
-                    kwargs.pop("tools", None)
-                    kwargs.pop("tool_choice", None)
-                    continue
                 if (
                     tools
                     and not tool_choice_fallback_used
@@ -1244,6 +1229,30 @@ class LLMClient:
                     active_tool_choice = "auto"
                     kwargs["tool_choice"] = "auto"
                     tool_choice_fallback_used = True
+                    continue
+                # 工具调用兼容：端点对 tools 参数硬报错「不支持」时，自动切提示词模拟重试。
+                # 仅 auto 模式、仅命中明确「不支持工具」的信号才切，原生可用模型不受影响。
+                # 放在 forced tool_choice 降级之后：强制指定函数被拒时优先降级为 auto 保持原生，
+                # 只有确认端点连 tools 参数本身都不认时，才退到提示词模拟。
+                if (
+                    tools_orig
+                    and not prompt_tools
+                    and self._tool_compat == "auto"
+                    and isinstance(last_exc, LLMError)
+                    and _is_tools_unsupported(last_exc)
+                ):
+                    logger.warning(
+                        "LLM tools 参数不被支持，切换为提示词模拟工具调用 (model=%s, detail=%s)",
+                        self.config.model, (getattr(last_exc, "detail", "") or "")[:200],
+                    )
+                    self._prompt_tools_providers.add(self._current_provider_ref())
+                    prompt_tools = True
+                    messages = _build_prompt_tools_messages(messages_orig, tools_orig)
+                    tools = None
+                    active_tool_choice = "auto"
+                    kwargs["messages"] = messages
+                    kwargs.pop("tools", None)
+                    kwargs.pop("tool_choice", None)
                     continue
                 if (
                     not max_tokens_fallback_used
