@@ -171,6 +171,7 @@ WORKER_SYSTEM_PROMPT = """你是一名顶尖的 SRC 漏洞挖掘专家，正在�
 # 挖掘要点（真实经验，最高优先级）
 1. 逻辑问题优先：弱口令/图形验证码爆破/已知CVE 命中率低，只做轻量尝试；优先关注认证绕过、参数篡改、越权(IDOR)/未授权访问、任意用户操作、注入、文件上传等逻辑类问题。
 2. SPA先看JS：Vue/React/空div/首页无表单无接口/大量JS→优先 analyze_javascript。从JS梳理：API基址与路由、鉴权方式(query参数还是Header如Authorization)、是否有前端硬编码密钥、上传/登录/改密/导出接口。前端 JS 常是理解接口的关键。
+   特别关注客户端网关模式：`ClientAppID`/`ClientAppSecret`/`HeadJson`/`PWDDATA_`/`CryptoJS.AES` → 伪造签名+加密 body 打 `/gateway/.../Client*` 或 Admin 接口，解密 Model 取死规矩数据；analyze_javascript 给出 `client_signed_encrypted_api` 链时必须按 probes 实证，停在“发现密钥”不算洞。
 3. 验证到位(核心)：发现可疑点后不要停在表面，追问"能否证明真实影响"并推进到够格证据——注入→能否取到库名/敏感数据；未授权→拿死规矩数据/可用凭证/写操作实证；任意文件读→读配置/日志中的敏感信息；文件上传→证明可执行，或传HTML/SVG到目标站自身域名且访问时Content-Type为text/html即算存储型XSS成立(仅上传txt/图片不算，传第三方对象存储域不算)；认证绕过/参数篡改→实际登入目标账号拿到 Set-Cookie。已找到明确切入点时，验证到位优先于轮次纪律，别因轮数丢掉正在成型的结论。
    注意：多数目标【没有源码】，黑盒是常态。主要方法是看 JS/接口行为、差异对比、参数试探，不依赖源码审计。没有源码照样能完成验证，别因为"拿不到源码"就降低信心或放弃。
 4. 关联分析：信息泄露→凭证/密钥→越权→拿数据；任意文件读→读配置→关联更多信息；未授权读到 token→带 token 调下游接口。一个问题常是另一个问题的入口。
@@ -673,6 +674,7 @@ WORKER_SYSTEM_PROMPT_LEGACY = """你是一名顶尖的 SRC 漏洞挖掘专家，
 - 页面是 Vue/React/空 div、首页没表单没接口、加载大量 JS → **优先 analyze_javascript 看 JS**，不要在空首页上浪费轮数。
 - 从 JS 里梳理：API 基址与路由、鉴权方式(是 query 参数还是 Header 如 Authorization)、是否有前端硬编码密钥、上传/登录/改密/导出接口。
 - 前端 JS 常是理解接口的关键：鉴权字段、签名方式、隐藏接口都可能在其中。没看 JS 就说"无攻击面"是不合格的。
+- 客户端网关模式（智慧后勤/layuiadmin 常见）：出现 `ClientAppID`/`ClientAppSecret`/`HeadJson`/`PWDDATA_`/`CryptoJS.AES` 时，用硬编码凭证伪造签名+加密 body，无登录态直打 `/gateway/.../Client*` 或 `Admin/SysOperator`，解密 Model 取身份证等死规矩数据。`client_signed_encrypted_api` 链必须按 probes 实证。
 
 ## 要点三：验证到位——发现可疑点后【追问"能否证明真实影响"】，不停在表面
 发现下列信号后，不要直接收敛判 no_vuln 或提交半成品，应继续推进到"够格的证据"：

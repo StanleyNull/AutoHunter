@@ -700,13 +700,29 @@ class ToolExecutor:
                 "endpoint_inventory": result.get("endpoint_inventory", [])[:80],
                 "assets": result.get("assets", [])[:30],
                 "fetch_errors": result.get("fetch_errors", [])[:20],
-                "guidance": (
-                    "这些只是 JS 静态线索。优先按 chains 里的 probes 用 http_request/run_shell 做真实验证；"
-                    "没有实证危害不要 submit_finding。"
-                ),
+                "guidance": self._js_analyze_guidance(result),
             }
         except Exception as e:
             return {"ok": False, "error": f"JS 分析异常: {type(e).__name__}: {e}"}
+
+    @staticmethod
+    def _js_analyze_guidance(result: dict[str, Any]) -> str:
+        chains = result.get("chains") or []
+        kinds = {c.get("kind") for c in chains if isinstance(c, dict)}
+        base = (
+            "这些只是 JS 静态线索。优先按 chains 里的 probes 用 http_request/run_shell 做真实验证；"
+            "没有实证危害不要 submit_finding。"
+        )
+        if "client_signed_encrypted_api" in kinds:
+            return (
+                base
+                + " 已命中「客户端签名+AES 加密请求体」链路：立刻提取 ClientAppID/ClientAppSecret/AES 口令，"
+                "按前端算法构造 HeadJson + PWDDATA_ 加密 body，POST Admin/Client* 接口并解密 Model 取证；"
+                "只发现密钥不算洞。"
+            )
+        if "frontend_secret_followup" in kinds:
+            return base + " 发现高价值 secret：继续搜索签名/加密函数并伪造一次受限调用。"
+        return base
 
     # ---- suggest_waf_bypass（纯本地，不发网络）----
     def suggest_waf_bypass(
