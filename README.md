@@ -17,7 +17,60 @@
 
 **一台机器 = 24×7 不停歇的挖洞平台。你只当「人工复审员」，醒来几分钟完成裁决。**
 
-[快速开始](#快速开始) · [功能亮点](#功能亮点) · [创建任务](#创建任务) · [配置](#必填与推荐配置) · [运维](#运维与长期运行) · [避坑](#注意事项与避坑)
+<br>
+
+### Contributors
+
+<table>
+  <tr>
+    <td align="center" width="100">
+      <a href="https://github.com/StanleyNull">
+        <img src="https://avatars.githubusercontent.com/u/121541453?v=4&s=128" width="72" height="72" alt="StanleyNull" /><br />
+        <sub><b>StanleyNull</b></sub>
+      </a><br /><sup>Author</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/bitter999">
+        <img src="https://avatars.githubusercontent.com/u/160144268?v=4&s=128" width="72" height="72" alt="bitter999" /><br />
+        <sub><b>bitter999</b></sub>
+      </a><br /><sup>Engines</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/Star-233">
+        <img src="https://avatars.githubusercontent.com/u/64454088?v=4&s=128" width="72" height="72" alt="Star-233" /><br />
+        <sub><b>Star-233</b></sub>
+      </a><br /><sup>Agent UX</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/SD9ard3n">
+        <img src="https://avatars.githubusercontent.com/u/121371300?v=4&s=128" width="72" height="72" alt="SD9ard3n" /><br />
+        <sub><b>SD9ard3n</b></sub>
+      </a><br /><sup>LLM Pool</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/YiKongk">
+        <img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=128" width="72" height="72" alt="YiKongk" /><br />
+        <sub><b>YiKongk</b></sub>
+      </a><br /><sup>FOFA API</sup>
+    </td>
+  </tr>
+</table>
+
+<p>
+  <a href="https://github.com/StanleyNull/AutoHunter/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=StanleyNull/AutoHunter&max=48" alt="All contributors" />
+  </a>
+</p>
+
+<sub>
+合并进 <code>main</code> 的代码贡献会自动出现在上方动态墙 ·
+想署名（含文档 / 设计 / 复测）→ 见 <a href="CONTRIBUTORS.md">如何成为 Contributor</a>
+</sub>
+
+<br>
+
+[快速开始](#快速开始) · [功能亮点](#功能亮点) · [创建任务](#创建任务) · [配置](#必填与推荐配置) · [运维](#运维与长期运行) · [避坑](#注意事项与避坑) · [Contributors](CONTRIBUTORS.md)
+
 
 Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/profile/46491/>
 
@@ -48,6 +101,7 @@ Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/pr
 - [注意事项与避坑](#注意事项与避坑)
 - [技术栈](#技术栈)
 - [贡献与反馈](#贡献与反馈)
+- [如何成为 Contributor](CONTRIBUTORS.md)
 - [许可协议](#许可协议)
 
 ---
@@ -316,6 +370,7 @@ hunt.example.com {
 - 🐛 发现 bug / 有建议 → 提 [Issue](https://github.com/StanleyNull/AutoHunter/issues)
 - ⭐ 觉得有用 → 点个 Star 支持一下
 - 🔀 欢迎 Fork 二次开发（保留署名、非商业用途）
+- 🙋 想出现在首页 Contributors → 按 [CONTRIBUTORS.md](CONTRIBUTORS.md) 自行申请（开 PR 即可）
 
 ---
 
