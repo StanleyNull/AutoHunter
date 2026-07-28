@@ -3244,3 +3244,20 @@ main {
   /* 给底部导航留出空间，避免署名被遮挡 */
   .app-credit { padding-bottom: 78px; }
 }
+
+
+/* Settings: multi-engine API keys */
+.engine-keys { margin-top: 18px; display: grid; gap: 12px; }
+.engine-keys-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.engine-key-card {
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--panel-2, rgba(0,0,0,0.02));
+}
+.engine-key-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px; gap: 8px;
+}
+.engine-key-head i { font-style: normal; font-size: 12px; opacity: 0.65; }
+.engine-key-head i.on { color: var(--ok, #16a34a); opacity: 1; }

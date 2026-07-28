@@ -412,17 +412,18 @@ def resolve_engine_base_url(engine_name: str, task: Task | None = None) -> str:
 def resolve_engine_config(task: Task | None = None) -> dict[str, Any]:
     """解析任务使用的引擎完整配置。"""
     engine_name = resolve_engine_name(task)
-    # 兼容旧版 fofa_config 分页设置
+    # 兼容旧版 fofa_config 分页设置；全局分页/意图默认仍存在 settings.fofa 段
     cfg = (task.fofa_config or {}) if task else {}
-    eff = effective_settings()["engines"]
-    eng_cfg = eff.get(engine_name, {})
+    eff = effective_settings()
+    eng_cfg = (eff.get("engines") or {}).get(engine_name, {}) or {}
+    fofa = eff.get("fofa") or {}
     return {
         "engine": engine_name,
         "key": resolve_engine_key(engine_name, task),
         "base_url": resolve_engine_base_url(engine_name, task),
-        "max_pages": int(cfg.get("max_pages") or eng_cfg.get("max_pages") or 20),
-        "page_size": int(cfg.get("page_size") or eng_cfg.get("page_size") or 100),
-        "intent_mode": str(cfg.get("intent_mode") or ""),
+        "max_pages": int(cfg.get("max_pages") or eng_cfg.get("max_pages") or fofa.get("max_pages") or 20),
+        "page_size": int(cfg.get("page_size") or eng_cfg.get("page_size") or fofa.get("page_size") or 100),
+        "intent_mode": str(cfg.get("intent_mode") or fofa.get("default_intent_mode") or ""),
     }
 
 

@@ -48,6 +48,12 @@ const inherited = reactive({
 });
 const isSiteMode = computed(() => form.target_source === "site");
 const isFofaMode = computed(() => form.target_source === "fofa");
+const engineIsFofa = computed(() => !form.engine || form.engine === "fofa");
+const engineLabel = computed(() => {
+  const map = { fofa: "FOFA", quake: "360 Quake", hunter: "Hunter", zoomeye: "ZoomEye", shodan: "Shodan", censys: "Censys" };
+  return map[form.engine] || (form.engine ? form.engine : "系统默认引擎");
+});
+
 const manualTargetsPlaceholder = computed(() =>
   isSiteMode.value
     ? "https://target.example.com/\nhttps://target.example.com/admin 后台"
@@ -159,7 +165,7 @@ async function submit() {
   const fofaConfig = {};
   if (form.fofa_key.trim()) fofaConfig.key = form.fofa_key.trim();
   if (form.fofa_base_url && form.fofa_base_url !== inherited.fofa_base_url) fofaConfig.base_url = form.fofa_base_url;
-  if (maxPages !== inherited.max_pages) fofaConfig.max_pages = maxPages;
+  fofaConfig.max_pages = maxPages;  // 始终写入，避免任务配置缺省时掉回硬编码 20
   if (form.intent_mode !== inherited.intent_mode) fofaConfig.intent_mode = form.intent_mode;
   if (isSiteMode.value && form.skip_site_recon) fofaConfig.skip_site_recon = true;
 
@@ -227,15 +233,15 @@ onMounted(async () => {
       <label>漏洞类型（逗号分隔） <input v-model="form.vuln_types" /></label>
       <label>目标来源
         <select v-model="form.target_source">
-          <option value="fofa">FOFA 自动搜</option>
+          <option value="fofa">测绘引擎自动搜</option>
           <option value="manual">手动清单</option>
-          <option value="both">两者</option>
+          <option value="both">测绘 + 手动</option>
           <option value="site">单站协作</option>
         </select>
       </label>
       <label v-if="!isSiteMode">搜索引擎
         <select v-model="form.engine">
-          <option value="">默认引擎</option>
+          <option value="">系统默认引擎</option>
           <option value="fofa">FOFA</option>
           <option value="quake">360 Quake</option>
           <option value="hunter">Hunter (鹰图)</option>
@@ -244,6 +250,9 @@ onMounted(async () => {
           <option value="censys">Censys</option>
         </select>
       </label>
+      <p v-if="!isSiteMode" class="field-hint">
+        当前选用：{{ engineLabel }}。各引擎 API Key 在「设置 → 资产测绘」配置；未配 Key 的引擎搜不到资产。
+      </p>
       <label v-if="!isSiteMode">搜集方式
         <select v-model="form.intent_mode">
           <option value="">自动判断（写得像语法就当语法，否则当意图）</option>
@@ -320,7 +329,7 @@ onMounted(async () => {
         协作备注里像有凭据，但「登录凭据区」为空——请挪到凭据区，才能强制尝试并在看板反馈。
       </p>
       <details :open="adv">
-        <summary @click="adv = !adv">高级：模型 / FOFA / 并发（留空用服务端默认）</summary>
+        <summary @click="adv = !adv">高级：模型 / 测绘分页 / 并发（留空用服务端默认）</summary>
         <p class="field-hint">
           当前系统方案：{{ inherited.llm_mode === "pool" ? inherited.llm_provider_count + " 个模型端点" : "单模型" }}。
           「跟随系统」时，系统配置变更会在任务下一轮调用时生效；也可为本任务单独选单端点或端点池。
@@ -360,9 +369,16 @@ onMounted(async () => {
           :defaults="{ base_url: form.base_url || inherited.base_url, model: form.model || inherited.model, protocol: form.protocol || inherited.protocol }"
         />
 
-        <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" /></label>
-        <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
-        <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" /></label>
+        <label v-if="!isSiteMode">搜集最大页数 <input v-model="form.max_pages" type="number" /></label>
+        <p v-if="!isSiteMode" class="field-hint">对当前选用的测绘引擎生效（不限于 FOFA）。</p>
+        <template v-if="!isSiteMode && engineIsFofa">
+          <label>FOFA Key（任务级覆盖，可选） <input v-model="form.fofa_key" type="password" placeholder="留空用系统设置" /></label>
+          <label>FOFA API 端点（可选） <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
+          <p class="field-hint">仅当本任务使用 FOFA 时生效。Quake / Hunter 等引擎请到系统设置配 Key，暂不支持任务级覆盖。</p>
+        </template>
+        <p v-else-if="!isSiteMode" class="field-hint">
+          当前引擎不是 FOFA：Key 请用系统设置里的「各引擎 API Key」，高级区不再重复填。
+        </p>
         <label>worker 并发 <input v-model="form.concurrency" type="number" /></label>
       </details>
       <label>SRC 规则（审核用，可留空，审核 agent 已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'edusrc' }}标准）

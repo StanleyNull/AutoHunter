@@ -107,10 +107,17 @@ const form = reactive({
   max_pages: 20,
   page_size: 100,
   default_intent_mode: "",
+  default_engine: "fofa",
+  engines: {},
+  available_engines: [],
   concurrency: 3,
   skip_score_threshold: -10,
   worker_prompt_version: "legacy",
 });
+
+const engineKeysSetCount = computed(() =>
+  Object.values(form.engines || {}).filter((e) => e && e.key_set).length
+);
 
 function toast(m) {
   toastMsg.value = m;
@@ -502,6 +509,27 @@ async function load() {
     form.max_pages = s.fofa?.max_pages ?? 20;
     form.page_size = s.fofa?.page_size ?? 100;
     form.default_intent_mode = s.fofa?.default_intent_mode || "";
+    form.default_engine = s.defaults?.engine || "fofa";
+    form.available_engines = s.available_engines || [];
+    const engView = s.engines || {};
+    const nextEngines = {};
+    for (const meta of form.available_engines) {
+      const name = meta.name;
+      const cur = engView[name] || {};
+      nextEngines[name] = {
+        display_name: meta.display_name || cur.display_name || name,
+        key: "",
+        key_set: !!cur.key_set,
+        base_url: cur.base_url || "",
+      };
+    }
+    if (nextEngines.fofa && !nextEngines.fofa.key_set && s.fofa?.key_set) {
+      nextEngines.fofa.key_set = true;
+    }
+    if (nextEngines.fofa && !nextEngines.fofa.base_url && s.fofa?.base_url) {
+      nextEngines.fofa.base_url = s.fofa.base_url;
+    }
+    form.engines = nextEngines;
     form.concurrency = s.defaults?.concurrency ?? 3;
     form.skip_score_threshold = s.defaults?.skip_score_threshold ?? -10;
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
@@ -568,19 +596,29 @@ async function save({ silent = false } = {}) {
         providers: buildLlmProviders(),
       },
       fofa: {
-        base_url: form.fofa_base_url,
         max_pages: Number(form.max_pages),
         page_size: Number(form.page_size),
         default_intent_mode: form.default_intent_mode,
       },
+      engines: {},
       defaults: {
         concurrency: Number(form.concurrency),
         skip_score_threshold: Number(form.skip_score_threshold),
         worker_prompt_version: form.worker_prompt_version,
+        engine: form.default_engine || "fofa",
       },
     };
     if (secretReady(form.api_key)) body.llm.api_key = form.api_key.trim();
-    if (secretReady(form.fofa_key)) body.fofa.key = form.fofa_key.trim();
+    for (const [name, eng] of Object.entries(form.engines || {})) {
+      const patch = { base_url: eng.base_url || "" };
+      if (secretReady(eng.key)) patch.key = eng.key.trim();
+      body.engines[name] = patch;
+    }
+    const fofaEng = form.engines?.fofa;
+    if (fofaEng) {
+      body.fofa.base_url = fofaEng.base_url || "";
+      if (secretReady(fofaEng.key)) body.fofa.key = fofaEng.key.trim();
+    }
     // 端点池密钥：半成品不提交，靠 key_ref 让后端保留原值
     if (llmMode.value === "pool") {
       body.llm.providers = body.llm.providers.map((provider, idx) => {
@@ -602,6 +640,15 @@ async function save({ silent = false } = {}) {
     llmMode.value = s.llm?.mode === "pool" ? "pool" : "single";
     form.protocol = normalizeLlmProtocol(s.llm?.protocol);
     form.fofa_key_set = s.fofa?.key_set;
+    const engView = s.engines || {};
+    for (const name of Object.keys(form.engines || {})) {
+      const cur = engView[name] || {};
+      form.engines[name].key = "";
+      form.engines[name].key_set = !!cur.key_set || (name === "fofa" && !!s.fofa?.key_set);
+      form.engines[name].base_url = cur.base_url || (name === "fofa" ? (s.fofa?.base_url || "") : "") || form.engines[name].base_url || "";
+      if (cur.display_name) form.engines[name].display_name = cur.display_name;
+    }
+    form.default_engine = s.defaults?.engine || form.default_engine;
     // 关键：禁止 loadLlmProviders 整表替换；就地合并，不强制改写选中索引（用户飞行中换端点不被抢回）
     if (llmMode.value === "pool") {
       mergeProvidersAfterSave(s.llm?.providers || [], clearedKeyIndexes);
@@ -660,7 +707,7 @@ onUnmounted(() => {
     <header class="page-head">
       <h2>系统配置</h2>
       <p class="page-sub">
-        全局默认 LLM / FOFA / 调度参数。改动后约 1 秒自动保存；新建任务留空时会使用此处配置，任务内填写可单独覆盖。
+        全局默认 LLM / 资产测绘引擎 / 调度参数。改动后约 1 秒自动保存；新建任务留空时会使用此处配置，任务内填写可单独覆盖。
         <span v-if="meta.updated_at" class="settings-updated">上次保存 {{ meta.updated_at?.slice(0, 19).replace("T", " ") }}</span>
       </p>
     </header>
@@ -704,10 +751,10 @@ onUnmounted(() => {
         </div>
         <div class="settings-health">
           <div>
-            <span>FOFA</span>
-            <b>{{ form.max_pages }} 页 · {{ form.page_size }} / 页</b>
+            <span>测绘</span>
+            <b>{{ form.default_engine || "fofa" }} · {{ form.max_pages }} 页</b>
           </div>
-          <i :class="{ on: form.fofa_key_set }">{{ form.fofa_key_set ? "key set" : "no key" }}</i>
+          <i :class="{ on: engineKeysSetCount > 0 }">{{ engineKeysSetCount > 0 ? `${engineKeysSetCount} key` : "no key" }}</i>
         </div>
         <dl class="settings-facts">
           <div>
@@ -894,27 +941,51 @@ onUnmounted(() => {
 
         <fieldset class="settings-block">
           <legend>
-            <span>FOFA</span>
-            <small>Collector 默认资产搜集参数</small>
+            <span>资产测绘</span>
+            <small>多引擎搜集默认；创建任务可选引擎，Key 在此统一配置</small>
           </legend>
           <div class="settings-grid">
-            <label class="full">FOFA key
-              <input v-model="form.fofa_key" type="password"
-                :placeholder="form.fofa_key_set ? '已配置，留空不修改' : 'FOFA API Key'" />
+            <label class="full">默认搜索引擎
+              <select v-model="form.default_engine">
+                <option v-for="eng in form.available_engines" :key="eng.name" :value="eng.name">
+                  {{ eng.display_name || eng.name }}
+                </option>
+              </select>
             </label>
-            <label class="full">API 端点
-              <input v-model="form.fofa_base_url" placeholder="https://fofa.info" />
-            </label>
-            <p class="field-hint full">自定义 FOFA 兼容端点（私有部署/镜像/代理网关），留空用官方地址。</p>
+            <p class="field-hint full">新建任务「搜索引擎」留空时使用此项。任务里仍可临时换引擎。</p>
             <label>默认最大页数 <input v-model="form.max_pages" type="number" min="1" /></label>
             <label>每页条数 <input v-model="form.page_size" type="number" min="1" /></label>
             <label class="full">默认搜集方式
               <select v-model="form.default_intent_mode">
                 <option value="">自动判断</option>
-                <option value="syntax">查询语法（FOFA 或引擎原生均可）</option>
+                <option value="syntax">查询语法（FOFA 语法或当前引擎原生均可）</option>
                 <option value="intent">自然语言意图</option>
               </select>
             </label>
+            <p class="field-hint full">分页与搜集方式对当前选用的测绘引擎生效，不限于 FOFA。</p>
+          </div>
+
+          <div class="engine-keys">
+            <h4 class="engine-keys-title">各引擎 API Key</h4>
+            <p class="field-hint">按需配置；未配 Key 的引擎在任务里选中时无法搜资产。密钥留空表示不修改。</p>
+            <div v-for="eng in form.available_engines" :key="eng.name" class="engine-key-card">
+              <div class="engine-key-head">
+                <strong>{{ form.engines[eng.name]?.display_name || eng.display_name || eng.name }}</strong>
+                <i :class="{ on: form.engines[eng.name]?.key_set }">
+                  {{ form.engines[eng.name]?.key_set ? "已配置" : "未配置" }}
+                </i>
+              </div>
+              <div class="settings-grid" v-if="form.engines[eng.name]">
+                <label class="full">API Key
+                  <input v-model="form.engines[eng.name].key" type="password"
+                    :placeholder="form.engines[eng.name]?.key_set ? '已配置，留空不修改' : `${eng.display_name || eng.name} API Key`" />
+                </label>
+                <label class="full">API 端点（可选）
+                  <input v-model="form.engines[eng.name].base_url"
+                    :placeholder="eng.name === 'fofa' ? 'https://fofa.info' : '留空用官方默认'" />
+                </label>
+              </div>
+            </div>
           </div>
         </fieldset>
 

@@ -83,6 +83,8 @@ const original = reactive({
 });
 const isSiteMode = computed(() => form.target_source === "site");
 const isFofaMode = computed(() => form.target_source === "fofa");
+const engineIsFofa = computed(() => !form.engine || form.engine === "fofa");
+
 const showAuthBindings = computed(() => !isFofaMode.value);
 
 function invalidateModelKey() {
@@ -287,15 +289,15 @@ async function save() {
         </label>
         <label>目标来源
           <select v-model="form.target_source">
-            <option value="fofa">FOFA 自动搜</option>
+            <option value="fofa">测绘引擎自动搜</option>
             <option value="manual">手动清单</option>
-            <option value="both">两者</option>
+            <option value="both">测绘 + 手动</option>
             <option value="site">单站协作</option>
           </select>
         </label>
         <label v-if="!isSiteMode">搜索引擎
           <select v-model="form.engine">
-            <option value="">默认引擎</option>
+            <option value="">系统默认引擎</option>
             <option value="fofa">FOFA</option>
             <option value="quake">360 Quake</option>
             <option value="hunter">Hunter (鹰图)</option>
@@ -304,6 +306,7 @@ async function save() {
             <option value="censys">Censys</option>
           </select>
         </label>
+        <p v-if="!isSiteMode" class="field-hint">各引擎 API Key 在「设置 → 资产测绘」配置。</p>
         <label v-if="!isSiteMode">搜集方式
           <select v-model="form.intent_mode">
             <option value="">自动判断</option>
@@ -369,7 +372,7 @@ async function save() {
       </p>
 
       <details open>
-        <summary>高级：模型 / FOFA</summary>
+        <summary>高级：模型 / 测绘分页</summary>
         <div class="llm-mode-switch" role="tablist" aria-label="任务模型方案">
           <button type="button" role="tab" :aria-selected="modelMode === 'inherit'" :class="{ active: modelMode === 'inherit' }" @click="modelMode = 'inherit'">跟随系统</button>
           <button type="button" role="tab" :aria-selected="modelMode === 'single'" :class="{ active: modelMode === 'single' }" @click="modelMode = 'single'">单端点</button>
@@ -409,10 +412,14 @@ async function save() {
         />
 
         <div class="settings-grid" style="margin-top: 12px">
-          <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
-          <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
-          <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" min="1" max="200" /></label>
-          <label v-if="!isSiteMode">FOFA page_size <input v-model="form.page_size" type="number" min="1" max="1000" /></label>
+          <label v-if="!isSiteMode">搜集最大页数 <input v-model="form.max_pages" type="number" min="1" max="200" /></label>
+          <label v-if="!isSiteMode">每页条数 <input v-model="form.page_size" type="number" min="1" max="1000" /></label>
+          <p v-if="!isSiteMode" class="field-hint full">分页对当前选用的测绘引擎生效（不限于 FOFA）。</p>
+          <template v-if="!isSiteMode && engineIsFofa">
+            <label>FOFA Key（任务级覆盖） <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
+            <label>FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
+            <p class="field-hint full">仅 FOFA 支持任务级 Key/端点覆盖；其它引擎请改系统设置。</p>
+          </template>
         </div>
       </details>
 
