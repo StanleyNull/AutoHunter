@@ -24,8 +24,7 @@ from app.tools.js_analyzer import analyze_javascript as analyze_js_text
 from app.tools.js_analyzer import analyze_url as analyze_js_url
 from app.tools.waf_advisor import suggest_waf_bypass as _suggest_waf_bypass
 
-_FOFA_BASE = "https://fofa.info"
-# FOFA 只读查询硬上限：worker 用它确认归属/探攻击面，不是测绘，给小额度即可。
+# 只读测绘查询硬上限：worker 用它确认归属/探攻击面，不是全量测绘，给小额度即可。
 _FOFA_LOOKUP_MAX_SIZE = 30
 # 企业 session cookie jar 上限，防异常站点塞爆内存。
 _SESSION_MAX_COOKIES = 50
@@ -103,13 +102,17 @@ class ToolExecutor:
         enterprise: bool = False,
         fofa_key: str = "",
         fofa_base_url: str = "",
+        engine: str = "fofa",
     ):
         self.target = target
         self.cancel_event = cancel_event or threading.Event()
         # 企业模式：对目标生产环境的破坏性命令做额外硬拦截。
         self.enterprise = enterprise
+        # 资产测绘引擎：fofa_lookup 走任务选定的引擎（FOFA / Quake / Hunter / …），
+        # key/base_url 由编排层按 resolve_engine_config 注入；base_url 空则用引擎默认端点。
+        self.engine = engine or "fofa"
         self.fofa_key = fofa_key or ""
-        self.fofa_base_url = (fofa_base_url or _FOFA_BASE).rstrip("/")
+        self.fofa_base_url = (fofa_base_url or "").rstrip("/")
         # 每个目标独立工作目录
         safe_name = "".join(c if c.isalnum() else "_" for c in target)[:60]
         self.work_dir = Path(work_dir or worker_config.work_root) / safe_name
@@ -575,57 +578,50 @@ class ToolExecutor:
 
     # ---- fofa_lookup（只读资产测绘，确认归属 + 探攻击面）----
     def fofa_lookup(self, query: str = "", size: int = 10) -> dict[str, Any]:
-        """对 FOFA 发一次只读查询，返回命中规模和样本（host/ip/port/title/domain/org）。
+        """对任务选定的测绘引擎发一次只读查询，返回命中规模和样本
+        （host/ip/port/title/domain/org）。
 
         用途：① 确认目标归属（org/备案/证书）填准 owner；② 看同 IP/同域还开了
-        哪些端口/服务，发现隐藏攻击面。只读查询，不对目标产生任何请求。
+        哪些端口/服务，发现隐藏攻击面。查询统一按 FOFA 语法书写，非 FOFA 引擎
+        （Quake / Hunter / …）在请求前自动翻译。只读查询，不对目标产生任何请求。
         """
+        from app.engines.sync import engine_display_name, engine_search_sync, result_rows_to_dicts
+
+        engine_name = self.engine or "fofa"
+        disp = engine_display_name(engine_name)
         if not self.fofa_key:
-            return {"ok": False, "error": "未配置 FOFA key，无法查询。",
+            return {"ok": False, "error": f"未配置 {disp} key，无法查询。",
                     "guidance": "跳过测绘，直接用 http_request 验证归属（看证书/页脚/备案）。"}
         q = (query or "").strip()
         if not q:
             return {"ok": False, "kind": "arg_error", "error": "query 不能为空",
                     "guidance": '传 FOFA 语法，如 ip="1.2.3.4" 或 host="example.com"。'}
         safe_size = max(1, min(int(size or 10), _FOFA_LOOKUP_MAX_SIZE))
-        import base64 as _b64
-        params = {
-            "key": self.fofa_key,
-            "qbase64": _b64.b64encode(q.encode("utf-8")).decode("ascii"),
-            "fields": "host,ip,port,title,domain,org,protocol",
-            "page": "1", "size": str(safe_size), "full": "false",
-        }
         try:
-            with httpx.Client(timeout=25) as client:
-                resp = client.get(f"{self.fofa_base_url}/api/v1/search/all", params=params)
-                data = resp.json()
+            res = engine_search_sync(
+                engine_name, self.fofa_key, q,
+                page=1, page_size=safe_size, base_url=self.fofa_base_url or None,
+            )
         except Exception as e:
-            return {"ok": False, "error": f"FOFA 调用失败: {type(e).__name__}: {e}",
-                    "guidance": "FOFA 不可用，改用 http_request 直接验证归属。"}
-        if not isinstance(data, dict):
-            return {"ok": False, "error": "FOFA 返回格式异常"}
-        if data.get("error"):
-            return {"ok": False, "error": f"FOFA 错误: {data.get('errmsg', '')}"[:300]}
-        def _cell(row: list, i: int) -> str:
-            # FOFA 字段可能为 null/非字符串，统一转成安全字符串，杜绝 None[:n] 崩溃。
-            return str(row[i]) if len(row) > i and row[i] is not None else ""
+            return {"ok": False, "error": f"{disp} 调用失败: {type(e).__name__}: {e}"[:300],
+                    "guidance": f"{disp} 不可用，改用 http_request 直接验证归属。"}
 
         sample = []
-        for row in (data.get("results") or [])[:safe_size]:
-            if isinstance(row, list):
-                sample.append({
-                    "host": _cell(row, 0),
-                    "ip": _cell(row, 1),
-                    "port": _cell(row, 2),
-                    "title": _cell(row, 3)[:120],
-                    "domain": _cell(row, 4),
-                    "org": _cell(row, 5),
-                    "protocol": _cell(row, 6),
-                })
+        for r in result_rows_to_dicts(res, limit=safe_size):
+            sample.append({
+                "host": r.get("host", ""),
+                "ip": r.get("ip", ""),
+                "port": r.get("port", ""),
+                "title": (r.get("title", "") or "")[:120],
+                "domain": r.get("domain", ""),
+                "org": r.get("org", ""),
+                "protocol": r.get("protocol", ""),
+            })
         return {
             "ok": True,
             "query": q,
-            "size": data.get("size", 0),
+            "engine": engine_name,
+            "size": res.size,
             "sample": sample,
             "guidance": "据此核实 owner 归属、发现同 IP/同域其它端口与服务；测绘只读，验证仍需 http_request 实证。",
         }

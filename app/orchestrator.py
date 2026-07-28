@@ -42,8 +42,7 @@ from app.maintenance.cleanup import TRACE_FINE_KINDS, prune_target_traces
 from app.llm.client import LLMClient
 from app.settings_service import (
     llm_client_for_task,
-    resolve_fofa_base_url,
-    resolve_fofa_key,
+    resolve_engine_config,
     resolve_llm_runtime_mode,
     resolve_worker_prompt_version,
 )
@@ -1833,13 +1832,16 @@ class TaskRunner:
         src_type = "edusrc"
         fofa_key = ""
         fofa_base_url = ""
+        engine_name = "fofa"
         async with SessionLocal() as session:
             tgt = await session.get(Target, target_id)
             task_obj = await session.get(Task, task_id)
             if task_obj:
                 src_type = task_obj.src_type or "edusrc"
-                fofa_key = resolve_fofa_key(task_obj)
-                fofa_base_url = resolve_fofa_base_url(task_obj)
+                engine_cfg = resolve_engine_config(task_obj)
+                engine_name = engine_cfg["engine"]
+                fofa_key = engine_cfg["key"]
+                fofa_base_url = engine_cfg["base_url"]
             if tgt:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
@@ -1929,6 +1931,7 @@ class TaskRunner:
                             duplicate_history=duplicate_history,
                             cancel_event=cancel_event, src_type=src_type,
                             fofa_key=fofa_key, fofa_base_url=fofa_base_url,
+                            engine=engine_name,
                             prompt_version=prompt_version,
                             pop_directive=lambda: self._pop_directive(target_id))
             worker_holder["worker"] = worker
@@ -2995,8 +2998,10 @@ class TaskRunner:
             if not f:
                 return
             task = await session.get(Task, task_id)
-            fofa_key = resolve_fofa_key(task)
-            fofa_base_url = resolve_fofa_base_url(task)
+            engine_cfg = resolve_engine_config(task)
+            engine_name = engine_cfg["engine"]
+            fofa_key = engine_cfg["key"]
+            fofa_base_url = engine_cfg["base_url"]
             src_type = (task.src_type if task else "edusrc") or "edusrc"
             finding_dict = {
                 "title": f.title, "vuln_type": f.vuln_type, "target_url": f.target_url,
@@ -3006,8 +3011,12 @@ class TaskRunner:
             origin_host = f.target_url
 
         if not fofa_key:
+            from app.engines.sync import engine_display_name
+            disp = engine_display_name(engine_name)
             async with SessionLocal() as s:
-                await self._log(s, "killsweep", "skip", "无 FOFA key，跳过通杀分析",
+                await self._log(s, "killsweep", "skip",
+                                f"无 {disp} key，跳过通杀分析（通杀圈定依赖测绘引擎，"
+                                f"请在设置中为 {disp} 配置 key）",
                                 level="warn", finding_id=finding_id)
             return
 
@@ -3030,7 +3039,7 @@ class TaskRunner:
             hunter = KillsweepHunter(
                 finding_dict, fofa_key, llm=llm, on_event=emit,
                 src_type=src_type, cancel_event=cancel_event,
-                fofa_base_url=fofa_base_url,
+                fofa_base_url=fofa_base_url, engine=engine_name,
             )
             try:
                 return hunter.run().model_dump(mode="json")

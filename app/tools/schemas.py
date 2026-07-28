@@ -87,11 +87,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "fofa_lookup",
-            "description": "只读 FOFA 测绘：①确认目标归属(org/备案/证书)把 owner 填准；②查同 IP/同域开放的端口服务找隐藏攻击面。仅查 FOFA 不碰目标。拿裸 IP/确认不了归属时尤其有用。",
+            "description": "只读资产测绘（走任务所选引擎 FOFA/Quake/Hunter/…，统一用 FOFA 语法书写、自动翻译）：①确认目标归属(org/备案/证书)把 owner 填准；②查同 IP/同域开放的端口服务找隐藏攻击面。只测绘不碰目标。拿裸 IP/确认不了归属时尤其有用。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": 'FOFA 语法，如 ip="1.2.3.4" / host="example.com" / domain="x.com"'},
+                    "query": {"type": "string", "description": 'FOFA 语法（非 FOFA 引擎自动翻译），如 ip="1.2.3.4" / host="example.com" / domain="x.com"'},
                     "size": {"type": "integer", "description": "返回样本数，默认 10，最大 30", "default": 10},
                 },
                 "required": ["query"],
@@ -279,7 +279,7 @@ SESSION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "session_set",
-            "description": "登记已拿到的登录态(cookie 或鉴权头如 Authorization: Bearer xxx)，登记后所有 http_request 自动携带、且自动吸收响应 Set-Cookie。登录成功后先用它固化登录态，再带着登录态深挖受限接口、后台功能、枚举越权对象——只登录成功不算洞。",
+            "description": "登记已拿到的登录态(cookie 或鉴权头如 Authorization: Bearer xxx)，登记后所有 http_request 自动携带、且自动吸收响应 Set-Cookie。用泄露/用户凭证登录成功后，务必先用它固化登录态，再带着登录态深挖受限接口、后台功能、枚举越权对象——只登录成功不算洞。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -347,7 +347,7 @@ KILLSWEEP_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "fofa_search",
-            "description": "用 FOFA 语法圈定同款系统并统计规模。返回命中总量(size)和样本资产列表（host/title/org）。",
+            "description": "用 FOFA 语法圈定同款系统并统计规模（走任务所选测绘引擎，非 FOFA 自动翻译）。返回命中总量(size)和样本资产列表（host/title/org）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -500,7 +500,7 @@ ESCALATE_TOOL_SCHEMAS = [
                     "poc": {"type": "string", "description": "完整可复现 PoC（含关键 curl/请求）"},
                     "raw_request": {"type": "string", "description": "关键升级步骤的原始请求"},
                     "raw_response": {"type": "string", "description": "证明升级成功的原始响应（真实成功证据）"},
-                    "affected_scope": {"type": "string", "description": "量化影响面，如『大量用户/全部账号可被接管』"},
+                    "affected_scope": {"type": "string", "description": "量化影响面，如『2230 名教师+全部学生可被接管』"},
                     "impact_count": {"type": "integer", "description": "可量化的受影响对象数量（遍历/接管规模），无则填 0"},
                 },
                 "required": ["vuln_type", "title", "severity", "description", "poc", "raw_response"],

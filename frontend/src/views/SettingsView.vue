@@ -330,8 +330,12 @@ function resultText(item) {
   if (item.model) parts.push(item.model);
   if (item.latency_ms) parts.push(`${item.latency_ms}ms`);
   if (item.ok && item.reply) parts.push(`reply: ${item.reply}`);
+  if (item.ok && item.tool_calling) {
+    const tc = { yes: "工具调用 ✓", no: "工具调用 ✗ 该模型不支持 function calling，挖洞无法工作", unknown: "工具调用 ? 未检测到（可能不支持）" };
+    parts.push(tc[item.tool_calling] || "");
+  }
   if (!item.ok && item.error) parts.push(item.error);
-  return parts.join(" · ");
+  return parts.filter(Boolean).join(" · ");
 }
 
 function applyLlmHealthResults(results = []) {

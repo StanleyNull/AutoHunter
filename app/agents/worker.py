@@ -63,6 +63,7 @@ class Worker:
         src_type: str = "edusrc",
         fofa_key: str = "",
         fofa_base_url: str = "",
+        engine: str = "fofa",
         prompt_version: str | None = None,
         pop_directive: Optional[Callable[[], Optional[str]]] = None,
     ):
@@ -75,6 +76,7 @@ class Worker:
         self.executor = ToolExecutor(
             target, cancel_event=self.cancel_event,
             enterprise=self._enterprise, fofa_key=fofa_key, fofa_base_url=fofa_base_url,
+            engine=engine,
         )
         self.findings: list[Finding] = []
         self.on_event = on_event or (lambda kind, data: None)
@@ -367,8 +369,13 @@ class Worker:
             if not tool_calls:
                 no_tool_rounds += 1
                 if no_tool_rounds >= 6:
+                    # 全程零工具调用最常见的根因是「所选模型不支持 function calling」，
+                    # 明说出来，省得用户以为是目标无洞（在设置页「测试连接」可确认模型能力）。
+                    hint = ("（提示：若该模型全程从不调用工具，多半是它不支持 function calling，"
+                            "AutoHunter 需要支持工具调用的模型——可在设置页“测试连接”确认后更换）"
+                            if sum(self._tool_counts.values()) == 0 else "")
                     self._auto_finish(
-                        "模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。",
+                        f"模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。{hint}",
                         "model_behavior",
                     )
                     break

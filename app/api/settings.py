@@ -183,6 +183,70 @@ def _test_configs(body: LLMTestRequest) -> list[tuple[str, LLMConfig]]:
     ]
 
 
+async def _probe_tool_calling(url: str, headers: dict, model: str, protocol: str) -> str:
+    """探测模型是否支持 function/tool calling，返回 'yes' / 'no' / 'unknown'。
+
+    仅由「测试连接」按钮触发，绝不进入挖洞主循环，不影响 worker/collector 的行为与预算。
+    保守判定：真返回 tool_call 才判 'yes'；错误信息明确提到 tool/function 才判 'no'；
+    其它一律 'unknown'（不下死结论，避免把正常模型误判成不支持）。
+    """
+    import httpx
+
+    if protocol == "anthropic_messages":
+        payload = {
+            "model": model,
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Call the report_ready tool with status=ok."}],
+            "tools": [{
+                "name": "report_ready",
+                "description": "Report readiness. You must call this tool.",
+                "input_schema": {"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]},
+            }],
+        }
+    else:
+        payload = {
+            "model": model,
+            "temperature": 0,
+            "max_tokens": 64,
+            "messages": [
+                {"role": "system", "content": "You must use the provided tool to answer."},
+                {"role": "user", "content": "Call the report_ready tool with status=ok."},
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "report_ready",
+                    "description": "Report readiness. You must call this function.",
+                    "parameters": {"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]},
+                },
+            }],
+            "tool_choice": "auto",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 400 and "max_tokens" in resp.text.lower():
+                payload.pop("max_tokens", None)
+                resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code >= 400:
+            low = resp.text.lower()
+            if any(k in low for k in ("tool", "function")):
+                return "no"
+            return "unknown"
+        data = resp.json()
+        if protocol == "anthropic_messages":
+            has = any(
+                isinstance(b, dict) and b.get("type") == "tool_use"
+                for b in (data.get("content") or [])
+            )
+        else:
+            msg = ((data.get("choices") or [{}])[0].get("message") or {})
+            has = bool(msg.get("tool_calls"))
+        return "yes" if has else "unknown"
+    except Exception:
+        return "unknown"
+
+
 async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
     import httpx
 
@@ -200,6 +264,9 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
         "status_code": 0,
         "latency_ms": 0,
         "error": "",
+        # tool-calling 能力：unknown/yes/no。AutoHunter 全流程依赖 function calling，
+        # 这里在连通性 OK 后额外探一次，让配置期就能发现「模型不支持工具调用」。
+        "tool_calling": "unknown",
     }
     if not provider.api_key:
         result["error"] = "未配置 API Key"
@@ -254,6 +321,8 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
             choice = (data.get("choices") or [{}])[0]
             reply = str((choice.get("message") or {}).get("content") or choice.get("text") or "")
         result.update(ok=True, reply=reply[:80])
+        # 连通性 OK 后再探一次工具调用能力（额外一次小请求，仅测试按钮触发，不碰挖洞）。
+        result["tool_calling"] = await _probe_tool_calling(url, headers, provider.model, protocol)
         # 测试成功不清生产熔断器（否则会抹掉真实 cooldown，让 worker 立即冲击刚被限流的端点）。
         return result
     except Exception as exc:

@@ -9,14 +9,11 @@
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
 import threading
 from typing import Any, Callable, Optional
-
-import httpx
 
 from app.agents.history import compact_messages
 from app.agents.prompts import is_enterprise_src, killsweep_system_prompt
@@ -24,15 +21,10 @@ from app.llm.client import LLMClient
 from app.tools.executor import ToolExecutor
 from app.tools.schemas import KILLSWEEP_TOOL_SCHEMAS
 
-_FOFA_BASE = "https://fofa.info"
-# 通杀分析只做产品指纹、FOFA 圈定、抽样验证，必须有限轮数，避免模型递归空转。
+# 通杀分析只做产品指纹、测绘圈定、抽样验证，必须有限轮数，避免模型递归空转。
 _MAX_ROUNDS = int(os.environ.get("KILLSWEEP_MAX_ROUNDS", "30"))  # 多验证几个同款站点，给足轮数
-# 叠加到查询上、把统计限定在教育行业的条件
+# 叠加到查询上、把统计限定在教育行业的条件（FOFA 语法，非 FOFA 引擎请求前自动翻译）
 _EDU_FILTER = '(domain=".edu.cn" || cert="edu" || org="edu")'
-
-
-def _qbase64(q: str) -> str:
-    return base64.b64encode(q.encode("utf-8")).decode("ascii")
 
 
 def _normalize_host(url_or_host: str) -> str:
@@ -79,32 +71,31 @@ def _normalize_affected_table(rows: Any, vuln_type: str) -> list[dict[str, Any]]
     return out
 
 
-def _fofa_search_sync(key: str, query: str, edu_only: bool = False,
-                      size: int = 20, base_url: str | None = None) -> dict[str, Any]:
-    """同步 FOFA 查询，返回 {size, sample:[{host,title,org}], query}。"""
+def _engine_search_sync(engine_name: str, key: str, query: str, edu_only: bool = False,
+                        size: int = 20, base_url: str | None = None) -> dict[str, Any]:
+    """同步测绘查询（走任务选定引擎），返回 {size, sample:[{host,title,org}], query, engine}。
+
+    查询按 FOFA 语法书写，非 FOFA 引擎在请求前自动翻译（含 edu 圈定过滤条件）。
+    """
+    from app.engines.sync import engine_display_name, engine_search_sync, result_rows_to_dicts
+
+    disp = engine_display_name(engine_name)
     if not key:
-        return {"size": 0, "sample": [], "query": query, "error": "缺少 FOFA key"}
+        return {"size": 0, "sample": [], "query": query, "engine": engine_name,
+                "error": f"缺少 {disp} key"}
     q = f"{query} && {_EDU_FILTER}" if edu_only else query
-    base = (base_url or _FOFA_BASE).rstrip("/")
-    params = {
-        "key": key, "qbase64": _qbase64(q),
-        "fields": "host,title,org", "page": "1", "size": str(size), "full": "false",
-    }
     try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.get(f"{base}/api/v1/search/all", params=params)
-            data = resp.json()
+        res = engine_search_sync(
+            engine_name, key, q,
+            page=1, page_size=size, base_url=base_url or None,
+        )
     except Exception as e:
-        return {"size": 0, "sample": [], "query": q, "error": f"FOFA 调用失败: {e}"}
-    if data.get("error"):
-        return {"size": 0, "sample": [], "query": q, "error": data.get("errmsg", "FOFA 错误")}
+        return {"size": 0, "sample": [], "query": q, "engine": engine_name,
+                "error": f"{disp} 调用失败: {e}"}
     sample = []
-    for row in data.get("results", [])[:size]:
-        if isinstance(row, list):
-            sample.append({"host": row[0] if len(row) > 0 else "",
-                           "title": row[1] if len(row) > 1 else "",
-                           "org": row[2] if len(row) > 2 else ""})
-    return {"size": data.get("size", 0), "sample": sample, "query": q}
+    for r in result_rows_to_dicts(res, limit=size):
+        sample.append({"host": r.get("host", ""), "title": r.get("title", ""), "org": r.get("org", "")})
+    return {"size": res.size, "sample": sample, "query": q, "engine": engine_name}
 
 
 class KillsweepResult:
@@ -125,8 +116,12 @@ class KillsweepHunter:
         src_type: str = "edusrc",
         cancel_event: Optional[threading.Event] = None,
         fofa_base_url: str = "",
+        engine: str = "fofa",
     ):
         self.finding = finding
+        # 测绘引擎：通杀圈定/统计走任务选定引擎（FOFA / Quake / Hunter / …），
+        # key/base_url 为该引擎凭证，由编排层按 resolve_engine_config 注入。
+        self.engine = engine or "fofa"
         self.fofa_key = fofa_key
         self.fofa_base_url = fofa_base_url
         self.llm = llm or LLMClient()
@@ -219,8 +214,9 @@ class KillsweepHunter:
         if name == "fofa_search":
             q = args.get("query", "")
             edu = bool(args.get("edu_only", False))
-            self._emit("killsweep_fofa", query=q, edu_only=edu)
-            return _fofa_search_sync(self.fofa_key, q, edu_only=edu, base_url=self.fofa_base_url)
+            self._emit("killsweep_fofa", query=q, edu_only=edu, engine=self.engine)
+            return _engine_search_sync(self.engine, self.fofa_key, q,
+                                       edu_only=edu, base_url=self.fofa_base_url)
         if name == "http_request":
             url = args.get("url")
             if not url:
