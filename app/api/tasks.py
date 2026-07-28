@@ -15,6 +15,7 @@ from app.api.dto import (
     UpdateTaskRequest,
 )
 from app.agents import site_collab
+from app.agents.manual_targets import clean_manual_target_list
 from app.agents.prompts import normalize_src_type
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
@@ -377,7 +378,8 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
     task = Task(
         name=req.name, src_type=normalize_src_type(req.src_type), vuln_types=req.vuln_types,
         src_rules=req.src_rules, target_source=req.target_source,
-        engine=engine_name, fofa_query=req.fofa_query, manual_targets=req.manual_targets,
+        engine=engine_name, fofa_query=req.fofa_query,
+        manual_targets=clean_manual_target_list(req.manual_targets or []),
         auth_bindings=_dump_auth_bindings(req.auth_bindings),
         model_config_json=model_config,
         fofa_config=fofa_cfg, concurrency=req.concurrency,
@@ -568,7 +570,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     if req.engine is not None:
         task.engine = req.engine
     if req.manual_targets is not None:
-        task.manual_targets = [t.strip() for t in req.manual_targets if str(t).strip()]
+        task.manual_targets = clean_manual_target_list(req.manual_targets)
     if req.auth_bindings is not None:
         task.auth_bindings = _dump_auth_bindings(req.auth_bindings)
     if req.concurrency is not None:

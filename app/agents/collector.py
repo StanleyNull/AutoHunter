@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent_runtime import COLLECTOR_IO_EXECUTOR
 from app.agents import collector_llm, playbook_router, prefilter, scorer, site_collab, target_filter
 from app.agents import target_cluster
+from app.agents.manual_targets import parse_manual_targets
 from app.agents.prompts import is_enterprise_src
 from app.db.models import Target, Task
 from app.engines import get_engine, QuakeRateLimitError
@@ -36,7 +37,8 @@ def _auth_context_for(task: Task, url: str) -> dict | None:
     bindings = getattr(task, "auth_bindings", None) or []
     if not auth_bootstrap.has_any_bindings(bindings):
         return None
-    manual = [str(t).strip() for t in (task.manual_targets or []) if str(t).strip()]
+    # 用清理后的 URL 做绑定匹配，避免行尾备注/杂乱格式干扰
+    manual = [item["url"] for item in parse_manual_targets(task.manual_targets or [])]
     return auth_bootstrap.resolve_auth_context_for_target(bindings, url, manual)
 from app.llm.client import LLMClient, LLMError
 from app.settings_service import llm_client_for_task_optional, resolve_engine_config, resolve_skip_score_threshold
@@ -375,33 +377,49 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
 
     # 单站协作：同一个真实 host 按路线拆成多个 worker，不走 FOFA 翻页。
     if task.target_source == "site":
-        added += await _site_collect(session, task)
+        added += await _site_collect(session, task, progress)
         await session.commit()
         return added
 
-    # 1) 手动清单（.gov 一律跳过，其余用户指定的直接入队）
-    #    不消费 manual_targets：保留用户原始清单便于任务详情/编辑展示，且停止后
-    #    重启时能靠它把手动目标补回队列；重复入队由 seen(_existing_hosts) 去重兜住。
+    # 1) 手动清单：先清理分析（去备注/括号 IP/补协议/保路径），再查泄露凭据后入队。
+    #    不消费 manual_targets：保留清单便于任务详情/编辑与停止后补回；去重靠 seen。
     if task.target_source in ("manual", "both") and task.manual_targets:
-        for raw in task.manual_targets:
-            host = normalize_host(raw)
+        parsed = parse_manual_targets(task.manual_targets)
+        pending: list[dict] = []
+        for item in parsed:
+            host = item.get("host") or ""
+            url = item.get("url") or ""
             if not host or host in seen:
                 continue
             seen.add(host)
-            if _is_unusable(raw, host):
+            if _is_unusable(url, host):
                 continue
-            if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(raw):
+            if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(url):
                 session.add(Target(
-                    task_id=task.id, url=_ensure_url(host), host=host,
+                    task_id=task.id, url=url or _ensure_url(host), host=host,
                     source="manual", status="skipped",
                     verdict="skip_sensitive",
                     dead_reason=prefilter._SENSITIVE_SKIP_REASON,
                 ))
                 continue
-            session.add(Target(task_id=task.id, url=_ensure_url(host), host=host,
-                               source="manual", status="queued",
-                               auth_context=_auth_context_for(task, _ensure_url(host))))
-            added += 1
+            pending.append({"url": url or _ensure_url(host), "host": host})
+        if pending:
+            await progress(
+                "enrich",
+                f"手动清单：清理后 {len(pending)} 个目标，正在补充泄露凭据",
+                candidates=len(parsed),
+                survivors=len(pending),
+            )
+            await _enrich_leaked_creds(pending)
+            for c in pending:
+                url = c["url"]
+                session.add(Target(
+                    task_id=task.id, url=url, host=c["host"],
+                    source="manual", status="queued",
+                    leaked_creds=c.get("leaked_creds") or None,
+                    auth_context=_auth_context_for(task, url),
+                ))
+                added += 1
 
     # 2) FOFA 智能搜集
     if task.target_source in ("fofa", "both"):
@@ -413,36 +431,58 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     return added
 
 
-async def _site_collect(session: AsyncSession, task: Task) -> int:
+async def _site_collect(
+    session: AsyncSession,
+    task: Task,
+    progress: ProgressReporter | None = None,
+) -> int:
     """把用户给的单站目标拆成多条协作路线入队。
 
-    不消费 manual_targets，便于任务详情/编辑保留用户原始目标；靠 DB 的
-    (task_id, host, source) 唯一索引和应用层 existing_sources 防重复。
+    先走手动清单清理分析（去备注/括号 IP/补协议），再查泄露凭据挂到各路线；
+    不消费 manual_targets，靠 (task_id, host, source) 与 existing_sources 防重复。
     """
-    raw_targets = [str(t).strip() for t in (task.manual_targets or []) if str(t).strip()]
-    if not raw_targets:
+    parsed = parse_manual_targets(task.manual_targets or [])
+    if not parsed:
         return 0
-    added = 0
-    for raw in raw_targets:
-        host = normalize_host(raw)
+
+    # 先攒可打目标，统一补泄露凭据（同根域只查一次）
+    work: list[dict] = []
+    for item in parsed:
+        host = item.get("host") or ""
+        url = item.get("url") or ""
         if not host:
             continue
-        if _is_unusable(raw, host):
+        if _is_unusable(url, host):
             continue
-        if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(raw):
-            # 占住去重位，避免后续又被 FOFA/通杀塞回来
+        if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(url):
             existing = (await session.execute(
                 select(Target.source).where(Target.task_id == task.id, Target.host == host)
             )).all()
             if not existing:
                 session.add(Target(
-                    task_id=task.id, url=_ensure_url(raw), host=host,
+                    task_id=task.id, url=url or _ensure_url(host), host=host,
                     source="site", status="skipped",
                     verdict="skip_sensitive",
                     dead_reason=prefilter._SENSITIVE_SKIP_REASON,
                 ))
             continue
-        url = _ensure_url(raw)
+        work.append({"url": url or _ensure_url(host), "host": host})
+
+    if work and progress:
+        await progress(
+            "enrich",
+            f"单站协作：清理后 {len(work)} 个目标，正在补充泄露凭据",
+            candidates=len(parsed),
+            survivors=len(work),
+        )
+    if work:
+        await _enrich_leaked_creds(work)
+
+    added = 0
+    for c in work:
+        host = c["host"]
+        url = c["url"]
+        leaked = c.get("leaked_creds") or None
         existing = (await session.execute(
             select(Target.source).where(Target.task_id == task.id, Target.host == host)
         )).all()
@@ -464,6 +504,7 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
                 status="queued",
                 priority_score=route.priority,
                 priority_reason=site_collab.route_reason(route),
+                leaked_creds=leaked,
                 auth_context=_auth_context_for(task, url),
             ))
             added += 1

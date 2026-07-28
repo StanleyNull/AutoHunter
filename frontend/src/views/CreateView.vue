@@ -48,6 +48,11 @@ const inherited = reactive({
 });
 const isSiteMode = computed(() => form.target_source === "site");
 const isFofaMode = computed(() => form.target_source === "fofa");
+const manualTargetsPlaceholder = computed(() =>
+  isSiteMode.value
+    ? "https://target.example.com/\nhttps://target.example.com/admin 后台"
+    : "www.example.edu.cn\nhttps://a.eduyun.cn/path?x=1\nhttps://b.eduyun.cn/ 港澳台\n(211.153.76.118)"
+);
 // 凭据区只对「用户自己指定目标」有意义：手动 / 两者 / 单站。纯 FOFA 自动搜不展示。
 const showAuthBindings = computed(() => !isFofaMode.value);
 
@@ -260,9 +265,13 @@ onMounted(async () => {
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写：重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。&#10;例：后台在 /admin，重点测 API、越权、上传。"></textarea>
       </label>
-      <label v-if="!isFofaMode">{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
-        <textarea v-model="form.manual_targets" rows="3" :placeholder="isSiteMode ? 'https://target.example.com/' : 'http://211.84.165.243/'"></textarea>
+      <label v-if="!isFofaMode">{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个，可直接粘贴杂乱资产表）" }}
+        <textarea v-model="form.manual_targets" rows="8" :placeholder="manualTargetsPlaceholder"></textarea>
       </label>
+      <p v-if="!isFofaMode" class="field-hint">
+        入库前自动清理：去掉行尾中文备注、单独成行的括号 IP 会入队、裸域名补协议、保留路径/查询串并去重。
+        入队时会按根域查询泄露凭据，挂到目标上供 worker 使用。
+      </p>
 
       <section v-if="showAuthBindings" class="auth-bindings">
         <div class="auth-bindings-head">

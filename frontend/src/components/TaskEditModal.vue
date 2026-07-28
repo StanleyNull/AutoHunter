@@ -321,9 +321,12 @@ async function save() {
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>
       </label>
-      <label>{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
-        <textarea v-model="form.manual_targets" rows="3"></textarea>
+      <label>{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个，可粘贴杂乱资产表）" }}
+        <textarea v-model="form.manual_targets" rows="8" placeholder="支持行尾备注、括号 IP、裸域名；保存时自动清理，入队时查泄露凭据"></textarea>
       </label>
+      <p class="field-hint">
+        保存时自动清理备注/补协议/去重；搜集入队时会按根域补充泄露凭据。
+      </p>
 
       <section v-if="showAuthBindings" class="auth-bindings">
         <div class="auth-bindings-head">
