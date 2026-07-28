@@ -327,19 +327,17 @@ def _emulation_preamble(tools: list[dict[str, Any]]) -> str:
         if not name:
             continue
         try:
-            pj = json.dumps(params, ensure_ascii=False)
+            pj = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
         except Exception:
             pj = "{}"
-        lines.append(f"- {name}: {desc}\n  参数(JSON Schema): {pj}")
+        lines.append(f"- {name}: {desc} 参数: {pj}")
     tool_block = "\n".join(lines)
     return (
-        "【工具调用协议 · 必须遵守】当前模型不支持原生 function calling，改用文本模拟协议：\n"
-        "1) 需要行动时，只输出一个 ```json 代码块，格式：\n"
-        '   {"tool_calls": [{"name": "工具名", "arguments": {参数对象}}]}\n'
-        "   可包含多个调用；代码块之外不要写任何其它内容。\n"
-        "2) 不要用自然语言直接给最终结论——一切行动与结论都通过调用下列工具完成"
-        "（完成时调用对应的 finish / submit_* 工具）。\n"
-        "3) 上一步工具结果会以「[工具返回] 工具名: ...」的用户消息给你，据此继续下一步。\n\n"
+        "【工具调用协议】本模型无原生 function calling，改用文本模拟：\n"
+        "需要行动或给结论时，只输出一个 ```json 代码块，块外不写任何字符：\n"
+        '{"tool_calls":[{"name":"工具名","arguments":{...}}]}（可多个）。\n'
+        "禁止用自然语言下结论——收尾必须调用 finish / submit_* 工具。\n"
+        "工具结果以「[工具返回] 名称: ...」用户消息回传，据此继续。\n"
         "可用工具：\n" + tool_block
     )
 
