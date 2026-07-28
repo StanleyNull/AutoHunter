@@ -15,6 +15,8 @@ import hashlib
 import re
 from urllib.parse import parse_qsl, urlparse
 
+from app.urlnorm import ensure_scheme
+
 
 _SPACE_RE = re.compile(r"\s+")
 _TYPE_SPLIT_RE = re.compile(r"[\s/_\-]+")
@@ -145,19 +147,11 @@ class Fingerprint:
 
 
 def normalize_host(url_or_host: str) -> str:
-    s = (url_or_host or "").strip()
-    if not s:
-        return ""
-    if "://" not in s:
-        s = "http://" + s
+    from app.urlnorm import normalize_host as _norm
     try:
-        parsed = urlparse(s)
+        return _norm(url_or_host)
     except Exception:
-        return s.lower().strip("/")
-    host = (parsed.hostname or "").lower()
-    if parsed.port and parsed.port not in (80, 443):
-        host = f"{host}:{parsed.port}"
-    return host
+        return (url_or_host or "").lower().strip("/")
 
 
 def normalize_endpoint(url_or_host: str) -> str:
@@ -169,7 +163,7 @@ def normalize_endpoint(url_or_host: str) -> str:
     if not s:
         return ""
     if "://" not in s:
-        s = "http://" + s
+        s = ensure_scheme(s)  # 裸合法 IPv6 加方括号，避免 host 段坍缩成首个 hextet 致误去重
     try:
         parsed = urlparse(s)
     except Exception:
@@ -191,7 +185,7 @@ def normalize_endpoint_path(url_or_host: str) -> str:
     if not s:
         return ""
     if "://" not in s:
-        s = "http://" + s
+        s = ensure_scheme(s)  # 裸合法 IPv6 加方括号，避免 host 段坍缩成首个 hextet 致误去重
     try:
         parsed = urlparse(s)
     except Exception:

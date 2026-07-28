@@ -15,7 +15,6 @@ import json
 import os
 import threading
 from typing import Any, Callable, Optional
-from urllib.parse import urlparse
 
 import httpx
 
@@ -27,7 +26,7 @@ from app.tools.schemas import KILLSWEEP_TOOL_SCHEMAS
 
 _FOFA_BASE = "https://fofa.info"
 # 通杀分析只做产品指纹、FOFA 圈定、抽样验证，必须有限轮数，避免模型递归空转。
-_MAX_ROUNDS = int(os.environ.get("KILLSWEEP_MAX_ROUNDS", "24"))
+_MAX_ROUNDS = int(os.environ.get("KILLSWEEP_MAX_ROUNDS", "30"))  # 多验证几个同款站点，给足轮数
 # 叠加到查询上、把统计限定在教育行业的条件
 _EDU_FILTER = '(domain=".edu.cn" || cert="edu" || org="edu")'
 
@@ -37,19 +36,11 @@ def _qbase64(q: str) -> str:
 
 
 def _normalize_host(url_or_host: str) -> str:
-    s = (url_or_host or "").strip()
-    if not s:
-        return ""
-    if "://" not in s:
-        s = "http://" + s
+    from app.urlnorm import normalize_host as _norm
     try:
-        p = urlparse(s)
+        return _norm(url_or_host)
     except Exception:
-        return s.lower().strip("/")
-    host = (p.hostname or "").lower()
-    if p.port and p.port not in (80, 443):
-        host = f"{host}:{p.port}"
-    return host
+        return (url_or_host or "").lower().strip("/")
 
 
 def _affected_row_key(host: str, vuln_title: str, vuln_type: str) -> str:
@@ -162,7 +153,7 @@ class KillsweepHunter:
             f"- 描述：{(f.get('description') or '')[:600]}\n"
             f"- PoC：{(f.get('poc') or '')[:500]}\n"
             f"- 原始响应(片段)：{(f.get('raw_response') or '')[:800]}\n\n"
-            f"请分析这套系统能否通杀。先认指纹→FOFA 圈定+统计→实打 1 个同款站点验证→调 submit_killsweep 下结论。"
+            f"请分析这套系统能否通杀。先认指纹→FOFA 圈定+统计→实打验证几个（2~4 个）可达同款站点（能验的多验几个）→调 submit_killsweep 下结论。"
         )
 
     def run(self) -> KillsweepResult:
@@ -210,7 +201,13 @@ class KillsweepHunter:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = self._dispatch(tc.function.name, args)
+                # 工具执行异常也要落一条 tool 响应：保证 assistant.tool_calls ↔ tool 配对完整，
+                # 且异常不冒泡打断整个通杀 agent（与 worker 一致的续跑健壮性）。
+                try:
+                    result = self._dispatch(tc.function.name, args)
+                except Exception as e:
+                    result = {"ok": False, "error": f"工具执行异常: {type(e).__name__}: {e}"}
+                    self._emit("killsweep_error", error=str(e))
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                                  "content": json.dumps(result, ensure_ascii=False),
                                  "_round": rounds, "_tool": tc.function.name})

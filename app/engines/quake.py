@@ -47,6 +47,7 @@ class QuakeEngine(SearchEngine):
         page: int = 1,
         page_size: int = 100,
         base_url: str | None = None,
+        cursor: str | None = None,
     ) -> EngineResult:
         if not api_key:
             raise ValueError("缺少 Quake API Key")

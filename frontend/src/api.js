@@ -76,10 +76,6 @@ export function canWrite() {
   return authRoleRef.value === "full";
 }
 
-export function getAuthRole() {
-  return authRoleRef.value;
-}
-
 export async function loadAuthRole() {
   try {
     const res = await req("GET", "/api/auth/status");
@@ -232,6 +228,7 @@ export const api = {
   targetDetail: (taskId, targetId) => req("GET", `/api/tasks/${taskId}/targets/${targetId}/detail`),
   redigTarget: (taskId, targetId) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/redig`),
   provideCredentials: (taskId, targetId, data) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/credentials`, data),
+  skipTarget: (taskId, targetId) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/skip`),
   skipPendingTarget: (taskId, targetId) => req("POST", `/api/tasks/${taskId}/targets/${targetId}/skip`),
   targetAssistantStream: (taskId, targetId, message, onEvent) =>
     streamSSE(`/api/tasks/${taskId}/targets/${targetId}/assistant/stream`, { message }, onEvent),
@@ -251,15 +248,20 @@ export const api = {
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),
   finding: (id) => req("GET", `/api/findings/${id}`),
-  reportAssistant: (id, message) => req("POST", `/api/findings/${id}/assistant`, { message }),
   reportAssistantStream: (id, message, onEvent) =>
     streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent),
   userReview: (id, data) => req("PATCH", `/api/results/${id}`, data),
   deepen: (id, directive, force = false) => req("POST", `/api/results/${id}/deepen`, { directive, force }),
   getSettings: () => req("GET", "/api/settings"),
+  providerHealth: () => req("GET", "/api/settings/provider-health"),
   updateSettings: (data) => req("PUT", "/api/settings", data),
-  listModels: (base_url, api_key) => req("POST", "/api/settings/models", { base_url, api_key }),
-  testLLM: () => req("POST", "/api/settings/test/llm"),
+  listModels: (base_url, api_key, extra = {}) => req(
+    "POST",
+    "/api/settings/models",
+    typeof base_url === "object" ? base_url : { base_url, api_key, ...extra }
+  ),
+  taskModels: (id, data) => req("POST", `/api/tasks/${id}/models`, data),
+  testLLM: (data) => req("POST", "/api/settings/test-llm", data || undefined),
   testFOFA: () => req("POST", "/api/settings/test/fofa"),
   testSSH: () => req("POST", "/api/settings/test/ssh"),
   testEngine: (engineName) => req("POST", `/api/settings/test/engine/${engineName}`),

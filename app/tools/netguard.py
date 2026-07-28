@@ -46,11 +46,17 @@ def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = N
     raw = str(url or "").strip()
     if not raw:
         raise SsrfBlocked("空 URL")
-    parsed = urlparse(raw)
-    scheme = (parsed.scheme or "").lower()
+    try:
+        parsed = urlparse(raw)
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").strip().lower()
+    except ValueError as exc:
+        # 畸形方括号 IPv6（如 http://[250:4809:...:b092]）会让 urlparse 在解析期抛
+        # ValueError；调用方(settings_service.fetch_models)只捕获 SsrfBlocked，裸
+        # ValueError 会一路冒泡打崩配置探测。这里 fail-closed 转成 SsrfBlocked。
+        raise SsrfBlocked(f"URL 无法解析（疑似畸形 IPv6）: {raw[:80]}") from exc
     if scheme not in _ALLOWED_SCHEMES:
         raise SsrfBlocked(f"不允许的协议: {scheme or '(空)'}")
-    host = (parsed.hostname or "").strip().lower()
     if not host:
         raise SsrfBlocked("URL 缺少主机名")
 
@@ -62,8 +68,10 @@ def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = N
         raise SsrfBlocked("目标为云元数据地址，已拦截")
 
     # 逐个解析出的 IP 校验（含 IPv6、DNS 到内网的情形）。
+    from app.urlnorm import safe_port
+    port = safe_port(parsed) or (443 if scheme == "https" else 80)
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except OSError as exc:
         raise SsrfBlocked(f"主机解析失败: {host}") from exc
 

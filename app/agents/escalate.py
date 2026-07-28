@@ -120,7 +120,13 @@ class EscalateHunter:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = self._dispatch(tc.function.name, args)
+                # 工具执行异常也要落一条 tool 响应：保证 assistant.tool_calls ↔ tool 配对完整，
+                # 且异常不冒泡打断整个升级 agent（与 worker 一致的续跑健壮性）。
+                try:
+                    result = self._dispatch(tc.function.name, args)
+                except Exception as e:
+                    result = {"ok": False, "error": f"工具执行异常: {type(e).__name__}: {e}"}
+                    self._emit("escalate_error", error=str(e))
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                                  "content": json.dumps(result, ensure_ascii=False),
                                  "_round": rounds, "_tool": tc.function.name})

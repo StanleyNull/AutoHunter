@@ -73,6 +73,8 @@ _MIGRATIONS = [
     ("findings", "owner", "VARCHAR(300) DEFAULT ''"),
     ("findings", "kill_chain", "JSON"),
     ("findings", "assistant_messages", "JSON DEFAULT '[]'"),
+    ("findings", "llm_model", "VARCHAR(200) DEFAULT ''"),
+    ("findings", "llm_base_url", "VARCHAR(300) DEFAULT ''"),
     ("killsweeps", "affected_table", "JSON DEFAULT '[]'"),
     ("targets", "ip_ban_confirmed", "BOOLEAN DEFAULT 0"),
     ("targets", "auth_assessment", "JSON"),
@@ -86,6 +88,9 @@ _MIGRATIONS = [
     ("tasks", "enable_worker_fofa_lookup", "BOOLEAN DEFAULT 1"),
     ("tasks", "enable_killsweep_fofa_search", "BOOLEAN DEFAULT 1"),
     ("tasks", "cas_sso_config", "TEXT DEFAULT ''"),
+    ("tasks", "auth_bindings", "JSON"),
+    ("targets", "auth_context", "JSON"),
+    ("targets", "auth_status", "JSON"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。

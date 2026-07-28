@@ -464,7 +464,6 @@ def evaluate_target(
         priority_reason or "", profile.text_sample[:20_000],
         "\n".join(profile.frameworks or []),
     ])
-    low = combined.lower()
     active_api_paths = _active_surface_paths(profile.api_paths or [])
     active_interesting_paths = _active_surface_paths(profile.interesting_paths or [])
     api_surface = len(active_api_paths)

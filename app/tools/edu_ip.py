@@ -15,7 +15,6 @@ import sqlite3
 import threading
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
 
 _DB_PATH = Path(__file__).resolve().parent.parent / "data_static" / "edu_ip.db"
 
@@ -47,12 +46,9 @@ def _host_from_target(target: str) -> str | None:
     t = (target or "").strip()
     if not t:
         return None
-    if "://" not in t:
-        t = "http://" + t
-    try:
-        host = urlparse(t).hostname
-    except Exception:
-        host = None
+    # 走 urlnorm：裸合法 IPv6 会先补方括号，safe_hostname 才能取到完整地址而非首段。
+    from app.urlnorm import ensure_scheme, safe_hostname
+    host = safe_hostname(ensure_scheme(t))
     return host or None
 
 
@@ -83,13 +79,29 @@ def _resolve_host(host: str) -> str | None:
 
 
 def _lookup_ip(ip: str) -> sqlite3.Row | None:
+    # DB 暂不可用（瞬态：卷 late-mount / 首次连接瞬时失败）时返回 None 但【不缓存】——
+    # 否则会把这些 IP 永久缓存成 None，DB 恢复后仍查不到归属、无法自愈。
+    if _get_conn() is None:
+        return None
+    return _lookup_ip_cached(ip)
+
+
+@lru_cache(maxsize=4096)
+def _lookup_ip_cached(ip: str) -> sqlite3.Row | None:
+    # edu_ip.db 是随镜像打包的只读静态归属库，运行期不变 → 按 ip 缓存零风险，
+    # 消除评审队列/列表接口里每个 IP 目标一次同步 sqlite 查询在事件循环上的阻塞。
     conn = _get_conn()
     if conn is None:
         return None
     try:
-        n = int(ipaddress.ip_address(ip))
+        ip_obj = ipaddress.ip_address(ip)
     except ValueError:
         return None
+    # 归属库为纯 IPv4 ranges；IPv6→int 是 128bit 大整数，传给 sqlite 会抛
+    # OverflowError（此前被外层 try 吞掉）。IPv6 直接短路无归属。
+    if ip_obj.version != 4:
+        return None
+    n = int(ip_obj)
     try:
         with _read_lock:
             # 优先真高校（非噪音）；命中范围最小者最精确；无则回退含噪音
@@ -152,12 +164,6 @@ def lookup_school(target: str) -> dict | None:
         "city": row["city"],
         "ip": ip,
     }
-
-
-def school_name(target: str) -> str | None:
-    """便捷：只要主校名，查不到返回 None（同步，可能触发 DNS，勿在事件循环里直接调）。"""
-    info = lookup_school(target)
-    return info["school"] if info else None
 
 
 def _lookup_no_dns(target: str) -> dict | None:

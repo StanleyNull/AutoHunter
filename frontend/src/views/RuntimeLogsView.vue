@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { api } from "../api.js";
+import { fmtLocalTime } from "../format.js";
 
 const stats = ref({ total: 0, errors: 0, warns: 0, by_agent: {} });
 const rows = ref([]);
@@ -59,16 +60,8 @@ function prevPage() {
   loadList();
 }
 
-function fmtTime(iso) {
-  if (!iso) return "-";
-  const s = String(iso).trim();
-  // 后端存 UTC naive 时间（无 Z/偏移），需显式按 UTC 解析再转本地显示。
-  const hasTz = /[zZ]|[+-]\d{2}:\d{2}$/.test(s);
-  const d = new Date(hasTz ? s : `${s}Z`);
-  if (Number.isNaN(d.getTime())) return s.slice(0, 19).replace("T", " ");
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
+// 时间格式化统一走 format.js 的 fmtLocalTime（与其字节等价）；本地保留 fmtTime 名给模板。
+const fmtTime = fmtLocalTime;
 
 function agentLabel(a) {
   if (a === "all") return "全部 agent";

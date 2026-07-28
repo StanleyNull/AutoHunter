@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
+import { fmtLocalTime } from "../format.js";
 
 const router = useRouter();
 const stats = ref({ total: 0, submitted: 0, ready: 0, by_severity: {} });
@@ -74,11 +75,6 @@ function prevPage() {
 
 function sevMeta(s) {
   return SEV_META[(s || "").toLowerCase()] || { label: s || "未定级", hue: "ok" };
-}
-
-function fmtTime(iso) {
-  if (!iso) return "-";
-  return iso.slice(0, 19).replace("T", " ");
 }
 
 function openVuln(row) {
@@ -166,7 +162,7 @@ onMounted(reload);
         </span>
         <div class="ir-main">
           <b class="ir-primary">{{ row.title }}</b>
-          <small class="ir-secondary">{{ row.vuln_type }} · {{ row.target_url }}</small>
+          <small class="ir-secondary">{{ row.vuln_type }} · {{ row.target_url }}<template v-if="row.llm_model"> · {{ row.llm_model }}</template></small>
           <span class="ir-key">归属：{{ row.owner || "待确认" }} · 任务：{{ row.task_name || row.task_id }}</span>
           <div v-if="(row.kill_chain || []).length" class="vuln-chain" @click.stop>
             <div class="vc-flow">
@@ -188,7 +184,7 @@ onMounted(reload);
             {{ row.submitted ? "✓ 已提交" : "◷ 待提交" }}
           </span>
           <span class="ir-hit" v-if="row.confidence">{{ row.confidence }}</span>
-          <time>{{ fmtTime(row.user_reviewed_at || row.created_at) }}</time>
+          <time>{{ fmtLocalTime(row.user_reviewed_at || row.created_at) }}</time>
         </div>
       </article>
     </div>

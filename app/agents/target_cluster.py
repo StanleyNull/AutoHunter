@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import re
-from urllib.parse import urlparse
 
 CLUSTER_DEAD_THRESHOLD = int(os.environ.get("TARGET_CLUSTER_DEAD_THRESHOLD", "3"))
 CLUSTER_PENDING_LIMIT = int(os.environ.get("TARGET_CLUSTER_PENDING_LIMIT", "3"))
@@ -36,6 +35,9 @@ def root_domain(host_or_url: str) -> str:
         return ""
     # IP/localhost 不做域名拆分
     if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?", host) or host == "localhost":
+        return host
+    # IPv6(归一化后为带括号形式 [..] / [..]:port，映射型含 '.')不能按 '.' 拆域名
+    if host.startswith("["):
         return host
     labels = host.split(".")
     if len(labels) <= 2:
@@ -92,19 +94,11 @@ def pending_limit_reason(state: dict[str, int], limit: int | None = None) -> str
 
 
 def _host_only(host_or_url: str) -> str:
-    raw = (host_or_url or "").strip().lower()
-    if not raw:
-        return ""
-    if "://" not in raw:
-        raw = "http://" + raw
+    from app.urlnorm import normalize_host as _norm
     try:
-        parsed = urlparse(raw)
+        return _norm(host_or_url)
     except Exception:
-        return raw.strip("/")
-    host = parsed.hostname or ""
-    if parsed.port and parsed.port not in (80, 443):
-        return f"{host}:{parsed.port}"
-    return host
+        return (host_or_url or "").strip().lower().strip("/")
 
 
 def _norm(value: str) -> str:

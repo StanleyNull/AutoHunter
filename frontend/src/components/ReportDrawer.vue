@@ -4,9 +4,10 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, canWrite, isReadonly } from "../api.js";
 import { copyText } from "../clipboard.js";
-import { buildEdusrcToolReport, buildReportMd, buildReportPy, effectiveSeverity, reportSlug } from "../report.js";
+import { CONF, buildEdusrcToolReport, buildReportMd, buildReportPy, effectiveSeverity, reportSlug } from "../report.js";
+import { fmtLocalTime } from "../format.js";
 
-const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review
+const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review | submit | rejected | archived
 const emit = defineEmits(["close", "updated", "toast"]);
 
 const f = ref(null);
@@ -22,7 +23,6 @@ const assistantBusy = ref(false);
 const assistantMessages = ref([]);
 const DEFAULT_ASSISTANT_WELCOME = "我可以回答这份报告的证据、危害、复现、修复问题。你也可以让我再发一个请求或跑一个简短 curl 做补充验证。";
 const SEVS = ["严重", "高危", "中危", "低危"];
-const CONF = { confirmed: "确认", likely: "较可信", uncertain: "待复核" };
 const isEnterprise = computed(() => props.srcType === "enterprise");
 
 watch(() => props.findingId, async (id) => {
@@ -55,6 +55,10 @@ function renderSafeMd(text) {
   return DOMPurify.sanitize(marked.parse(text || ""));
 }
 
+function fmtFindingTime(value) {
+  return fmtLocalTime(value) || "-";
+}
+
 const html = computed(() => f.value ? renderSafeMd(buildReportMd(f.value)) : "");
 const effSev = computed(() => f.value ? effectiveSeverity(f.value) : "-");
 const review = computed(() => f.value?.review || {});
@@ -69,29 +73,37 @@ function renderAssistantMd(text) {
 }
 
 async function saveEdits() {
-  const user_edits = {
-    title: edit.value.title, description: edit.value.description,
-    affected_scope: edit.value.affected_scope,
-    steps: edit.value.steps.split("\n").map((s) => s.trim()).filter(Boolean),
-    poc: edit.value.poc,
-  };
-  await api.userReview(f.value.id, { user_edits, user_severity: userSeverity.value, user_notes: userNotes.value });
-  f.value = await api.finding(f.value.id);
-  editing.value = false;
-  emit("toast", "已保存修改");
-  emit("updated");
+  try {
+    const user_edits = {
+      title: edit.value.title, description: edit.value.description,
+      affected_scope: edit.value.affected_scope,
+      steps: edit.value.steps.split("\n").map((s) => s.trim()).filter(Boolean),
+      poc: edit.value.poc,
+    };
+    await api.userReview(f.value.id, { user_edits, user_severity: userSeverity.value, user_notes: userNotes.value });
+    f.value = await api.finding(f.value.id);
+    editing.value = false;
+    emit("toast", "已保存修改");
+    emit("updated");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function decide(status, skipKillsweep = false) {
-  const res = await api.userReview(f.value.id, {
-    user_status: status, user_severity: userSeverity.value, user_notes: userNotes.value,
-    skip_killsweep: skipKillsweep,
-  });
-  emit("toast", status === "passed"
-    ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? `（${res.killsweep_skipped_reason}）` : ""}`
-    : "已驳回");
-  emit("updated");
-  emit("close");
+  try {
+    const res = await api.userReview(f.value.id, {
+      user_status: status, user_severity: userSeverity.value, user_notes: userNotes.value,
+      skip_killsweep: skipKillsweep,
+    });
+    emit("toast", status === "passed"
+      ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? `（${res.killsweep_skipped_reason}）` : ""}`
+      : "已驳回");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function submitDeepen(force = false) {
@@ -116,17 +128,25 @@ async function submitDeepen(force = false) {
 }
 
 async function markSubmitted() {
-  await api.userReview(f.value.id, { submitted: true });
-  emit("toast", "已标记为已提交");
-  emit("updated");
-  emit("close");
+  try {
+    await api.userReview(f.value.id, { submitted: true });
+    emit("toast", "已标记为已提交");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function restore() {
-  await api.userReview(f.value.id, { user_status: "pending" });
-  emit("toast", "已恢复到复审队列");
-  emit("updated");
-  emit("close");
+  try {
+    await api.userReview(f.value.id, { user_status: "pending" });
+    emit("toast", "已恢复到复审队列");
+    emit("updated");
+    emit("close");
+  } catch (e) {
+    emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
+  }
 }
 
 async function restoreArchived() {
@@ -332,6 +352,8 @@ async function askAssistant(preset = "") {
         <section class="report-facts">
           <div><span>漏洞类型</span><b>{{ f.vuln_type }}</b></div>
           <div><span>归属单位</span><b>{{ f.edu_school || f.owner || "待确认" }}</b></div>
+          <div><span>发现时间</span><b>{{ fmtFindingTime(f.created_at) }}</b></div>
+          <div v-if="f.llm_model"><span>产出模型</span><b :title="f.llm_base_url || ''">{{ f.llm_model }}</b></div>
           <div><span>信度</span><b>{{ confidenceText }}</b></div>
           <div><span>复现步骤</span><b>{{ stepCount }}</b></div>
           <div><span>攻击链路</span><b>{{ chainCount }}</b></div>

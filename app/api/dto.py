@@ -1,16 +1,20 @@
 """API 请求/响应 DTO。"""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
 
 class ModelConfigDTO(BaseModel):
+    inherit_global: Optional[bool] = None
     base_url: str = "https://api.deepseek.com/v1"
     api_key: str = ""
     model: str = "deepseek-chat"
+    protocol: str = "auto"
     prompt_version: str = ""
+    # 任务级端点池：非空时覆盖单端点字段，走池化调度
+    providers: Optional[list[dict[str, Any]]] = None
 
 
 class FofaConfigDTO(BaseModel):
@@ -28,6 +32,18 @@ class EngineConfigDTO(BaseModel):
     base_url: str = ""
 
 
+class AuthBindingDTO(BaseModel):
+    """一条用户凭据绑定：可绑 URL/host/*，字段可空，由后端 normalize 分辨类型。"""
+    target: str = "*"
+    username: str = ""
+    password: str = ""
+    cookie: str = ""
+    authorization: str = ""
+    login_url: str = ""
+    raw: str = ""
+    note: str = ""
+
+
 class CreateTaskRequest(BaseModel):
     name: str
     src_type: str = "edusrc"
@@ -38,6 +54,7 @@ class CreateTaskRequest(BaseModel):
     engine: str = ""                                           # 搜索引擎：fofa/quake/hunter/...
     fofa_query: str = ""
     manual_targets: list[str] = Field(default_factory=list)
+    auth_bindings: list[AuthBindingDTO] = Field(default_factory=list)
     model_config_data: ModelConfigDTO = Field(default_factory=ModelConfigDTO)
     fofa_config: FofaConfigDTO = Field(default_factory=FofaConfigDTO)
     engine_config: EngineConfigDTO = Field(default_factory=EngineConfigDTO)  # 引擎 Key/URL
@@ -47,10 +64,20 @@ class CreateTaskRequest(BaseModel):
 
 
 class PartialModelConfigDTO(BaseModel):
+    inherit_global: Optional[bool] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
+    protocol: Optional[str] = None
     prompt_version: Optional[str] = None
+    providers: Optional[list[dict[str, Any]]] = None
+
+
+class TaskModelsProbeRequest(BaseModel):
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    key_ref: Optional[str] = None
+    protocol: Optional[str] = None
 
 
 class PartialFofaConfigDTO(BaseModel):
@@ -77,6 +104,7 @@ class UpdateTaskRequest(BaseModel):
     engine: Optional[str] = None                                 # 切换引擎
     fofa_query: Optional[str] = None
     manual_targets: Optional[list[str]] = None
+    auth_bindings: Optional[list[AuthBindingDTO]] = None
     model_config_data: Optional[PartialModelConfigDTO] = None
     fofa_config: Optional[PartialFofaConfigDTO] = None
     engine_config: Optional[PartialEngineConfigDTO] = None
@@ -118,6 +146,7 @@ class TaskResponse(BaseModel):
     src_rules: str = ""
     cas_sso_config: str = ""
     manual_targets: list[str] = Field(default_factory=list)
+    auth_bindings: list[dict] = Field(default_factory=list)
     model_config_data: dict = Field(default_factory=dict)
     fofa_config: dict = Field(default_factory=dict)
     engine_config: dict = Field(default_factory=dict)
@@ -142,10 +171,13 @@ class TaskResponse(BaseModel):
 
 
 class LLMSettingsDTO(BaseModel):
+    mode: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
+    protocol: Optional[str] = None
     temperature: Optional[float] = None
+    providers: Optional[list[dict[str, Any]]] = None
 
 
 class FofaSettingsDTO(BaseModel):

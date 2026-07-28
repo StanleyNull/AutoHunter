@@ -13,7 +13,13 @@ from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
-from app.api.dto import CreateTaskRequest, TaskResponse, TaskStats, UpdateTaskRequest
+from app.api.dto import (
+    CreateTaskRequest,
+    TaskModelsProbeRequest,
+    TaskResponse,
+    TaskStats,
+    UpdateTaskRequest,
+)
 from app.api.findings import (
     _clip_json, _clip_text, _consume_future_exception,
     _finding_dict, _run_report_assistant_loop, REPORT_ASSISTANT_TOOLS,
@@ -27,7 +33,23 @@ from app.db.session import get_session
 from app.llm.usage import usage_snapshot, usage_snapshot_by_model
 from app.orchestrator import manager
 from app.security import resolve_role, token_from_headers
-from app.settings_service import llm_client_for_task, resolve_engine_config, resolve_llm_config, resolve_worker_prompt_version, resolve_pricing
+from app.settings_service import (
+    _clean_llm_providers,
+    _llm_identity,
+    _preserve_provider_keys,
+    _public_llm_provider,
+    is_masked_secret,
+    list_available_models,
+    llm_client_for_task,
+    normalize_llm_protocol,
+    resolve_engine_config,
+    resolve_llm_config,
+    resolve_llm_providers,
+    resolve_llm_runtime_mode,
+    resolve_pricing,
+    resolve_worker_prompt_version,
+    secret_ref,
+)
 from app.tools.executor import ToolExecutor
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -45,6 +67,7 @@ _STREAM_IMPORTANT_KINDS = frozenset({
     "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
     "retest_start", "retest_phase2", "retest_sleep", "retest_wake", "retest_done",
     "retest_sleep_log", "retest_ip_banned", "retest_dead", "retest_recover",
+    "auth_status",
 })
 
 
@@ -109,6 +132,17 @@ def _llm_usage_by_model_with_cost(task_id: str) -> list[dict]:
     return result
 
 
+def _model_inherits_global(cfg: dict) -> bool:
+    if cfg.get("inherit_global") is not None:
+        return bool(cfg.get("inherit_global"))
+    if cfg.get("providers"):
+        return False
+    return not any(
+        str(cfg.get(key) or "").strip()
+        for key in ("api_key", "providers_json", "base_url", "model", "protocol")
+    )
+
+
 def _mask_label(label: str) -> str:
     """观摩展示用：单个域名 label 保留少量轮廓，其余打 *。"""
     label = (label or "").strip()
@@ -127,7 +161,9 @@ def _observer_host(host: str) -> str:
     if not s:
         return ""
     port = ""
-    if ":" in s and not s.startswith("["):
+    from app.urlnorm import is_bare_ipv6
+    # 裸 IPv6(多冒号)不能 rsplit(':',1)——会把末段 hextet 误当端口剥掉。
+    if ":" in s and not s.startswith("[") and not is_bare_ipv6(s):
         h, maybe_port = s.rsplit(":", 1)
         if maybe_port.isdigit():
             s, port = h, f":{maybe_port}"
@@ -136,7 +172,7 @@ def _observer_host(host: str) -> str:
         return ".".join(parts[:2] + ["*", "*"]) + port
     if len(parts) <= 1:
         return _mask_label(s) + port
-    # 保留公共后缀，业务/学校/子域 label 全部局部打码，例如 xb.ymun.edu.cn -> x*.y**n.edu.cn
+    # 保留公共后缀，业务/学校/子域 label 全部局部打码，例如 xb.ymun.edu.cn -> x*.y***.edu.cn
     keep_suffix = 2 if parts[-2:] in (["edu", "cn"], ["com", "cn"], ["net", "cn"], ["org", "cn"], ["gov", "cn"]) else 1
     masked = [_mask_label(p) for p in parts[:-keep_suffix]] + parts[-keep_suffix:]
     return ".".join(masked) + port
@@ -173,11 +209,22 @@ def _observer_ip(ip: str) -> str:
 
 def _public_model_config(task: Task) -> dict:
     cfg = resolve_llm_config(task)
+    raw_cfg = dict(task.model_config_json or {})
+    inherit = _model_inherits_global(raw_cfg)
+    task_providers = _clean_llm_providers(
+        raw_cfg.get("providers") or raw_cfg.get("providers_json") or []
+    )
     return {
         "base_url": cfg.base_url,
         "model": cfg.model,
+        "protocol": cfg.protocol,
         "api_key_set": bool(cfg.api_key),
+        "key_ref": secret_ref(cfg.api_key),
+        "provider_count": len(resolve_llm_providers(task)),
+        "providers": [_public_llm_provider(item) for item in task_providers],
+        "mode": resolve_llm_runtime_mode(task),
         "prompt_version": resolve_worker_prompt_version(task),
+        "inherit_global": inherit,
     }
 
 
@@ -202,6 +249,37 @@ def _public_fofa_config(task: Task) -> dict:
     }
 
 
+def _dump_auth_bindings(items) -> list[dict]:
+    """把创建/更新请求里的凭据绑定规范成可落库的 list[dict]（保留原文便于回显编辑）。"""
+    out: list[dict] = []
+    for item in items or []:
+        d = item.model_dump() if hasattr(item, "model_dump") else dict(item or {})
+        target = str(d.get("target") or "*").strip() or "*"
+        row = {
+            "target": target,
+            "username": str(d.get("username") or "").strip(),
+            "password": str(d.get("password") or "").strip(),
+            "cookie": str(d.get("cookie") or "").strip(),
+            "authorization": str(d.get("authorization") or "").strip(),
+            "login_url": str(d.get("login_url") or "").strip(),
+            "raw": str(d.get("raw") or "").strip(),
+            "note": str(d.get("note") or "").strip(),
+        }
+        if not any(row[k] for k in ("username", "password", "cookie", "authorization", "raw")):
+            continue
+        out.append(row)
+    return out
+
+
+def _public_auth_bindings(task: Task, observer: bool = False) -> list[dict]:
+    if observer:
+        return []
+    rows = task.auth_bindings or []
+    if not isinstance(rows, list):
+        return []
+    return [dict(x) for x in rows if isinstance(x, dict)]
+
+
 def _task_to_dto(t: Task, stats: TaskStats | None = None,
                  pending_user_review: int = 0, pending_archived: int = 0,
                  pending_input: int = 0, observer: bool = False,
@@ -221,6 +299,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         src_rules="" if observer else (t.src_rules or ""),
         cas_sso_config="" if observer else (t.cas_sso_config or ""),
         manual_targets=[] if observer else (t.manual_targets or []),
+        auth_bindings=_public_auth_bindings(t, observer=observer),
         model_config_data=model_config,
         fofa_config=_observer_fofa_config() if observer else _public_fofa_config(t),
         engine_config={} if observer else {"engine": t.engine or ""},
@@ -333,11 +412,44 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         fofa_cfg["key"] = eng_cfg["key"]
     if eng_cfg.get("base_url"):
         fofa_cfg["base_url"] = eng_cfg["base_url"]
+    inherit_global = req.model_config_data.inherit_global
+    raw_providers = list(req.model_config_data.providers or [])
+    has_providers = bool(raw_providers)
+    if inherit_global is None:
+        inherit_global = not bool(
+            (req.model_config_data.model_fields_set
+             & {"base_url", "api_key", "model", "protocol", "providers"})
+            or has_providers
+        )
+    if inherit_global:
+        model_config = req.model_config_data.model_dump(exclude_defaults=True)
+        model_config = {k: v for k, v in model_config.items() if k == "prompt_version"}
+        model_config["inherit_global"] = True
+    elif has_providers:
+        cleaned = _clean_llm_providers(raw_providers)
+        if not cleaned:
+            raise HTTPException(400, "端点池至少需要一个配置完整且已启用的 LLM 端点")
+        if not any(item.get("enabled", True) for item in cleaned):
+            raise HTTPException(400, "端点池至少需要启用一个端点")
+        model_config = {
+            "inherit_global": False,
+            "providers": cleaned,
+        }
+        if req.model_config_data.prompt_version:
+            model_config["prompt_version"] = req.model_config_data.prompt_version
+    else:
+        model_config = req.model_config_data.model_dump(
+            exclude={"inherit_global", "providers"},
+            exclude_unset=True,
+        )
+        model_config.pop("providers", None)
+        model_config["inherit_global"] = False
     task = Task(
         name=req.name, src_type=normalize_src_type(req.src_type), vuln_types=req.vuln_types,
         src_rules=req.src_rules, cas_sso_config=req.cas_sso_config, target_source=req.target_source,
         engine=engine_name, fofa_query=req.fofa_query, manual_targets=req.manual_targets,
-        model_config_json=req.model_config_data.model_dump(exclude_defaults=True),
+        auth_bindings=_dump_auth_bindings(req.auth_bindings),
+        model_config_json=model_config,
         fofa_config=fofa_cfg, concurrency=req.concurrency,
         enable_worker_fofa_lookup=req.enable_worker_fofa_lookup,
         enable_killsweep_fofa_search=req.enable_killsweep_fofa_search,
@@ -347,6 +459,59 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
     await session.commit()
     await session.refresh(task)
     return _task_to_dto(task)
+
+
+@router.post("/{task_id}/models")
+async def probe_task_models(
+    task_id: str,
+    body: TaskModelsProbeRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    config = resolve_llm_config(task)
+    base_url = str(body.base_url or config.base_url or "").strip()
+    protocol = normalize_llm_protocol(body.protocol or config.protocol)
+    api_key = str(body.api_key or "").strip()
+    if is_masked_secret(api_key):
+        api_key = ""
+    key_ref = str(body.key_ref or "").strip()
+    if not api_key:
+        # 端点池：按 key_ref + 身份匹配「任意」任务级端点，不能只认 resolve_llm_config 的第一个
+        raw_cfg = dict(task.model_config_json or {})
+        task_providers = _clean_llm_providers(
+            raw_cfg.get("providers") or raw_cfg.get("providers_json") or []
+        )
+        want = _llm_identity(base_url, protocol)
+        for item in task_providers:
+            candidate = str(item.get("api_key") or "").strip()
+            if not candidate:
+                continue
+            if _llm_identity(item.get("base_url"), item.get("protocol")) != want:
+                continue
+            if key_ref and secret_ref(candidate) != key_ref:
+                continue
+            api_key = candidate
+            break
+        if not api_key:
+            same_identity = want == _llm_identity(config.base_url, config.protocol)
+            same_ref = bool(key_ref and key_ref == secret_ref(config.api_key))
+            if same_identity and (not key_ref or same_ref) and config.api_key:
+                api_key = config.api_key
+        if not api_key:
+            # 再兜底系统配置里的同身份密钥（任务端点可能与系统池共用）
+            return await list_available_models(
+                base_url=base_url,
+                api_key="",
+                protocol=protocol,
+                key_ref=key_ref or None,
+            )
+    return await list_available_models(
+        base_url=base_url,
+        api_key=api_key,
+        protocol=protocol,
+    )
 
 
 @router.get("", response_model=list[TaskResponse])
@@ -539,6 +704,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         task.engine = req.engine
     if req.manual_targets is not None:
         task.manual_targets = [t.strip() for t in req.manual_targets if str(t).strip()]
+    if req.auth_bindings is not None:
+        task.auth_bindings = _dump_auth_bindings(req.auth_bindings)
     if req.concurrency is not None:
         task.concurrency = max(1, min(int(req.concurrency), 20))
     if req.enable_worker_fofa_lookup is not None:
@@ -549,15 +716,85 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     old_query = task.fofa_query or ""
     if req.fofa_query is not None:
         task.fofa_query = req.fofa_query
+        # 改语法后清 exhausted，允许重新翻页（即使本次未带 fofa_config patch）
+        if req.fofa_query != old_query:
+            fc = dict(task.fofa_config or {})
+            fc.pop("current_query", None)
+            fc["cursor"] = 0
+            fc["history"] = []
+            fc.pop("empty_streak", None)
+            fc.pop("empty_query_streak", None)
+            fc.pop("fofa_exhausted", None)
+            task.fofa_config = fc
 
     if req.model_config_data is not None:
         patch = req.model_config_data.model_dump(exclude_unset=True)
         cfg = dict(task.model_config_json or {})
-        for key in ("base_url", "model"):
-            if key in patch and patch[key] is not None:
-                cfg[key] = str(patch[key]).strip()
-        if str(patch.get("api_key") or "").strip():
-            cfg["api_key"] = str(patch["api_key"]).strip()
+        current_runtime = resolve_llm_config(task)
+        current_identity = _llm_identity(
+            current_runtime.base_url, current_runtime.protocol
+        )
+        prompt_version = cfg.get("prompt_version")
+        if "prompt_version" in patch and patch.get("prompt_version") is not None:
+            prompt_version = str(patch["prompt_version"]).strip()
+
+        wants_single = (
+            patch.get("inherit_global") is False
+            or any(k in patch for k in ("base_url", "api_key", "model", "protocol"))
+        ) and not ("providers" in patch and patch.get("providers") is not None)
+
+        if patch.get("inherit_global") is True:
+            cfg = {"inherit_global": True}
+            if prompt_version:
+                cfg["prompt_version"] = prompt_version
+        elif "providers" in patch and patch.get("providers") is not None:
+            old_providers = _clean_llm_providers(
+                cfg.get("providers") or cfg.get("providers_json") or []
+            )
+            preserved = _preserve_provider_keys(patch.get("providers") or [], old_providers)
+            cleaned = _clean_llm_providers(preserved)
+            if not cleaned:
+                raise HTTPException(400, "端点池至少需要一个配置完整且已启用的 LLM 端点")
+            if not any(item.get("enabled", True) for item in cleaned):
+                raise HTTPException(400, "端点池至少需要启用一个端点")
+            cfg = {
+                "inherit_global": False,
+                "providers": cleaned,
+            }
+            if prompt_version:
+                cfg["prompt_version"] = prompt_version
+        elif wants_single:
+            # 单端点覆盖：清掉任务级端点池，写入 base_url/model/key
+            cfg.pop("providers", None)
+            cfg.pop("providers_json", None)
+            cfg["inherit_global"] = False
+            next_identity = _llm_identity(
+                patch.get("base_url")
+                if patch.get("base_url") is not None
+                else cfg.get("base_url") or current_runtime.base_url,
+                patch.get("protocol")
+                if patch.get("protocol") is not None
+                else cfg.get("protocol") or current_runtime.protocol,
+            )
+            supplied_key = str(patch.get("api_key") or "").strip()
+            has_new_key = bool(supplied_key and not is_masked_secret(supplied_key))
+            if current_identity != next_identity and not has_new_key:
+                cfg.pop("api_key", None)
+            for key in ("base_url", "model", "protocol"):
+                if key in patch and patch[key] is not None:
+                    value = str(patch[key]).strip()
+                    cfg[key] = normalize_llm_protocol(value) if key == "protocol" else value
+            if has_new_key:
+                cfg["api_key"] = supplied_key
+            if prompt_version:
+                cfg["prompt_version"] = prompt_version
+        else:
+            # 仅改 prompt_version 等非模式字段，保留原 inherit/providers/single
+            if "prompt_version" in patch:
+                if prompt_version:
+                    cfg["prompt_version"] = prompt_version
+                else:
+                    cfg.pop("prompt_version", None)
         task.model_config_json = cfg
 
     if req.engine_config is not None:
@@ -586,9 +823,13 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
                 raise HTTPException(400, "intent_mode 必须是空/syntax/intent")
             cfg["intent_mode"] = intent_mode
         if req.fofa_query is not None and req.fofa_query != old_query:
+            # 与上方 fofa_query 变更清理保持一致（可能已被清过，幂等）
             cfg.pop("current_query", None)
             cfg["cursor"] = 0
             cfg["history"] = []
+            cfg.pop("empty_streak", None)
+            cfg.pop("empty_query_streak", None)
+            cfg.pop("fofa_exhausted", None)
         task.fofa_config = cfg
 
     await session.commit()
@@ -740,6 +981,16 @@ async def task_board(task_id: str, request: Request, session: AsyncSession = Dep
         "site_collab": site_overview,
         "retest_summary": retest_summary,
     }
+
+
+@router.post("/{task_id}/targets/{target_id}/skip")
+async def skip_target(task_id: str, target_id: str):
+    """人工从看板删除某个目标：取消其正在进行的挖掘（若有）并标记跳过，使其不再被派发、
+    回队或被 collector 重新收集。仅影响【本任务】的目标列表，不影响其它任务与已挖到的漏洞。"""
+    res = await manager.skip_target(task_id, target_id)
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error") or "无法删除该目标")
+    return res
 
 
 @router.get("/{task_id}/targets")

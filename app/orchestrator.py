@@ -45,6 +45,7 @@ from app.settings_service import (
     llm_client_for_task,
     resolve_fofa_base_url,
     resolve_fofa_key,
+    resolve_llm_runtime_mode,
     resolve_proxy_config,
     resolve_worker_prompt_version,
 )
@@ -252,11 +253,24 @@ def _log_bg_task_exc(task: asyncio.Future, label: str) -> None:
                      exc_info=(type(exc), exc, exc.__traceback__))
 
 
+def _bracket_ipv6_host(host: str) -> str:
+    """裸 IPv6 加方括号，避免拼进 URL 后被 urlparse/httpx 误当 host:port。
+
+    形如 `250:4809:3:fcfc:feff:febc:b092` 的裸 IPv6，直接拼 `http://<ip>` 会让
+    解析器把最后一段当端口 → `ValueError: Port could not be cast to integer`。
+    """
+    from app.urlnorm import bracket_ipv6_host
+    return bracket_ipv6_host(host)
+
+
 def _with_scheme(url_or_host: str) -> str:
     s = (url_or_host or "").strip()
     if not s:
         return ""
-    return s if "://" in s else f"http://{s}"
+    if "://" in s:
+        return s
+    from app.urlnorm import ensure_scheme
+    return ensure_scheme(s)
 
 
 def _swap_url_scheme(url: str) -> str:
@@ -385,8 +399,12 @@ def _probe_target_liveness(url: str, host: str, timeout: float, proxy_config=Non
     }
 
 
-def _llm_for_task(task: Task) -> LLMClient:
-    return llm_client_for_task(task)
+def _llm_for_task(task: Task, on_provider_failure=None, on_provider_selected=None) -> LLMClient:
+    return llm_client_for_task(
+        task,
+        on_provider_failure=on_provider_failure,
+        on_provider_selected=on_provider_selected,
+    )
 
 
 class TaskRunner:
@@ -420,6 +438,10 @@ class TaskRunner:
         self._queue_liveness_ok_until: dict[str, float] = {}
         # 5xx 等临时预筛失败不进终态 skipped，只做短冷却，稍后再探。
         self._queue_prefilter_retry_after: dict[str, float] = {}
+        # 端点池全部冷却时按 worker 返回的 retry-after 暂缓该目标，不消耗普通重试次数。
+        self._llm_provider_retry_after: dict[str, float] = {}
+        # 全池不可用是任务级条件；冷却期间不要让其它 queued 目标逐个启动再回队。
+        self._llm_pool_retry_after: float = 0
 
     def live_workers(self) -> list[dict]:
         return list(self._live.values())
@@ -460,8 +482,97 @@ class TaskRunner:
         await bus.publish(self.task_id, {"agent": agent, "kind": kind, "level": level,
                                          "message": message, "ts": _now_iso(), **payload})
 
+    @staticmethod
+    def _llm_payload(llm: LLMClient, model_role: str) -> dict:
+        config = getattr(llm, "selected_provider", None)
+        return {
+            "model_role": model_role,
+            "model": getattr(config, "model", "") or "",
+            "base_url": getattr(config, "base_url", "") or "",
+        }
+
+    @staticmethod
+    def _finding_llm_fields(*, model: str = "", base_url: str = "") -> dict:
+        """写入 Finding 的模型归因字段（端点池模式下用于事后查看哪个洞由哪个模型打出）。"""
+        return {
+            "llm_model": str(model or "").strip()[:200],
+            "llm_base_url": str(base_url or "").strip()[:300],
+        }
+
+    def _live_llm_fields(self, target_id: str) -> dict:
+        state = self._live.get(target_id) or {}
+        return self._finding_llm_fields(
+            model=state.get("model") or "",
+            base_url=state.get("model_base_url") or state.get("base_url") or "",
+        )
+
+    def _provider_selected_callback(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        target_id: str,
+        model_role: str,
+    ):
+        def on_selected(info: dict) -> None:
+            def apply_selection() -> None:
+                state = self._live.get(target_id)
+                if not state:
+                    return
+                state["model_role"] = model_role
+                state["model"] = str(info.get("model") or "")
+                state["model_base_url"] = str(info.get("base_url") or "")
+
+            loop.call_soon_threadsafe(apply_selection)
+
+        return on_selected
+
+    def _provider_failure_callback(self, loop: asyncio.AbstractEventLoop, agent: str, **extra):
+        def on_failure(info: dict) -> None:
+            payload = {**(info or {}), **extra}
+            future = asyncio.run_coroutine_threadsafe(
+                self._record_provider_failure(agent, payload),
+                loop,
+            )
+            future.add_done_callback(_consume_task_exception)
+        return on_failure
+
+    async def _record_provider_failure(self, agent: str, payload: dict) -> None:
+        model = payload.get("model") or ""
+        base_url = payload.get("base_url") or ""
+        kind = payload.get("kind") or "failed"
+        consecutive = int(payload.get("consecutive_failures") or 0)
+        cooldown_seconds = int(payload.get("cooldown_seconds") or 0)
+        transition = payload.get("transition") or ""
+        pool_mode = bool(payload.get("pool_mode"))
+        if transition in {"cooldown_probe_failed", "behavior_cooldown_started"}:
+            message = (
+                f"LLM 进入冷却：{model} @ {base_url}"
+                f"（{kind}，连续失败 {consecutive} 次，冷却 {cooldown_seconds} 秒）"
+            )
+        elif pool_mode:
+            message = (
+                f"LLM 端点运行失败，正在尝试池内其它端点：{model} @ {base_url}"
+                f"（{kind}，连续失败 {consecutive} 次）"
+            )
+        else:
+            # 单端点：不要提「池内换端」，沿用普通失败文案
+            message = (
+                f"LLM 调用失败：{model} @ {base_url}"
+                f"（{kind}，连续失败 {consecutive} 次）"
+            )
+        event_payload = dict(payload)
+        event_payload["error_kind"] = event_payload.pop("kind", kind)
+        async with SessionLocal() as session:
+            await self._log(
+                session,
+                agent,
+                "llm_provider_failed",
+                message,
+                level="error",
+                **event_payload,
+            )
+
     async def recover(self, session: AsyncSession) -> None:
-        """重启恢复：assigned/scanning → queued；不动已有 Finding/Review。"""
+        """重启恢复：assigned/scanning → queued（超重试上限则转 dead 硬骨头库）；不动已有 Finding/Review。"""
         rows = (await session.execute(
             select(Target).where(
                 Target.task_id == self.task_id, Target.status.in_(["assigned", "scanning"])
@@ -586,7 +697,17 @@ class TaskRunner:
                     **payload,
                 )
 
-            added = await collector.refill(session, task, LOW_WATERMARK, progress_cb=collector_progress)
+            added = await collector.refill(
+                session,
+                task,
+                LOW_WATERMARK,
+                progress_cb=collector_progress,
+                on_provider_failure=self._provider_failure_callback(
+                    asyncio.get_running_loop(),
+                    "collector",
+                    model_role="搜集模型",
+                ),
+            )
 
             # FOFA 账号连续无效达阈值 → 自动暂停任务，不再空转刷无效请求。
             fofa_fail = int((task.fofa_config or {}).get("fofa_auth_fail_count", 0))
@@ -1254,9 +1375,16 @@ class TaskRunner:
         # 多取一批是为了遇到同款系统正在跑/已冷却时，能跳到其它 cluster。
         loop = asyncio.get_running_loop()
         now = loop.time()
+        if self._llm_pool_retry_after > now:
+            return None
+        self._llm_pool_retry_after = 0
         if self._queue_prefilter_retry_after:
             self._queue_prefilter_retry_after = {
                 tid: until for tid, until in self._queue_prefilter_retry_after.items() if until > now
+            }
+        if self._llm_provider_retry_after:
+            self._llm_provider_retry_after = {
+                tid: until for tid, until in self._llm_provider_retry_after.items() if until > now
             }
         candidates = (await session.execute(
             select(Target).where(Target.task_id == self.task_id, Target.status == "queued")
@@ -1265,24 +1393,43 @@ class TaskRunner:
         if not candidates:
             return None
 
-        all_targets = (await session.execute(
-            select(Target).where(
-                Target.task_id == self.task_id,
-                Target.status.in_(["queued", "assigned", "scanning", "dead", "skipped"]),
-            )
-        )).scalars().all()
-        cluster_state = self._cluster_state(all_targets)
-        active_clusters = {
-            target_cluster.target_cluster_key(t.host or t.url, t.title, t.org)
-            for t in all_targets
-            if t.status in ("assigned", "scanning")
-        }
-        active_clusters.discard("")
+        # 是否真的需要簇状态：仅当【非企业】且本批存在“受同款簇冷却/并发限流”的候选时才需要。
+        # 企业模式、或本批候选全是 manual/深挖/单站时，下面的全表 load + O(总目标数) 遍历
+        # 结果永远不会被读取（见下方按目标的同款簇冷却/并发限流守卫），此处直接短路，避免长跑越跑越慢。
+        need_cluster = (not self._is_enterprise) and any(
+            (not t.deepen_context and t.source != "manual"
+             and not site_collab.is_site_source(t.source)
+             and target_cluster.target_cluster_key(t.host or t.url, t.title, t.org))
+            for t in candidates
+        )
+        if need_cluster:
+            # 只取簇计算用到的列，不再水化不断增长的 dead/skipped 完整 ORM 实体。
+            all_targets = (await session.execute(
+                select(
+                    Target.host, Target.url, Target.title, Target.org,
+                    Target.status, Target.verdict, Target.dead_reason, Target.last_error,
+                ).where(
+                    Target.task_id == self.task_id,
+                    Target.status.in_(["queued", "assigned", "scanning", "dead", "skipped"]),
+                )
+            )).all()
+            cluster_state = self._cluster_state(all_targets)
+            active_clusters = {
+                target_cluster.target_cluster_key(t.host or t.url, t.title, t.org)
+                for t in all_targets
+                if t.status in ("assigned", "scanning")
+            }
+            active_clusters.discard("")
+        else:
+            cluster_state = {}
+            active_clusters = set()
 
         skipped_cooldown = 0
         eligible: list[Target] = []
         for target in candidates:
             if self._queue_prefilter_retry_after.get(target.id, 0) > now:
+                continue
+            if self._llm_provider_retry_after.get(target.id, 0) > now:
                 continue
             key = target_cluster.target_cluster_key(target.host or target.url, target.title, target.org)
             # 企业模式：目标多为用户指定的具体资产（pre-paycenter/test-gateway 等不同子系统），
@@ -1702,6 +1849,43 @@ class TaskRunner:
         for tid in target_ids:
             self._worker_cancel_events.pop(tid, None)
 
+    async def skip_target(self, target_id: str, reason: str = "用户手动删除该目标") -> dict:
+        """人工从看板删除某个目标：取消其在跑 worker（若有），并把目标标记 skipped——
+        使其不再被派发、回队或被 collector 重新收集。仅影响本任务的目标列表。
+
+        依赖 _cancelled_targets：被取消 worker 的迟到结果在 _run_worker_inner 里会被丢弃、
+        不会把 skipped 覆盖回 queued/done（已挖到的 findings 仍由 salvage 单独保住，不丢洞）。
+        """
+        async with SessionLocal() as session:
+            tgt = await session.get(Target, target_id)
+            if not tgt or tgt.task_id != self.task_id:
+                return {"ok": False, "error": "目标不存在或不属于该任务"}
+            host = tgt.host or tgt.url or target_id
+            # 1) 取消在跑 worker（若有）：标记 cancelled + 触发 cancel_event + 取消协程 + 清活态
+            self._cancelled_targets.add(target_id)
+            if ev := self._worker_cancel_events.get(target_id):
+                ev.set()
+            if t := self._active_workers.pop(target_id, None):
+                t.cancel()
+            self._live.pop(target_id, None)
+            self._worker_last_activity.pop(target_id, None)
+            self._worker_cancel_events.pop(target_id, None)
+            # 2) 标 skipped：_pop_queued 只取 queued，故不再派发；collector 的 seen 含 skipped，
+            #    故不会被重新收集回来（这正是“回收完还继续跑”的修复点）。
+            tgt.status = "skipped"
+            tgt.verdict = "user_skipped"
+            tgt.assigned_worker = ""
+            tgt.heartbeat_at = None
+            tgt.dead_reason = (reason or "用户手动删除")[:300]
+            tgt.last_error = ""
+            await session.commit()
+            await self._log(
+                session, "orchestrator", "target_skipped",
+                f"用户从看板删除目标 {host}，已跳过（取消挖掘，不再派发/回队/收集）",
+                level="warn", target_id=target_id, host=host,
+            )
+        return {"ok": True, "target_id": target_id, "host": host}
+
     def _cancel_review_tasks(self, reason: str) -> None:
         for finding_id, task in list(self._review_tasks.items()):
             task.cancel()
@@ -1998,7 +2182,7 @@ class TaskRunner:
         # follow-up 自己也会上报 coverage，避免无限派生。
         if (tgt.source or "").startswith("site_f"):
             return 0
-        base_url = tgt.url or (f"https://{tgt.host}" if tgt.host else "")
+        base_url = tgt.url or (f"https://{_bracket_ipv6_host(tgt.host)}" if tgt.host else "")
         specs = site_collab.followup_specs_from_coverage(coverage_items, base_url=base_url, max_specs=8)
         if not specs:
             return 0
@@ -2144,6 +2328,12 @@ class TaskRunner:
             st["last_activity_at"] = _now_iso()
             if "round" in data:
                 st["round"] = data["round"]
+            if data.get("model"):
+                st["model"] = data["model"]
+            if data.get("base_url"):
+                st["model_base_url"] = data["base_url"]
+            if data.get("model_role"):
+                st["model_role"] = data["model_role"]
             if kind == "tool_http":
                 st["action"] = f"HTTP {data.get('method','GET')} {data.get('url','')}"
             elif kind == "tool_shell":
@@ -2178,6 +2368,11 @@ class TaskRunner:
                 st["action"] = f"记录情报: {data.get('intel_kind','')}"
             elif kind == "worker_finish":
                 st["action"] = f"收尾: {data.get('verdict','')}"
+            elif kind == "auth_status":
+                st["auth"] = data.get("status") or ""
+                st["auth_kinds"] = ",".join(data.get("kinds") or [])
+                st["auth_label"] = (data.get("reason") or data.get("message") or "")[:160]
+                st["action"] = data.get("message") or f"凭据: {data.get('status')}"
 
         def emit(kind: str, data: dict):
             if cancel_event.is_set():
@@ -2187,17 +2382,31 @@ class TaskRunner:
                 if cancel_event.is_set():
                     return
                 try:
+                    payload = {
+                        **(data or {}),
+                        **self._llm_payload(llm, "挖掘模型"),
+                    }
                     # finding_submitted 携带完整 finding：实时落库（不丢洞），并从看板推送里剥离大字段。
-                    finding_payload = data.pop("finding", None) if kind == "finding_submitted" else None
+                    finding_payload = payload.pop("finding", None) if kind == "finding_submitted" else None
                     if finding_payload:
+                        # submit 当下的 selected_provider 写入洞记录，端点池切换后仍可追溯
+                        llm_meta = self._llm_payload(llm, "挖掘模型")
+                        finding_payload = {
+                            **finding_payload,
+                            "_llm_model": llm_meta.get("model") or "",
+                            "_llm_base_url": llm_meta.get("base_url") or "",
+                        }
                         ft = asyncio.create_task(
                             self._persist_single_finding(task_id, target_id, finding_payload)
                         )
                         # 观测异常：finding 实时落库失败必须留痕，否则真洞可能静默丢失。
                         ft.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_single_finding"))
-                    _update_live(kind, data)
+                    if kind == "auth_status":
+                        at = asyncio.create_task(self._persist_auth_status(target_id, dict(payload)))
+                        at.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_auth_status"))
+                    _update_live(kind, payload)
                     pt = asyncio.create_task(bus.publish(
-                        task_id, {"agent": "worker", "kind": kind, "target_id": target_id, **data}))
+                        task_id, {"agent": "worker", "kind": kind, "target_id": target_id, **payload}))
                     pt.add_done_callback(lambda f: _log_bg_task_exc(f, "bus.publish"))
                 except Exception:
                     logger.warning("TaskRunner[%s] emit dispatch failed target=%s kind=%s",
@@ -2234,7 +2443,12 @@ class TaskRunner:
                     "leaked_creds": tgt.leaked_creds or [],
                     "user_credentials": tgt.user_credentials or None,
                     "cas_sso_config": (task_obj.cas_sso_config if task_obj else "") or "",
+                    "auth_context": tgt.auth_context or None,
+                    "user_auth": tgt.auth_context or None,
                 }
+                if tgt.auth_status:
+                    self._live[target_id]["auth"] = (tgt.auth_status or {}).get("status") or ""
+                    self._live[target_id]["auth_label"] = (tgt.auth_status or {}).get("reason") or ""
                 try:
                     plan = playbook_router.route_target(
                         url=tgt.url or url,
@@ -2287,7 +2501,16 @@ class TaskRunner:
                     self._live[target_id]["action"] = "🔁 定向深挖启动中…"
                 duplicate_history = await self._build_duplicate_history(session, task_id, tgt)
                 await session.commit()
-            llm = _llm_for_task(task_obj)
+            llm = _llm_for_task(
+                task_obj,
+                on_provider_failure=self._provider_failure_callback(
+                    loop, "worker", target_id=target_id
+                ),
+                on_provider_selected=self._provider_selected_callback(
+                    loop, target_id, "挖掘模型"
+                ),
+            )
+            self._live[target_id].update(self._llm_payload(llm, "挖掘模型"))
             prompt_version = resolve_worker_prompt_version(task_obj)
 
         worker_holder: dict[str, Worker] = {}
@@ -2307,7 +2530,7 @@ class TaskRunner:
             finally:
                 # 正常完成的清理：只杀残留子进程，绝不 set cancel_event。
                 # （历史事故根因：这里曾调 cancel_running() 顺带 set 了 cancel_event，
-                #  导致每个正常完成的 worker 都被 L680 判成"被取消"而丢弃结果，
+                #  导致每个正常完成的 worker 都被下方 externally_cancelled 判定误判为"被取消"而丢弃结果，
                 #  findings/done 永远为 0、出洞概率暴跌。）
                 worker.executor.kill_processes()
 
@@ -2369,11 +2592,17 @@ class TaskRunner:
             worker = worker_holder.get("worker")
             if worker:
                 worker.executor.cancel_running()
+            result = {"verdict": "timeout", "findings": [], "error": timeout_reason}
             try:
-                await asyncio.wait_for(asyncio.shield(worker_future), timeout=WORKER_CLEANUP_TIMEOUT)
+                cleaned = await asyncio.wait_for(asyncio.shield(worker_future), timeout=WORKER_CLEANUP_TIMEOUT)
+                # 超时回收后仍要保住已出洞 + 进度快照，避免「挖了一半全丢」
+                if isinstance(cleaned, dict):
+                    if cleaned.get("findings"):
+                        result["findings"] = cleaned.get("findings") or []
+                    if cleaned.get("resume_context"):
+                        result["resume_context"] = cleaned.get("resume_context") or {}
             except Exception:
                 worker_future.add_done_callback(_consume_task_exception)
-            result = {"verdict": "timeout", "findings": [], "error": timeout_reason}
             async with SessionLocal() as s:
                 await self._log(s, "worker", "timeout",
                                 f"目标超时强制回收：{timeout_reason}，已触发工具子进程清理",
@@ -2432,6 +2661,9 @@ class TaskRunner:
             "started_at": live_snapshot.get("started_at"),
             "finished_at": _now_iso(),
             "duration_seconds": max(0.0, loop.time() - started_monotonic),
+            "model": live_snapshot.get("model") or "",
+            "base_url": live_snapshot.get("model_base_url") or live_snapshot.get("base_url") or "",
+            "model_role": live_snapshot.get("model_role") or "挖掘模型",
         })
         await self._persist_worker_result(task_id, target_id, final_result)
 
@@ -2469,6 +2701,7 @@ class TaskRunner:
                             kill_chain=f.get("kill_chain", []),
                             self_check=f.get("self_check", {}),
                             dedup_key=dedup_key, status="pending_review",
+                            **self._live_llm_fields(target_id),
                         ))
                     saved += 1
                 except IntegrityError:
@@ -2478,6 +2711,43 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "salvage",
                                 f"被取消的 worker 抢救落库 {saved} 个漏洞（目标 {target_id[:8]}）",
                                 level="warn", target_id=target_id, saved=saved)
+
+    async def _persist_auth_status(self, target_id: str, payload: dict) -> None:
+        """把凭据使用反馈落到 Target.auth_status + TaskEvent（无明文），刷新后仍可见。"""
+        if not payload:
+            return
+        safe = {
+            "used": bool(payload.get("used")),
+            "matched": bool(payload.get("matched")),
+            "status": str(payload.get("status") or "")[:40],
+            "kinds": list(payload.get("kinds") or [])[:8],
+            "matched_by": str(payload.get("matched_by") or "")[:40],
+            "binding_target": str(payload.get("binding_target") or "")[:200],
+            "reason": str(payload.get("reason") or payload.get("message") or "")[:300],
+            "cookie_names": list(payload.get("cookie_names") or [])[:30],
+            "header_names": list(payload.get("header_names") or [])[:20],
+        }
+        msg = str(payload.get("message") or "").strip()
+        if not msg:
+            from app.agents.auth_bootstrap import format_auth_status_message
+            msg = format_auth_status_message(safe)
+        try:
+            async with SessionLocal() as session:
+                tgt = await session.get(Target, target_id)
+                if not tgt:
+                    return
+                tgt.auth_status = safe
+                session.add(TaskEvent(
+                    task_id=self.task_id,
+                    agent="worker",
+                    kind="auth_status",
+                    level="info" if safe["status"] in ("injected", "login_ok") else "warn",
+                    message=msg[:500],
+                    payload={"target_id": target_id, "host": tgt.host, **safe},
+                ))
+                await session.commit()
+        except Exception:
+            logger.warning("persist_auth_status failed target=%s", target_id[:8], exc_info=True)
 
     async def _persist_single_finding(self, task_id: str, target_id: str, f: dict) -> None:
         """worker 每 submit 一个洞就实时落库，进程被打断时不丢洞。
@@ -2499,6 +2769,12 @@ class TaskRunner:
                 if duplicate:
                     return
                 dedup_key = dedup.dedup_key(target_ref, f)
+                llm_fields = self._finding_llm_fields(
+                    model=f.get("_llm_model") or f.get("llm_model") or "",
+                    base_url=f.get("_llm_base_url") or f.get("llm_base_url") or "",
+                )
+                if not llm_fields["llm_model"] and not llm_fields["llm_base_url"]:
+                    llm_fields = self._live_llm_fields(target_id)
                 try:
                     async with session.begin_nested():
                         session.add(Finding(
@@ -2513,12 +2789,14 @@ class TaskRunner:
                             kill_chain=f.get("kill_chain", []),
                             self_check=f.get("self_check", {}),
                             dedup_key=dedup_key, status="pending_review",
+                            **llm_fields,
                         ))
                     await session.commit()
                 except IntegrityError:
                     return
-                logger.info("[realtime_persist] target=%s title=%s 实时落库成功",
-                            target_id[:8], (f.get("title") or "")[:40])
+                logger.info("[realtime_persist] target=%s title=%s model=%s 实时落库成功",
+                            target_id[:8], (f.get("title") or "")[:40],
+                            llm_fields.get("llm_model") or "-")
         except Exception:
             logger.warning("[realtime_persist] target=%s 实时落库失败（整轮 result 仍会兜底）",
                             target_id[:8], exc_info=True)
@@ -2640,6 +2918,12 @@ class TaskRunner:
             findings = result.get("findings", [])
             error_text = result.get("error") or ""
             summary_text = result.get("summary") or ""
+            failure_kind = str(result.get("failure_kind") or "").strip()
+            provider_cooldown = (
+                verdict == Verdict.error.value
+                and not findings
+                and result.get("failure_kind") == "provider_cooldown"
+            )
             auto_converged = (
                 verdict == Verdict.no_vuln.value
                 and not findings
@@ -2657,7 +2941,15 @@ class TaskRunner:
             transient_llm_error = (
                 verdict == Verdict.error.value
                 and not findings
-                and self._is_transient_worker_error(error_text)
+                and not provider_cooldown
+                and (
+                    failure_kind in {
+                        "model_behavior", "tool_argument",
+                        "rate_limit", "timeout", "network", "upstream",
+                        "blocked", "unknown",
+                    }
+                    or self._is_transient_worker_error(error_text)
+                )
             )
             # 自动深挖回火标记（worker 突破有线索时设置，用于日志）。
             auto_deepen_info = None
@@ -2671,6 +2963,24 @@ class TaskRunner:
                 if cnt > MAX_TRANSIENT_LLM_REQUEUE:
                     transient_llm_error = False
                     transient_exhausted = True
+
+            runtime = result.get("_runtime") if isinstance(result.get("_runtime"), dict) else {}
+            runtime_model = str(runtime.get("model") or "").strip()
+            runtime_base_url = str(runtime.get("base_url") or "").strip()
+            if runtime_model or runtime_base_url:
+                session.add(TaskEvent(
+                    task_id=task_id,
+                    agent="worker",
+                    kind="worker_model",
+                    level="info",
+                    message="",
+                    payload={
+                        "target_id": target_id,
+                        "model": runtime_model,
+                        "base_url": runtime_base_url,
+                        "model_role": str(runtime.get("model_role") or "挖掘模型"),
+                    },
+                ))
 
             # 落 Finding（含漏洞级去重；DB 唯一索引兜底，逐条 savepoint 容错并发重复）
             for f in findings:
@@ -2692,6 +3002,10 @@ class TaskRunner:
                             kill_chain=f.get("kill_chain", []),
                             self_check=f.get("self_check", {}),
                             dedup_key=dedup_key, status="pending_review",
+                            **self._finding_llm_fields(
+                                model=f.get("_llm_model") or f.get("llm_model") or runtime_model,
+                                base_url=f.get("_llm_base_url") or f.get("llm_base_url") or runtime_base_url,
+                            ),
                         ))
                 except IntegrityError:
                     continue  # 唯一索引拦下并发/重复，跳过即可
@@ -2777,7 +3091,24 @@ class TaskRunner:
                 tgt.heartbeat_at = None
                 tgt.last_error = error_text[:500]
                 tgt.dead_reason = ""
+                self._apply_resume_context(tgt, result)
                 await self._stop_task_for_quota(session, error_text, target_id=target_id)
+            elif provider_cooldown:
+                retry_after = max(1, int(result.get("retry_after_seconds") or 0))
+                self._llm_provider_retry_after[target_id] = (
+                    asyncio.get_running_loop().time() + retry_after
+                )
+                self._llm_pool_retry_after = max(
+                    self._llm_pool_retry_after,
+                    asyncio.get_running_loop().time() + retry_after,
+                )
+                tgt.verdict = ""
+                tgt.status = "queued"
+                tgt.assigned_worker = ""
+                tgt.heartbeat_at = None
+                tgt.last_error = error_text[:500]
+                tgt.dead_reason = ""
+                self._apply_resume_context(tgt, result)
             elif transient_llm_error:
                 tgt.verdict = ""
                 tgt.status = "queued"
@@ -2785,9 +3116,12 @@ class TaskRunner:
                 tgt.heartbeat_at = None
                 tgt.last_error = error_text[:500]
                 tgt.dead_reason = ""
+                self._apply_resume_context(tgt, result)
             else:
                 tgt.verdict = verdict
             if quota_llm_error:
+                pass
+            elif provider_cooldown:
                 pass
             elif transient_llm_error:
                 pass
@@ -2826,13 +3160,17 @@ class TaskRunner:
                 no_vuln_retry_reason = self._no_vuln_retry_reason(tgt)
                 if (_is_actionable_worker_deepen_lead(deepen_lead) and verdict == Verdict.no_vuln.value
                         and tgt.deepen_count < DEEPEN_CAP):
+                    _prev_dctx = tgt.deepen_context or {}
+                    _prev_origin_fid = _prev_dctx.get("from_finding_id") or ""
+                    _prev_origin_src = _prev_dctx.get("source") or ""
                     tgt.deepen_context = {
                         "directive": deepen_lead,
                         "vuln_type": "",
                         "original_title": "",
                         "original_summary": summary_text[:1000],
-                        "from_finding_id": "",
-                        "source": "worker_lead",
+                        # 链式深挖时携带上一轮 AI/人工深挖的前身 finding，使终态救回仍能定位原始线索
+                        "from_finding_id": _prev_origin_fid,
+                        "source": _prev_origin_src if _prev_origin_src in ("ai", "user") else "worker_lead",
                     }
                     tgt.deepen_count += 1
                     tgt.verdict = ""
@@ -2886,6 +3224,7 @@ class TaskRunner:
                     tgt.heartbeat_at = None
                     tgt.last_error = (result.get("error") or summary_text or "worker 超时，回队重试")[:500]
                     tgt.dead_reason = ""
+                    self._apply_resume_context(tgt, result)
                     worker_requeue_info = (tgt.host, "worker 超时", tgt.retry_count)
                 else:
                     tgt.status = "dead"
@@ -2911,6 +3250,16 @@ class TaskRunner:
             # 目标已离开「持续临时错误」状态（成功/无果/置dead），清理回队计数避免泄漏累积。
             if not transient_llm_error:
                 self._transient_llm_requeue.pop(target_id, None)
+            # LLM 端点池：本目标退出冷却态时清理其任务级 retry_after（PR #12）。
+            if not provider_cooldown:
+                self._llm_provider_retry_after.pop(target_id, None)
+            # 深挖回炉终态救回：目标已置 dead 且本轮没产出可替代的新 finding 时，把被
+            # superseded 的深挖前身复位为可人工复审——避免「AI 判定值得深挖」的好线索在
+            # 深挖没打穿后永久沉底、对所有人工面板不可见（对应问题：打回深挖未升级丢洞）。
+            revived_origin_fid = None
+            produced_new_finding = (verdict == Verdict.found.value) or bool(findings)
+            if tgt.status == "dead" and not produced_new_finding:
+                revived_origin_fid = await self._revive_deepen_origin(session, tgt)
             await session.commit()
             if auto_deepen_info:
                 host, dc, lead = auto_deepen_info
@@ -2921,6 +3270,15 @@ class TaskRunner:
                 await self._log(session, "orchestrator", "quota_stop",
                                 f"LLM/API 额度不足，任务已自动停止: {error_text[:120]}",
                                 level="error", target_id=target_id, verdict="quota_stop", findings=0)
+            elif provider_cooldown:
+                retry_after = max(1, int(result.get("retry_after_seconds") or 0))
+                task_row = await session.get(Task, self.task_id)
+                pool_mode = resolve_llm_runtime_mode(task_row) == "pool"
+                cooldown_label = "模型端点池冷却" if pool_mode else "LLM 暂时不可用"
+                await self._log(session, "worker", "target_requeued",
+                                f"目标 {tgt.host} 因{cooldown_label}回队，约 {retry_after} 秒后重试: "
+                                f"{error_text[:120]}",
+                                level="warn", target_id=target_id, verdict="retry", findings=0)
             elif transient_llm_error:
                 await self._log(session, "worker", "target_requeued",
                                 f"目标 {tgt.host} 因临时 LLM 错误回队列(第 "
@@ -2956,26 +3314,85 @@ class TaskRunner:
                 await self._log(session, "worker", "target_done",
                                 f"目标 {tgt.host} 完成: {verdict}, {len(findings)} 个漏洞",
                                 target_id=target_id, verdict=verdict, findings=len(findings))
+            if revived_origin_fid:
+                await self._log(session, "orchestrator", "deepen_origin_revived",
+                                f"目标 {tgt.host} 深挖回炉未升级，已复位原线索到「AI 未采纳」归档供人工复审",
+                                level="info", target_id=target_id, finding_id=revived_origin_fid)
+
+    async def _revive_deepen_origin(self, session: AsyncSession, tgt: Target) -> str | None:
+        """深挖回炉走到终态(dead)且本轮未产出可替代的新 finding 时，把原始被 superseded 的
+        finding 复位为可人工复审。仅处理 AI/人工深挖来源(deepen_context 带 from_finding_id)；
+        worker_lead 自动深挖无前身 finding，不涉及。返回被复活的 finding_id 或 None。"""
+        dctx = tgt.deepen_context or {}
+        origin_fid = (dctx.get("from_finding_id") or "").strip()
+        origin_src = (dctx.get("source") or "").strip()
+        if not origin_fid or origin_src not in ("ai", "user"):
+            return None
+        origin = await session.get(Finding, origin_fid)
+        if origin is None or origin.status != "superseded":
+            return None
+        # superseded→reviewed：落进「AI 未采纳」归档(深挖未果·置顶)，可一键恢复到复审队列
+        origin.status = "reviewed"
+        orv = (await session.execute(
+            select(Review).where(Review.finding_id == origin_fid)
+        )).scalar_one_or_none()
+        if orv is not None:
+            orv.reviewer_notes = (
+                (orv.reviewer_notes or "").rstrip()
+                + "\n[系统] 深挖回炉未升级，已复位原线索为可人工复审（深挖未果，疑似好洞）。"
+            ).strip()
+        return origin_fid
+
+    @staticmethod
+    def _apply_resume_context(tgt: Target, result: dict) -> None:
+        """LLM 中断回队时，把 worker 进度快照写入 deepen_context，下一轮续挖。"""
+        resume = result.get("resume_context") if isinstance(result.get("resume_context"), dict) else {}
+        if not resume:
+            return
+        prev = dict(tgt.deepen_context or {})
+        cookies = resume.get("session_cookies") if isinstance(resume.get("session_cookies"), dict) else {}
+        headers = resume.get("session_headers") if isinstance(resume.get("session_headers"), dict) else {}
+        notes = str(resume.get("worker_notes") or "")[:4000]
+        directive = str(
+            resume.get("directive")
+            or prev.get("directive")
+            or "上一轮因 LLM 中断，请从工作笔记与会话态继续，不要从头泛扫。"
+        )[:2000]
+        tgt.deepen_context = {
+            "directive": directive,
+            "vuln_type": prev.get("vuln_type") or "",
+            "original_title": prev.get("original_title") or "LLM中断续挖",
+            "original_summary": str(
+                resume.get("original_summary") or notes or prev.get("original_summary") or ""
+            )[:1000],
+            "from_finding_id": prev.get("from_finding_id") or "",
+            "source": "llm_interrupt",
+            "worker_notes": notes,
+            "session_cookies": cookies,
+            "session_headers": headers,
+            "rounds_done": int(resume.get("rounds_done") or 0),
+        }
 
     @staticmethod
     def _is_transient_worker_error(error: str) -> bool:
         text = (error or "").lower()
-        if not any(k in text for k in ("llm 调用失败", "llm 请求", "llm 网络", "llm 上游")):
+        if not any(k in text for k in ("llm 调用失败", "llm 请求", "llm 网络", "llm 上游", "llm 端点")):
             return False
         if TaskRunner._is_quota_error(error):
             return False
-        if any(k in text for k in ("api key", "unauthorized", "无效", "无权限", "invalid")):
+        if any(k in text for k in ("api key", "unauthorized", "无权限", "invalid api")):
             return False
         markers = (
             "rate limit", "限流", "too many requests", "429",
             "timeout", "timed out", "超时",
             "network", "connection", "连接失败",
             "temporarily", "temporary", "upstream", "临时异常", "上游",
+            "冷却", "cooldown", "blocked", "策略", "cyber",
             # 模型服务偶发抽风返回的「未知错误」也是临时性的：不该消耗 retry/置 dead，
             # 否则模型一抖动就把还能挖的目标白白打死（实测 20 个目标这么死的）。
             "未知错误", "模型服务返回", "底层细节已脱敏",
         )
-        return "llm 调用失败" in text and any(m in text for m in markers)
+        return any(m in text for m in markers)
 
     @staticmethod
     def _is_quota_error(error: str) -> bool:
@@ -3020,6 +3437,12 @@ class TaskRunner:
             select(Finding).where(Finding.task_id == self.task_id, Finding.status == "pending_review").limit(5)
         )).scalars().all()
         now = asyncio.get_running_loop().time()
+        # 顺带清扫已过期的 review backoff 条目：exp<=now 与“不存在（默认 0）”在下方
+        # `.get(f.id, 0) > now` 判定里完全等价，删除是纯内存回收、100% 行为不变，
+        # 避免长任务里 _review_backoff 只增不删的慢泄漏。
+        if self._review_backoff:
+            for _expired_fid in [k for k, exp in self._review_backoff.items() if exp <= now]:
+                del self._review_backoff[_expired_fid]
         for f in pending:
             if f.id in self._review_inflight:
                 continue
@@ -3057,7 +3480,12 @@ class TaskRunner:
                 kill_chain=f.kill_chain or [], self_check=f.self_check or {},
                 owner=f.owner or "",
             )
-            llm = _llm_for_task(task_obj)
+            llm = _llm_for_task(
+                task_obj,
+                on_provider_failure=self._provider_failure_callback(
+                    loop, "reviewer", finding_id=finding_id
+                ),
+            )
 
         def emit(kind: str, data: dict):
             asyncio.run_coroutine_threadsafe(
@@ -3223,7 +3651,12 @@ class TaskRunner:
                                 level="warn", finding_id=finding_id)
             return
 
-        llm = _llm_for_task(await self._get_task(task_id))
+        llm = _llm_for_task(
+            await self._get_task(task_id),
+            on_provider_failure=self._provider_failure_callback(
+                loop, "killsweep", finding_id=finding_id
+            ),
+        )
         cancel_event = threading.Event()
         self._killsweep_cancel_events[finding_id] = cancel_event
 
@@ -3360,6 +3793,11 @@ class TaskRunner:
         host = collector.normalize_host(url)
         if not host or host == collector.normalize_host(origin):
             return False
+        from app.urlnorm import is_unusable_host
+        if is_unusable_host(url) or is_unusable_host(host):
+            return False
+        if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(url):
+            return False
         exists = (await session.execute(
             select(Target).where(Target.task_id == task_id, Target.host == host)
         )).scalar_one_or_none()
@@ -3417,7 +3855,12 @@ class TaskRunner:
                 "kill_chain": f.kill_chain, "severity": orig_severity,
             }
 
-        llm = _llm_for_task(await self._get_task(task_id))
+        llm = _llm_for_task(
+            await self._get_task(task_id),
+            on_provider_failure=self._provider_failure_callback(
+                loop, "escalation", finding_id=finding_id
+            ),
+        )
         cancel_event = threading.Event()
         self._escalation_cancel_events[finding_id] = cancel_event
 
@@ -3534,6 +3977,8 @@ class TaskRunner:
                         kill_chain=finding_payload["kill_chain"],
                         self_check={},
                         dedup_key=new_key, status="pending_review",
+                        llm_model=getattr(origin, "llm_model", "") or "",
+                        llm_base_url=getattr(origin, "llm_base_url", "") or "",
                     ))
                 await session.commit()
             except IntegrityError:
@@ -3560,6 +4005,27 @@ class OrchestratorManager:
 
     def get_runner(self, task_id: str) -> "TaskRunner | None":
         return self._runners.get(task_id)
+
+    async def skip_target(self, task_id: str, target_id: str,
+                          reason: str = "用户手动删除该目标") -> dict:
+        """删除/跳过某任务下的一个目标。任务在运行→交给 runner（会取消在跑 worker）；
+        任务已暂停/停止（无活跃 runner）→ 直接改 DB 状态即可（无 worker 需取消）。"""
+        runner = self.get_runner(task_id)
+        if runner is not None:
+            return await runner.skip_target(target_id, reason)
+        async with SessionLocal() as session:
+            tgt = await session.get(Target, target_id)
+            if not tgt or tgt.task_id != task_id:
+                return {"ok": False, "error": "目标不存在或不属于该任务"}
+            host = tgt.host or tgt.url or target_id
+            tgt.status = "skipped"
+            tgt.verdict = "user_skipped"
+            tgt.assigned_worker = ""
+            tgt.heartbeat_at = None
+            tgt.dead_reason = (reason or "用户手动删除")[:300]
+            tgt.last_error = ""
+            await session.commit()
+        return {"ok": True, "target_id": target_id, "host": host}
 
     def diagnostic_snapshot(self) -> dict:
         return {

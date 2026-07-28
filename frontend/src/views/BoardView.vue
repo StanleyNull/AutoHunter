@@ -5,7 +5,8 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
-import { effectiveSeverity, buildReportMd, buildReportPy, reportSlug } from "../report.js";
+import { effectiveSeverity, buildReportMd, buildReportPy, buildEdusrcToolReport, reportSlug } from "../report.js";
+import { fmtLocalTime } from "../format.js";
 import ReportDrawer from "../components/ReportDrawer.vue";
 import TaskEditModal from "../components/TaskEditModal.vue";
 import { showToast } from "../toast.js";
@@ -13,7 +14,7 @@ import { showToast } from "../toast.js";
 const props = defineProps({ id: String });
 const router = useRouter();
 const task = ref(null);
-const tab = ref("board");          // board | review | submit | killsweep | rejected
+const tab = ref("board");          // board | review | submit | killsweep | rejected | archived
 const boardPanel = ref("workers"); // workers | stream（手机端看板切换）
 const events = ref([]);
 const liveWorkers = ref([]);       // 在跑 worker 活态
@@ -308,11 +309,6 @@ async function loadTabData(t = tab.value) {
   markTabLoaded(t);
 }
 
-function refreshTabData() {
-  if (isListTab(tab.value)) return loadTabData(tab.value);
-  return Promise.resolve();
-}
-
 function shouldRefreshTab(t) {
   return tab.value === t || loadedTabs.value.has(t);
 }
@@ -417,10 +413,11 @@ const IMPORTANT_KINDS = new Set([
   "reproduce_start", "reproduce_done",
   "killsweep_start", "killsweep_done", "killsweep_error", "killsweep_dedup",
   "killsweep_invalid", "killsweep_cancelled",
-  "llm_error", "quota_stop", "reclaim", "recover", "workers_cancelled",
+  "llm_error", "llm_soft_retry", "llm_interrupt", "worker_resume", "llm_provider_failed", "quota_stop", "reclaim", "recover", "workers_cancelled",
   "tool_exception",
   "retest_start", "retest_phase2", "retest_sleep", "retest_wake", "retest_done",
   "retest_sleep_log", "retest_ip_banned", "retest_dead", "retest_recover",
+  "auth_status",
 ]);
 const NOISE_KINDS = new Set([
   "ping",
@@ -477,10 +474,39 @@ function fmtEvent(ev) {
     case "killsweep_dedup": return `通杀分析去重：${d.product || ""}`;
     case "killsweep_invalid": return `通杀记录已标记无效：${d.product || ""}`;
     case "llm_error": return `⚠ LLM 调用失败: ${d.error || ""}`;
+    case "llm_soft_retry": return `LLM 软重试 ${d.attempt || "?"}/${d.max_attempts || "?"}（${d.kind || "retry"}，等 ${d.wait_seconds || 0}s）: ${(d.error || "").slice(0, 120)}`;
+    case "llm_interrupt": return `LLM 中断收尾${d.has_resume ? "（已保存进度）" : ""}: ${(d.error || "").slice(0, 120)}`;
+    case "worker_resume": return `断点续挖：恢复笔记 ${d.notes_len || 0} 字 / cookie ${(d.cookies || []).length} / 头 ${(d.headers || []).length}`;
+    case "llm_provider_failed": return `LLM 端点失败: ${d.model || ""} @ ${d.base_url || ""} (${d.error_kind || "failed"})`;
     case "tool_exception": return `工具异常: ${d.tool || ""} ${(d.error || "").slice(0, 80)}`;
+    case "auth_status": {
+      const kinds = (d.kinds || []).join(",") || "-";
+      const st = d.status || "?";
+      if (d.message) return d.message;
+      if (st === "injected") return `凭据[${kinds}] 已注入`;
+      if (st === "login_ok") return `凭据[${kinds}] 登录成功`;
+      if (st === "login_fail") return `凭据[${kinds}] 登录失败：${(d.reason || "").slice(0, 100)}`;
+      return `凭据未使用：${(d.reason || "").slice(0, 100)}`;
+    }
     case "ping": return null;
     default: return ev.message || `${ev.kind || ""}`;
   }
+}
+
+function authBadge(w) {
+  const st = w?.auth || "";
+  if (!st) return "";
+  if (st === "injected") return "凭据·已注入";
+  if (st === "login_ok") return "凭据·登录成功";
+  if (st === "login_fail") return "凭据·登录失败";
+  if (st === "unused") return "凭据·未匹配";
+  return `凭据·${st}`;
+}
+function authBadgeClass(w) {
+  const st = w?.auth || "";
+  if (st === "injected" || st === "login_ok") return "ok";
+  if (st === "login_fail") return "bad";
+  return "muted";
 }
 
 function phaseStateText(state) {
@@ -527,7 +553,8 @@ function connectWs() {
   ws = new WebSocket(wsUrl(props.id));
   ws.onopen = () => { wsReconnectAttempt = 0; };
   ws.onmessage = (e) => {
-    const ev = JSON.parse(e.data);
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }   // 畸形帧不炸整个处理器
     if (ev.kind === "ping") return;
     if (!isImportantEvent(ev)) return;
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
@@ -644,9 +671,13 @@ async function ctl(action) {
     showToast(`「${task.value?.name || "该任务"}」任务已完成`);
     return;
   }
-  await api[action](props.id);
-  toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
-  await Promise.all([loadTask(), loadBoard()]);
+  try {
+    await api[action](props.id);
+    toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
+    await Promise.all([loadTask(), loadBoard()]);
+  } catch (e) {
+    toast(`操作失败：${e?.message || e}`);   // 403/网络失败给用户反馈，别静默
+  }
 }
 
 // ===== Target 面板 =====
@@ -932,6 +963,24 @@ function openSubmit(id) { drawerId.value = id; drawerMode.value = "submit"; }
 function openRejected(id) { drawerId.value = id; drawerMode.value = "rejected"; }
 function openArchived(id) { drawerId.value = id; drawerMode.value = "archived"; }
 function openDiscarded(id) { drawerId.value = id; drawerMode.value = "discarded"; }
+async function skipTarget(w) {
+  if (readonly.value) return;
+  const host = w.host || w.target_id;
+  const ok = window.confirm(
+    `确认删除目标「${host}」？\n\n` +
+    `· 立即取消它正在进行的挖掘，并跳过该目标（之后不再重新派发、回队，也不会被自动搜集回来）。\n` +
+    `· 仅对【本任务】的目标列表生效，不影响其它任务，也不影响已挖到的漏洞。`
+  );
+  if (!ok) return;
+  try {
+    await api.skipTarget(props.id, w.target_id);
+    liveWorkers.value = liveWorkers.value.filter((x) => x.target_id !== w.target_id);
+    toast(`已删除目标 ${host}，将跳过`);
+  } catch (e) {
+    toast(`删除失败：${e?.message || e}`);
+  }
+}
+
 async function restoreArchived(id) {
   try {
     await api.restoreArchived(id);
@@ -1013,6 +1062,9 @@ function assetRows(k) {
 }
 function assetStatusLabel(status) {
   return status === "verified" ? "已验证" : "候选";
+}
+function verifiedCount(k) {
+  return assetRows(k).filter((r) => r.status === "verified").length;
 }
 function formatTokenCount(n) {
   const v = Number(n || 0);
@@ -1145,11 +1197,13 @@ async function exportAll() {
     toast("正在生成 Markdown 文件...");
     const reports = await fetchAllSubmitReports();
     const md = reports.map((f) => buildReportMd(f)).join("\n\n---\n\n");
-  const blob = new Blob([md], { type: "text/markdown" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `autohunter-${props.id.slice(0, 8)}-submit.md`;
-  a.click();
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `autohunter-${props.id.slice(0, 8)}-submit.md`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);   // 释放 object URL，避免内存泄漏
     toast(`已导出 ${reports.length} 份报告`);
   } finally {
     bulkWorking.value = false;
@@ -1180,11 +1234,13 @@ async function exportEdusrcAll() {
     toast("正在生成 reports.json...");
     const reports = await fetchAllSubmitReports();
     const text = JSON.stringify(edusrcReports(reports), null, 2);
-  const blob = new Blob([text], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `autohunter-${props.id.slice(0, 8)}-edusrc-reports.json`;
-  a.click();
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `autohunter-${props.id.slice(0, 8)}-edusrc-reports.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);   // 释放 object URL，避免内存泄漏
     toast(`已导出 ${reports.length} 份 EduSRC JSON`);
   } finally {
     bulkWorking.value = false;
@@ -1351,6 +1407,15 @@ const retestCard = computed(() => {
 const modelName = computed(() =>
   task.value?.model_config_data?.model || task.value?.llm_usage?.model || "未配置模型"
 );
+function compactBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try { return new URL(raw).host; }
+  catch { return raw.replace(/^https?:\/\//, "").split("/")[0]; }
+}
+function workerModelTitle(worker) {
+  return [worker?.model_role || "挖掘模型", worker?.model, worker?.model_base_url].filter(Boolean).join(" · ");
+}
 const tokenUsage = computed(() => task.value?.llm_usage || {});
 const llmUsageByModel = computed(() => task.value?.llm_usage_by_model || []);
 const totalCost = computed(() =>
@@ -1745,11 +1810,19 @@ function fmtTime(iso) {
           <div class="wc-top">
             <span class="wc-host">{{ w.host }}</span>
             <span class="wc-meta">
+              <span v-if="authBadge(w)" class="wc-auth" :class="authBadgeClass(w)" :title="w.auth_label || ''">{{ authBadge(w) }}</span>
               <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ w.score }}</span>
               第 {{ w.round }} 轮 · {{ elapsed(w.started_at) }}
+              <button v-if="!readonly" type="button" class="wc-del"
+                title="删除该目标（跳过本次任务的这个目标）" @click="skipTarget(w)">✕</button>
             </span>
           </div>
           <div class="wc-action">{{ w.action }}</div>
+          <div v-if="w.model || w.model_base_url" class="wc-model" :title="workerModelTitle(w)">
+            <span>{{ w.model_role || "挖掘模型" }}</span>
+            <b>{{ w.model || "未知模型" }}</b>
+            <small v-if="w.model_base_url">@ {{ compactBaseUrl(w.model_base_url) }}</small>
+          </div>
           <div class="wc-foot">
             <span class="wc-find" :class="{ hit: w.findings > 0 }">
               {{ w.findings > 0 ? `🎯 ${w.findings} 个漏洞` : "侦察中…" }}
@@ -1791,7 +1864,8 @@ function fmtTime(iso) {
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
-          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }} · {{ fmtTime(f.created_at) }}</div>
+          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
         </div>
         <div class="rr-actions" @click.stop>
           <button class="rr-dl" title="下载 Markdown" @click="downloadReviewMd(f)">MD</button>
@@ -1823,6 +1897,7 @@ function fmtTime(iso) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }} <span v-if="f.review?.submitted" class="tag-done">已提交</span></div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
@@ -1844,6 +1919,7 @@ function fmtTime(iso) {
           <span class="ks-main">
             <span class="ks-title">{{ k.product_name || "未知产品" }}</span>
             <span class="meta">{{ k.vuln_type }} · {{ k.origin_title || k.vuln_summary || "通杀候选" }}</span>
+            <span class="meta rr-time">发现 {{ fmtLocalTime(k.created_at) }}</span>
           </span>
           <span class="ks-summary-metrics">
             <span><b>{{ assetRows(k).length }}</b>资产</span>
@@ -1851,13 +1927,17 @@ function fmtTime(iso) {
             <span><b>{{ k.asset_count ?? 0 }}</b>全网</span>
           </span>
           <span class="ks-badges">
-            <span class="tag-done" v-if="k.verified">已验证</span>
+            <span class="tag-done" v-if="k.verified">已验证{{ verifiedCount(k) > 1 ? ` ${verifiedCount(k)} 个` : "" }}</span>
             <span class="sev-pill" :class="k.confidence">{{ k.confidence || "uncertain" }}</span>
           </span>
         </button>
 
         <div v-if="isKillsweepOpen(k.id)" class="ks-detail">
           <div class="ks-compact">
+            <div>
+              <span>发现时间</span>
+              <p>{{ fmtLocalTime(k.created_at) || "未知" }}</p>
+            </div>
             <div>
               <span>FOFA 语法</span>
               <code>{{ k.fofa_query || "无 FOFA 语法" }}</code>
@@ -1921,6 +2001,7 @@ function fmtTime(iso) {
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
           <div v-if="f.review?.user_notes" class="meta rr-note">驳回备注：{{ f.review.user_notes }}</div>
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
@@ -1948,7 +2029,8 @@ function fmtTime(iso) {
             <span class="arch-tag" :class="f.archive_reason">{{ f.archive_reason_text }}</span>
             {{ f.title }}
           </div>
-          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }} · {{ fmtTime(f.created_at) }}</div>
+          <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>
+          <div class="meta rr-time">发现 {{ fmtLocalTime(f.created_at) }}<template v-if="f.llm_model"> · 模型 {{ f.llm_model }}</template></div>
           <div v-if="f.ignore_reasons?.length" class="meta rr-note">AI 理由：{{ f.ignore_reasons.join("；") }}</div>
         </div>
         <div class="rr-side" @click.stop>

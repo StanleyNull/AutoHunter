@@ -16,7 +16,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from urllib.parse import urlparse, quote
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import func, select
@@ -27,8 +27,19 @@ from app.agents import collector_llm, playbook_router, prefilter, scorer, site_c
 from app.agents import target_cluster
 from app.agents.prompts import is_enterprise_src
 from app.db.models import Target, Task
-from app.engines import get_engine, EngineResult, QuakeRateLimitError
+from app.engines import get_engine, QuakeRateLimitError
+from app.engines.translator import translate_fofa_query
 from app.tools.leakcreds import query_leaked_creds
+from app.agents import auth_bootstrap
+
+
+def _auth_context_for(task: Task, url: str) -> dict | None:
+    """入队时按 Task.auth_bindings 匹配目标；无凭据区则返回 None（不写字段）。"""
+    bindings = getattr(task, "auth_bindings", None) or []
+    if not auth_bootstrap.has_any_bindings(bindings):
+        return None
+    manual = [str(t).strip() for t in (task.manual_targets or []) if str(t).strip()]
+    return auth_bootstrap.resolve_auth_context_for_target(bindings, url, manual)
 from app.llm.client import LLMClient, LLMError
 from app.settings_service import llm_client_for_task_optional, resolve_engine_config, resolve_skip_score_threshold
 
@@ -44,20 +55,54 @@ _LEAK_QUERY_DELAY = float(os.environ.get("LEAK_QUERY_DELAY", "0.6"))
 _CT_QUERY_CONCURRENCY = int(os.environ.get("CT_QUERY_CONCURRENCY", "3"))
 _CT_QUERY_TIMEOUT = float(os.environ.get("CT_QUERY_TIMEOUT", "45.0"))
 _CT_MAX_CANDIDATES = int(os.environ.get("CT_MAX_CANDIDATES", "500"))
+# 连续 N 轮无新增资产 → 结束当前语法（不再空翻后续页）
+_EMPTY_STREAK_STOP = max(1, int(os.environ.get("FOFA_EMPTY_STREAK_STOP", "5")))
+# 连续 M 条语法都搜空 → 永久停止搜集（仍允许 intent 至少演化一轮）
+_EMPTY_QUERY_STOP = max(1, int(os.environ.get("FOFA_EMPTY_QUERY_STOP", "2")))
 ProgressCallback = Callable[[str, str, dict], Awaitable[None]]
 ProgressReporter = Callable[..., Awaitable[None]]
 
 
+def _empty_streak_limit(max_pages: int) -> int:
+    """空轮停翻阈值：不超过 max_pages，避免用户把最大页数调到 <5 时永远攒不满 streak。"""
+    return max(1, min(_EMPTY_STREAK_STOP, max(1, int(max_pages or 1))))
+
+
+def _finish_current_query(
+    cfg: dict,
+    *,
+    max_pages: int,
+    cur_query: str,
+    history: list[str],
+    empty_streak: int | None = None,
+) -> tuple[bool, int]:
+    """结束当前 FOFA 语法：强制 cursor=max_pages 以便下轮可演化；
+    连续多条语法都空才永久 fofa_exhausted。返回 (permanent_stop, empty_query_streak)。
+    """
+    cfg["current_query"] = cur_query
+    cfg["history"] = history
+    cfg["cursor"] = max(int(max_pages), 1)
+    cfg["collector_phase"] = "exhausted"
+    if empty_streak is not None:
+        cfg["empty_streak"] = int(empty_streak)
+    eq = int(cfg.get("empty_query_streak", 0) or 0) + 1
+    cfg["empty_query_streak"] = eq
+    permanent = eq >= _EMPTY_QUERY_STOP
+    if permanent:
+        cfg["fofa_exhausted"] = True
+    return permanent, eq
+
+
 def normalize_host(url_or_host: str) -> str:
-    """归一化为 host（去协议、去末尾/、小写）。"""
-    s = url_or_host.strip()
-    if "://" not in s:
-        s = "http://" + s
-    parsed = urlparse(s)
-    host = (parsed.hostname or "").lower()
-    if parsed.port and parsed.port not in (80, 443):
-        host = f"{host}:{parsed.port}"
-    return host
+    """归一化为 host（去协议、去末尾/、小写）。裸 IPv6 走安全解析，避免 .port 抛错。"""
+    from app.urlnorm import normalize_host as _norm
+    return _norm(url_or_host)
+
+
+def _is_unusable(raw: str, host: str) -> bool:
+    """畸形主机（截断/非法 IPv6 等）：拼进 URL 会崩解析，直接跳过不入队。"""
+    from app.urlnorm import is_unusable_host
+    return is_unusable_host(raw) or is_unusable_host(host)
 
 
 def _is_edusrc_intent_task(task: Task, raw: str, is_intent: bool) -> bool:
@@ -187,7 +232,11 @@ def _with_scope_anchors(query: str, anchors: dict[str, list[str]]) -> str:
 
 
 def _ensure_url(host: str) -> str:
-    return host if host.startswith("http") else f"http://{host}"
+    # 走 urlnorm.ensure_scheme：裸合法 IPv6 会补方括号(http://[2001:db8::1])，
+    # 已带协议/域名/IPv4 原样，畸形 IPv6 不加括号(交由 is_unusable_host 拦截)。
+    # 直接 f"http://{host}" 会对裸 IPv6 拼出非法 URL，下游 httpx/urlparse 崩或误解析。
+    from app.urlnorm import ensure_scheme
+    return ensure_scheme(host)
 
 
 async def _existing_hosts(session: AsyncSession, task_id: str) -> set[str]:
@@ -227,8 +276,8 @@ def _is_cluster_deadish(t: Target) -> bool:
     return any(marker in reason for marker in ("无可利用", "无果", "自动收敛", "打不穿", "timeout", "超时"))
 
 
-def _llm_for_task(task: Task) -> LLMClient | None:
-    return llm_client_for_task_optional(task)
+def _llm_for_task(task: Task, on_provider_failure=None) -> LLMClient | None:
+    return llm_client_for_task_optional(task, on_provider_failure=on_provider_failure)
 
 
 async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
@@ -305,7 +354,8 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
 
 async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                  batch_pages: int = 1,
-                 progress_cb: ProgressCallback | None = None) -> int:
+                 progress_cb: ProgressCallback | None = None,
+                 on_provider_failure=None) -> int:
     """补充目标。返回新入队数量。队列够则不补。"""
     queued = (await session.execute(
         select(func.count()).select_from(Target).where(
@@ -335,21 +385,35 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
         await session.commit()
         return added
 
-    # 1) 手动清单（一次性消费，不预筛——用户明确指定的直接挖）
+    # 1) 手动清单（.gov 一律跳过，其余用户指定的直接入队）
+    #    不消费 manual_targets：保留用户原始清单便于任务详情/编辑展示，且停止后
+    #    重启时能靠它把手动目标补回队列；重复入队由 seen(_existing_hosts) 去重兜住。
     if task.target_source in ("manual", "both") and task.manual_targets:
         for raw in task.manual_targets:
             host = normalize_host(raw)
             if not host or host in seen:
                 continue
             seen.add(host)
+            if _is_unusable(raw, host):
+                continue
+            if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(raw):
+                session.add(Target(
+                    task_id=task.id, url=_ensure_url(host), host=host,
+                    source="manual", status="skipped",
+                    verdict="skip_sensitive",
+                    dead_reason=prefilter._SENSITIVE_SKIP_REASON,
+                ))
+                continue
             session.add(Target(task_id=task.id, url=_ensure_url(host), host=host,
-                               source="manual", status="queued"))
+                               source="manual", status="queued",
+                               auth_context=_auth_context_for(task, _ensure_url(host))))
             added += 1
-        task.manual_targets = []  # 消费掉，避免重复
 
     # 2) FOFA 智能搜集
     if task.target_source in ("fofa", "both"):
-        added += await _fofa_collect(session, task, seen, cluster_state, progress)
+        added += await _fofa_collect(
+            session, task, seen, cluster_state, progress, on_provider_failure
+        )
 
     await session.commit()
     return added
@@ -368,6 +432,21 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
     for raw in raw_targets:
         host = normalize_host(raw)
         if not host:
+            continue
+        if _is_unusable(raw, host):
+            continue
+        if prefilter.is_sensitive_host(host) or prefilter.is_sensitive_host(raw):
+            # 占住去重位，避免后续又被 FOFA/通杀塞回来
+            existing = (await session.execute(
+                select(Target.source).where(Target.task_id == task.id, Target.host == host)
+            )).all()
+            if not existing:
+                session.add(Target(
+                    task_id=task.id, url=_ensure_url(raw), host=host,
+                    source="site", status="skipped",
+                    verdict="skip_sensitive",
+                    dead_reason=prefilter._SENSITIVE_SKIP_REASON,
+                ))
             continue
         url = _ensure_url(raw)
         existing = (await session.execute(
@@ -391,6 +470,7 @@ async def _site_collect(session: AsyncSession, task: Task) -> int:
                 status="queued",
                 priority_score=route.priority,
                 priority_reason=site_collab.route_reason(route),
+                auth_context=_auth_context_for(task, url),
             ))
             added += 1
     return added
@@ -402,6 +482,7 @@ async def _fofa_collect(
     seen: set[str],
     cluster_state: dict[str, dict],
     progress: ProgressReporter | None = None,
+    on_provider_failure=None,
 ) -> int:
     async def report(phase: str, text: str, **payload) -> None:
         if progress:
@@ -421,27 +502,96 @@ async def _fofa_collect(
     size = int(defaults["page_size"])
     base_url = defaults.get("base_url") or engine.get_default_base_url()
 
-    llm = _llm_for_task(task)
+    # 资产已搜完：不再打 FOFA，避免空转榨干额度
+    if cfg.get("fofa_exhausted"):
+        return 0
+
+    llm = _llm_for_task(task, on_provider_failure=on_provider_failure)
     history: list[str] = list(cfg.get("history", []))
     cur_query = cfg.get("current_query", "")
     cursor = int(cfg.get("cursor", 0))
+    empty_streak_now = int(cfg.get("empty_streak", 0) or 0)
+    streak_limit = _empty_streak_limit(max_pages)
+
+    # 当前语法已连续空轮达阈值：不再继续翻页，结束本语法（可能再演化一轮）
+    if empty_streak_now >= streak_limit and cursor < max_pages:
+        permanent, eq = _finish_current_query(
+            cfg, max_pages=max_pages, cur_query=cur_query or "", history=history,
+            empty_streak=empty_streak_now,
+        )
+        if permanent:
+            await report(
+                "exhausted",
+                f"连续 {empty_streak_now} 轮无新增资产，且已连续 {eq} 条语法搜空，"
+                f"已永久停止 {engine.display_name} 搜集。修改语法后可恢复。",
+                empty_streak=empty_streak_now, empty_query_streak=eq, fofa_exhausted=True,
+            )
+        else:
+            await report(
+                "exhausted",
+                f"连续 {empty_streak_now} 轮无新增资产，结束当前语法"
+                f"（连续空语法 {eq}/{_EMPTY_QUERY_STOP}），下轮尝试换角度继续。",
+                empty_streak=empty_streak_now, empty_query_streak=eq, fofa_exhausted=False,
+            )
+        task.fofa_config = {**cfg}
+        return 0
 
     # 当前语法翻完了（或还没语法）→ 换/生成新语法
     if not cur_query or cursor >= max_pages:
+        # 若本语法已空翻到阈值（或刚好卡在 max_pages 边界），补记一条空语法
+        if empty_streak_now >= streak_limit:
+            cfg["empty_query_streak"] = max(int(cfg.get("empty_query_streak", 0) or 0), 1)
+        eq = int(cfg.get("empty_query_streak", 0) or 0)
+        if eq >= _EMPTY_QUERY_STOP:
+            cfg["fofa_exhausted"] = True
+            cfg["collector_phase"] = "exhausted"
+            await report(
+                "exhausted",
+                f"已连续 {eq} 条语法无新增资产，停止 {engine.display_name} 搜集。"
+                f"修改语法后可恢复。",
+                empty_query_streak=eq, fofa_exhausted=True, cursor=cursor,
+            )
+            task.fofa_config = {**cfg}
+            return 0
+        prev_query = cur_query
         new_q, reason = await _resolve_query(task, llm)
         if not new_q:
+            cfg["fofa_exhausted"] = True
+            cfg["collector_phase"] = "exhausted"
+            await report(
+                "exhausted",
+                f"无法生成新的搜集语法，停止 {engine.display_name} 翻页。",
+                fofa_exhausted=True, empty_query_streak=eq,
+            )
+            task.fofa_config = {**cfg}
+            return 0
+        # 语法演化失败（仍是同一条）且上一条已搜空 → 永久停，避免 cursor 归零重扫烧额度
+        if prev_query and new_q == prev_query and eq > 0:
+            cfg["fofa_exhausted"] = True
+            cfg["collector_phase"] = "exhausted"
+            await report(
+                "exhausted",
+                f"无法换出新语法（仍是原语法），停止 {engine.display_name} 搜集以免重复消耗额度。",
+                fofa_exhausted=True, empty_query_streak=eq, query=new_q,
+            )
+            task.fofa_config = {**cfg}
             return 0
         cur_query = new_q
         cursor = 0
+        cfg.pop("empty_streak", None)  # 新语法重置「页级」空轮；语法级 empty_query_streak 保留
         if new_q not in history:
             history.append(new_q)
 
     next_cursor = cursor + 1
 
-    # 频率限制冷却检查：如果还在冷却期内，直接跳过本轮
+    # 频率限制冷却检查：如果还在冷却期内，直接跳过本轮。
+    # 用 time.time() 墙钟（不是 time.monotonic()）：冷却时间戳要落进 fofa_config
+    # 持久化、跨进程重启读取，而 monotonic 是进程相对时钟，重启后与旧值不可比，
+    # 会把冷却期误判为「还没到」导致重启后一直跳过 FOFA 搜集。
+    now = time.time()
     rate_limit_until = float(cfg.get("rate_limit_until", 0))
-    if rate_limit_until > time.monotonic():
-        remain = rate_limit_until - time.monotonic()
+    if rate_limit_until > now:
+        remain = rate_limit_until - now
         cfg["collector_phase"] = "fofa_error"
         await report(
             "fofa_error",
@@ -455,14 +605,38 @@ async def _fofa_collect(
     # 12 次都卡才停任务（适合挂机过夜，等 FOFA 次日额度恢复自动继续）。
     # 冷却期内静默跳过，不重复弹消息（初始检测已报告过，避免每轮刷屏）。
     daily_limit_until = float(cfg.get("daily_limit_until", 0))
-    if daily_limit_until > time.monotonic():
+    if daily_limit_until > time.time():
         cfg["collector_phase"] = "fofa_error"
         task.fofa_config = {**cfg}
         return 0
 
+    # 产品约定：任务框统一写 FOFA 语法；非 FOFA 引擎在请求前自动翻译。
+    # 解析不到 FOFA 条件时原样透传（兼容用户直接粘贴该引擎原生语法）。
+    native_query = translate_fofa_query(cur_query, engine_name)
+    engine_cursor = cfg.get("engine_cursor") or None
+    # 换语法时清掉跨页 cursor（Censys 等）
+    if cfg.get("translated_query") != native_query:
+        engine_cursor = None
+        cfg.pop("engine_cursor", None)
+    cfg["translated_query"] = native_query
+    if native_query != cur_query:
+        await report(
+            "fofa_search",
+            f"{engine.display_name} 语法已从 FOFA 自动翻译",
+            query=cur_query,
+            translated_query=native_query,
+            engine=engine_name,
+        )
+
     try:
-        res = await engine.search(key, cur_query, page=next_cursor, page_size=size,
-                                  base_url=base_url)
+        res = await engine.search(
+            key,
+            native_query,
+            page=next_cursor,
+            page_size=size,
+            base_url=base_url,
+            cursor=engine_cursor,
+        )
     except QuakeRateLimitError as e:
         # Quake 专用限流异常
         err = f"{e}"[:300]
@@ -470,7 +644,7 @@ async def _fofa_collect(
         # 不 sleep：设足够长的冷却期（60s→120s→240s→480s），让调度器跳过
         backoff = min(60 * (2 ** (rl_count - 1)), 600)
         cfg["rate_limit_count"] = rl_count
-        cfg["rate_limit_until"] = time.monotonic() + backoff
+        cfg["rate_limit_until"] = time.time() + backoff
         cfg["last_fofa_error"] = err
         cfg["collector_phase"] = "fofa_error"
         cfg["fofa_auth_fail_count"] = 0
@@ -493,7 +667,7 @@ async def _fofa_collect(
         if _is_daily_limit:
             dl_count = int(cfg.get("daily_limit_count", 0)) + 1
             cfg["daily_limit_count"] = dl_count
-            cfg["daily_limit_until"] = time.monotonic() + 3600  # 1 小时后重试
+            cfg["daily_limit_until"] = time.time() + 3600  # 1 小时后重试
             cfg["last_fofa_error"] = err
             cfg["collector_phase"] = "fofa_error"
             cfg["fofa_auth_fail_count"] = 0  # 不算账号无效，避免触发暂停
@@ -514,15 +688,17 @@ async def _fofa_collect(
             task.fofa_config = {**cfg}
             return 0
         # 通用频率限制检测（不限引擎，匹配常见限流关键词）
+        # FOFA [45012] 请求速度过快 必须进冷却，否则每轮空转继续打接口榨干额度
         _is_rate_limit = any(m in err_lower for m in (
-            "rate limit", "too many", "过于频繁", "请求太频繁", "q3005", "429", "retry after",
+            "rate limit", "too many", "过于频繁", "请求太频繁", "请求速度过快", "速度过快",
+            "请求过快", "45012", "q3005", "429", "retry after",
         ))
         if _is_rate_limit:
             rl_count = int(cfg.get("rate_limit_count", 0)) + 1
             # 不 sleep，设冷却期让调度器跳过
             backoff = min(60 * (2 ** (rl_count - 1)), 600)
             cfg["rate_limit_count"] = rl_count
-            cfg["rate_limit_until"] = time.monotonic() + backoff
+            cfg["rate_limit_until"] = time.time() + backoff
             cfg["last_fofa_error"] = err
             cfg["collector_phase"] = "fofa_error"
             cfg["fofa_auth_fail_count"] = 0
@@ -557,6 +733,10 @@ async def _fofa_collect(
         task.fofa_config = {**cfg}
         return 0
     cursor = next_cursor
+    if getattr(res, "next_cursor", None):
+        cfg["engine_cursor"] = res.next_cursor
+    else:
+        cfg.pop("engine_cursor", None)
     cfg["fofa_auth_fail_count"] = 0
     cfg["rate_limit_count"] = 0  # 成功请求重置限流计数
     cfg.pop("rate_limit_until", None)
@@ -565,6 +745,44 @@ async def _fofa_collect(
     cfg["daily_limit_count"] = 0
     cfg.pop("daily_limit_until", None)
     cfg.pop("daily_limit_exhausted", None)
+
+    # 引擎本页零结果 = 当前语法已翻尽：结束本语法，允许 intent 再演化；
+    # 连续多条语法都空才永久停，避免首轮 0 命中就掐死演化。
+    page_rows = list(getattr(res, "results", None) or [])
+    if not page_rows:
+        empty_streak = int(cfg.get("empty_streak", 0)) + 1
+        permanent, eq = _finish_current_query(
+            cfg, max_pages=max_pages, cur_query=cur_query, history=history,
+            empty_streak=empty_streak,
+        )
+        task.fofa_config = {**cfg}
+        if permanent:
+            await report(
+                "exhausted",
+                f"{engine.display_name} 第 {cursor} 页已无结果，且连续 {eq} 条语法搜空，"
+                f"永久停止搜集。修改语法后可恢复。",
+                candidates=0, empty_streak=empty_streak, empty_query_streak=eq,
+                fofa_exhausted=True, cursor=cursor,
+            )
+        else:
+            await report(
+                "exhausted",
+                f"{engine.display_name} 第 {cursor} 页已无结果，结束当前语法"
+                f"（连续空语法 {eq}/{_EMPTY_QUERY_STOP}），下轮换角度继续。",
+                candidates=0, empty_streak=empty_streak, empty_query_streak=eq,
+                fofa_exhausted=False, cursor=cursor,
+            )
+        return 0
+
+    # 关键：抓这一页时 FOFA 额度已经花掉了。这里立刻把游标推进 + 当前语法落库并
+    # commit，不要等后面那条慢管线（探活预筛 / LLM 评分 / 目标过滤 / 泄露凭证查询）
+    # 跑完才存。否则用户在慢管线执行期间点停止、或进程重启，已花额度的这一页游标没
+    # 保存，重启后又从同一页（对刚起步任务就是第一页）重抓，白白浪费 FOFA 额度。
+    cfg["current_query"] = cur_query
+    cfg["cursor"] = cursor
+    cfg["history"] = history
+    task.fofa_config = {**cfg}
+    await session.commit()
 
     # host 归属兜底过滤：即使 FOFA 语法因运算符优先级或 LLM 演化丢锚点而放宽范围，
     # 也在入库前按用户指定的根域名白名单二次过滤，丢弃一切范围外的无关资产。
@@ -582,14 +800,28 @@ async def _fofa_collect(
     fields = res.fields
     candidates: list[dict] = []
     dropped_oos = 0
-    for row in res.results:
+    for row in page_rows:
         rec = dict(zip(fields, row)) if isinstance(row, list) else row
-        host = normalize_host(rec.get("host") or rec.get("domain") or rec.get("ip") or "")
+        raw_host = rec.get("host") or rec.get("domain") or rec.get("ip") or ""
+        host = normalize_host(raw_host)
         if not host or host in seen:
             continue
+        if _is_unusable(raw_host, host):
+            seen.add(host)
+            continue  # 畸形 IPv6/无效主机，丢弃（不入库、不占派发）
         if scope_domains and target_cluster.root_domain(host) not in scope_domains:
             dropped_oos += 1
             continue  # 范围外资产，丢弃（不入库、不占去重位）
+        if prefilter.is_sensitive_host(host):
+            seen.add(host)
+            session.add(Target(
+                task_id=task.id, url=_ensure_url(rec.get("host") or host), host=host,
+                ip=rec.get("ip", ""), org=rec.get("org", ""), title=rec.get("title", ""),
+                source="fofa", status="skipped",
+                verdict="skip_sensitive",
+                dead_reason=prefilter._SENSITIVE_SKIP_REASON,
+            ))
+            continue
         seen.add(host)
         candidates.append({
             "host": host,
@@ -608,14 +840,45 @@ async def _fofa_collect(
         cfg["collector_phase"] = "exhausted"
         empty_streak = int(cfg.get("empty_streak", 0)) + 1
         cfg["empty_streak"] = empty_streak
-        task.fofa_config = {**cfg}
-        # 每 5 轮空转才报一次，且措辞明确指出「资产可能已搜完」，而非误导性的 0/0。
-        if empty_streak == 1 or empty_streak % 5 == 0:
+        # 连续空轮达阈值 → 结束当前语法（可再演化）；连续多条语法都空才永久停
+        if empty_streak >= streak_limit:
+            permanent, eq = _finish_current_query(
+                cfg, max_pages=max_pages, cur_query=cur_query, history=history,
+                empty_streak=empty_streak,
+            )
+            task.fofa_config = {**cfg}
             hint = "本轮无新增资产" + (f"（范围外丢弃 {dropped_oos} 个）" if dropped_oos else "")
-            hint += f"；当前语法第 {cursor} 页已无新目标，连续空轮 {empty_streak} 次，可能该目标资产已基本搜完"
-            await report("exhausted", hint, candidates=0, empty_streak=empty_streak, dropped_out_of_scope=dropped_oos)
+            if permanent:
+                hint += (
+                    f"；连续空轮 {empty_streak} 且已连续 {eq} 条语法搜空，"
+                    f"已永久停止 {engine.display_name} 搜集。修改语法后可恢复。"
+                )
+            else:
+                hint += (
+                    f"；连续空轮 {empty_streak}，结束当前语法"
+                    f"（连续空语法 {eq}/{_EMPTY_QUERY_STOP}），下轮换角度继续。"
+                )
+            await report(
+                "exhausted", hint,
+                candidates=0, empty_streak=empty_streak, dropped_out_of_scope=dropped_oos,
+                empty_query_streak=eq, fofa_exhausted=permanent,
+            )
+            return 0
+        task.fofa_config = {**cfg}
+        remain = streak_limit - empty_streak
+        hint = "本轮无新增资产" + (f"（范围外丢弃 {dropped_oos} 个）" if dropped_oos else "")
+        hint += (
+            f"；当前语法第 {cursor} 页无新目标，连续空轮 {empty_streak}/{streak_limit}"
+            f"（再空 {remain} 轮将结束本语法）"
+        )
+        await report(
+            "exhausted", hint,
+            candidates=0, empty_streak=empty_streak, dropped_out_of_scope=dropped_oos,
+        )
         return 0
     cfg.pop("empty_streak", None)
+    cfg.pop("empty_query_streak", None)
+    cfg.pop("fofa_exhausted", None)
 
     # 机械预筛（并发探活，过滤 CDN/死链/纯前端）
     await report("prefilter", f"正在探活预筛 {len(candidates)} 个候选目标", candidates=len(candidates))
@@ -733,6 +996,7 @@ async def _fofa_collect(
             school=c.get("school", ""),
             priority_score=score, priority_reason=reason,
             leaked_creds=c.get("leaked_creds") or None,
+            auth_context=_auth_context_for(task, c["url"]),
         ))
         if cluster_item:
             cluster_item["pending"] += 1

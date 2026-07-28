@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
@@ -80,12 +80,41 @@ def _clip_json(value, limit: int) -> str:
 
 
 def _matches_query(data: dict, q: str | None) -> bool:
-    """列表搜索：跨标题、URL、类型、报告正文、审核理由等字段做轻量全文匹配。"""
+    """列表搜索：对传入 dict 实际存在的字段做轻量全文匹配（跨标题、URL、类型，以及非 compact
+    时的报告正文/审核理由等重字段；compact 模式下重字段已被剥离，仅匹配保留的轻字段）。"""
     needle = (q or "").strip().lower()
     if not needle:
         return True
     haystack = json.dumps(data, ensure_ascii=False, default=str).lower()
     return needle in haystack
+
+
+async def _paginated_finding_list(session, q, search, compact, limit, offset, *, post=None):
+    """统一列表：compact + 分页 + 全文搜索（与 submit_list/archived_list 同款语义）。
+
+    默认（limit=0、compact=False）保持向后兼容：返回裸 list、全字段。量大时可传
+    limit/offset 分页（>0 时返回 {items,has_more,limit,offset}）、compact=1 精简重字段。
+    无 search 走 DB 层分页；有 search 因需跨 JSON 字段全文匹配，先全量取再过滤再切片
+    （保证跨页命中，绝不因 DB offset/limit 漏搜）。post(f,r,d) 可给每行追加字段。
+    """
+    if limit and not search:
+        q = q.offset(offset).limit(limit + 1)
+    rows = (await session.execute(q)).all()
+
+    def _mk(f, r):
+        d = _finding_dict(f, r, compact=compact)
+        if post:
+            post(f, r, d)
+        return d
+
+    out = [_mk(f, r) for f, r in rows]
+    if search:
+        out = [d for d in out if _matches_query(d, search)]
+        if limit:
+            out = out[offset:offset + limit + 1]
+    if limit:
+        return {"items": out[:limit], "has_more": len(out) > limit, "limit": limit, "offset": offset}
+    return out
 
 
 def _finding_dict(f: Finding, r: Review | None, *, compact: bool = False) -> dict:
@@ -101,6 +130,8 @@ def _finding_dict(f: Finding, r: Review | None, *, compact: bool = False) -> dic
         "owner": f.owner,
         "status": f.status,
         "created_at": to_cst_iso(f.created_at),
+        "llm_model": getattr(f, "llm_model", "") or "",
+        "llm_base_url": getattr(f, "llm_base_url", "") or "",
         "review": None if not r else {
             "verdict": r.verdict,
             "confidence": r.confidence,
@@ -174,8 +205,11 @@ async def _resolve_edu_school_async(target_url: str | None) -> str | None:
 @router.get("/tasks/{task_id}/findings")
 async def list_findings(task_id: str, status: Optional[str] = None,
                         search: Optional[str] = Query(None, alias="q"),
+                        compact: bool = Query(False),
+                        limit: int = Query(0, ge=0, le=500),
+                        offset: int = Query(0, ge=0),
                         session: AsyncSession = Depends(get_session)):
-    """所有原始漏洞（可按 status 过滤）。"""
+    """所有原始漏洞（可按 status 过滤）。compact/limit/offset 可选，默认全量全字段。"""
     q = (
         select(Finding, Review)
         .outerjoin(Review, Review.finding_id == Finding.id)
@@ -184,14 +218,15 @@ async def list_findings(task_id: str, status: Optional[str] = None,
     if status:
         q = q.where(Finding.status == status)
     q = q.order_by(Finding.created_at.desc())
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/results")
 async def list_results(task_id: str, confidence: Optional[str] = None,
                        search: Optional[str] = Query(None, alias="q"),
+                       compact: bool = Query(False),
+                       limit: int = Query(0, ge=0, le=500),
+                       offset: int = Query(0, ge=0),
                        session: AsyncSession = Depends(get_session)):
     """最终列表：仅 accepted 的漏洞，按信度分档（confirmed/likely/uncertain）。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
@@ -199,27 +234,27 @@ async def list_results(task_id: str, confidence: Optional[str] = None,
     if confidence:
         q = q.where(Review.confidence == confidence)
     q = q.order_by(Review.score.desc())
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/deepen-list")
-async def deepen_list(task_id: str, session: AsyncSession = Depends(get_session)):
+async def deepen_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                      compact: bool = Query(False),
+                      limit: int = Query(0, ge=0, le=500),
+                      offset: int = Query(0, ge=0),
+                      session: AsyncSession = Depends(get_session)):
     """打回深挖列表：审核判 deepen 的线索（含审核给的深挖指令）。
     供用户观察深挖管线——哪些线索被回炉、要证明什么。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.verdict == "deepen"
     ).order_by(Review.reviewed_at.desc())
-    rows = (await session.execute(q)).all()
-    out = []
-    for f, r in rows:
-        d = _finding_dict(f, r)
+
+    def _post(f, r, d):
         d["deepen_directive"] = r.deepen_directive
         # superseded=已回炉重挖中；reviewed=深挖未生效已归档
         d["deepen_state"] = "reinvestigating" if f.status == "superseded" else "archived"
-        out.append(d)
-    return out
+
+    return await _paginated_finding_list(session, q, search, compact, limit, offset, post=_post)
 
 
 @router.get("/findings/{finding_id}")
@@ -237,6 +272,7 @@ async def get_finding(finding_id: str, session: AsyncSession = Depends(get_sessi
 
 @router.get("/tasks/{task_id}/review-queue")
 async def user_review_queue(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                            compact: bool = Query(False),
                             limit: int = Query(0, ge=0, le=500),
                             offset: int = Query(0, ge=0),
                             session: AsyncSession = Depends(get_session)):
@@ -245,22 +281,7 @@ async def user_review_queue(task_id: str, search: Optional[str] = Query(None, al
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.verdict == "accepted", Review.user_status == "pending"
     ).order_by(Review.score.desc())
-    if limit and not search:
-        q = q.offset(offset).limit(limit + 1)
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    if search:
-        out = [d for d in out if _matches_query(d, search)]
-        if limit:
-            out = out[offset:offset + limit + 1]
-    if limit:
-        return {
-            "items": out[:limit],
-            "has_more": len(out) > limit,
-            "limit": limit,
-            "offset": offset,
-        }
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/submit-list")
@@ -296,6 +317,7 @@ async def submit_list(task_id: str, submitted: Optional[bool] = None,
 
 @router.get("/tasks/{task_id}/rejected")
 async def rejected_list(task_id: str, search: Optional[str] = Query(None, alias="q"),
+                        compact: bool = Query(False),
                         limit: int = Query(0, ge=0, le=500),
                         offset: int = Query(0, ge=0),
                         session: AsyncSession = Depends(get_session)):
@@ -304,22 +326,7 @@ async def rejected_list(task_id: str, search: Optional[str] = Query(None, alias=
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.user_status == "rejected"
     ).order_by(Review.user_reviewed_at.desc().nullslast(), Review.score.desc())
-    if limit and not search:
-        q = q.offset(offset).limit(limit + 1)
-    rows = (await session.execute(q)).all()
-    out = [_finding_dict(f, r) for f, r in rows]
-    if search:
-        out = [d for d in out if _matches_query(d, search)]
-        if limit:
-            out = out[offset:offset + limit + 1]
-    if limit:
-        return {
-            "items": out[:limit],
-            "has_more": len(out) > limit,
-            "limit": limit,
-            "offset": offset,
-        }
-    return [d for d in out if _matches_query(d, search)]
+    return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 
 @router.get("/tasks/{task_id}/archived")
@@ -337,17 +344,21 @@ async def archived_list(task_id: str, search: Optional[str] = Query(None, alias=
         Review.verdict.in_(["ignored", "deepen"]),
         Review.user_status == "pending",   # 用户已处理过的不再摆进来
         Finding.status != "superseded",    # 正在回炉重挖的 deepen 前身不显示（避免和新一轮重复）
-    ).order_by(Review.reviewed_at.desc().nullslast(), Review.score.desc())
+    ).order_by(
+        # deepen（AI 认可、值得深挖但没打穿的好线索）置顶，排在 ignored（疑似误杀）之前
+        case((Review.verdict == "deepen", 0), else_=1),
+        Review.reviewed_at.desc().nullslast(), Review.score.desc(),
+    )
 
     def _to_dict(f, r):
         d = _finding_dict(f, r)
-        # 归档原因：ignored=AI 判非漏洞/误杀；deepen=打回深挖但未升级出新洞
+        # 归档原因：ignored=AI 判非漏洞/误杀；deepen=AI 认可值得深挖、但深挖那轮没打穿（疑似好洞）
         if r.verdict == "ignored":
             d["archive_reason"] = "ignored"
             d["archive_reason_text"] = "AI 判为非漏洞（可能误杀）"
         else:
             d["archive_reason"] = "deepen"
-            d["archive_reason_text"] = "打回深挖未升级"
+            d["archive_reason_text"] = "深挖未果 · 疑似好洞"
         d["ignore_reasons"] = r.ignore_reasons or []
         d["deepen_directive"] = r.deepen_directive or ""
         return d
@@ -554,6 +565,7 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
             "notes": k.notes,
             "status": k.status,
             "created_at": to_cst_iso(k.created_at),
+            "updated_at": to_cst_iso(k.updated_at),
         }
         if _matches_query(item, search):
             out.append(item)
@@ -820,6 +832,15 @@ def _build_assistant_messages(f: Finding, r: Review | None, req: ReportAssistant
     return messages
 
 
+def _assistant_unavailable_message(exc: BaseException) -> str:
+    """把 LLM/端点池失败收敛成前端可读短文案（流式与非流式共用）。"""
+    if isinstance(exc, LLMError):
+        return f"报告助手暂不可用：{exc}"
+    if isinstance(exc, RuntimeError):
+        return f"报告助手暂不可用：{exc}"
+    return "报告助手暂不可用：内部执行异常，已保护底层错误细节。"
+
+
 def _run_report_assistant(
     f: Finding,
     r: Review | None,
@@ -828,11 +849,13 @@ def _run_report_assistant(
     cancel_event: threading.Event,
     emit=None,
 ) -> dict:
-    """运行报告助手；emit(event:dict) 可选回调，每完成一步就推一条事件用于流式展示。"""
-    llm = _llm_for_task(task)
-    executor = ToolExecutor(f"report_assistant_{f.target_url or f.id}", cancel_event=cancel_event)
-    messages = _build_assistant_messages(f, r, req)
+    """运行报告助手；emit(event:dict) 可选回调，每完成一步就推一条事件用于流式展示。
+
+    使用与 Worker 相同的 llm_client_for_task：任务/全局端点池、failover、冷却均生效。
+    LLMError（含池内全部端点失败）在此收敛为 answer，避免 SSE 路径把异常吞成「已完成」。
+    """
     tool_logs: list[dict] = []
+    executor: ToolExecutor | None = None
 
     def _emit(ev: dict) -> None:
         if emit:
@@ -842,9 +865,17 @@ def _run_report_assistant(
                 pass
 
     try:
+        llm = _llm_for_task(task)
+        executor = ToolExecutor(f"report_assistant_{f.target_url or f.id}", cancel_event=cancel_event)
+        messages = _build_assistant_messages(f, r, req)
         return _run_report_assistant_loop(llm, executor, messages, tool_logs, cancel_event, _emit)
+    except (LLMError, RuntimeError) as e:
+        msg = _assistant_unavailable_message(e)
+        _emit({"type": "final", "text": msg})
+        return {"answer": msg, "tool_logs": tool_logs}
     finally:
-        executor.kill_processes()
+        if executor is not None:
+            executor.kill_processes()
 
 
 def _run_report_assistant_loop(
@@ -1031,10 +1062,10 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
         cancel_event.set()
         future.add_done_callback(_consume_future_exception)
         assistant_content = f"报告助手执行超时（>{int(_ASSISTANT_WALL_TIMEOUT)}s），已触发底层工具清理。"
-    except LLMError as e:
-        assistant_content = f"报告助手暂不可用：{e}"
-    except Exception:
-        assistant_content = "报告助手暂不可用：内部执行异常，已保护底层错误细节。"
+    except (LLMError, RuntimeError) as e:
+        assistant_content = _assistant_unavailable_message(e)
+    except Exception as e:
+        assistant_content = _assistant_unavailable_message(e)
     f.assistant_messages = _sanitize_assistant_messages(
         persisted + [{"role": "user", "content": msg}, {"role": "assistant", "content": assistant_content}],
     )
@@ -1122,8 +1153,15 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
                 result = await asyncio.wait_for(asyncio.shield(future), timeout=5)
                 final_answer = result.get("answer") or final_answer
                 tool_count = len(result.get("tool_logs") or []) or tool_count
+            except (LLMError, RuntimeError) as e:
+                if not final_answer:
+                    final_answer = _assistant_unavailable_message(e)
             except Exception:
-                pass
+                # future 已失败但异常类型非预期时，仍避免把池耗尽伪装成「已完成」
+                if not final_answer and future.done() and not future.cancelled():
+                    exc = future.exception()
+                    if exc is not None:
+                        final_answer = _assistant_unavailable_message(exc)
             if timed_out and not final_answer:
                 final_answer = f"报告助手执行超时（>{int(_ASSISTANT_WALL_TIMEOUT)}s），已触发底层工具清理。"
             if not final_answer:

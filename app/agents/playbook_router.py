@@ -242,10 +242,12 @@ def _path(url: str) -> str:
 
 
 def _port(url: str) -> int:
+    from app.urlnorm import safe_port, safe_urlparse
     try:
-        p = urlparse(url or "")
-        if p.port:
-            return p.port
+        p = safe_urlparse(url or "")
+        port = safe_port(p)
+        if port:
+            return port
         return 443 if p.scheme == "https" else 80
     except Exception:
         return 80

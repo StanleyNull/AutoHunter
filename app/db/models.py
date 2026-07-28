@@ -56,6 +56,8 @@ class Task(Base):
     target_source: Mapped[str] = mapped_column(String(20), default="fofa")  # fofa / manual / both / site
     fofa_query: Mapped[str] = mapped_column(Text, default="")
     manual_targets: Mapped[list] = mapped_column(JSON, default=list)
+    # 用户登录凭据绑定列表：[{target, username, password, cookie, authorization, login_url, raw, note}]
+    auth_bindings: Mapped[list] = mapped_column(JSON, default=list)
     model_config_json: Mapped[dict] = mapped_column("model_config", JSON, default=dict)
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
@@ -117,6 +119,10 @@ class Target(Base):
     user_credentials: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 注册助手对话历史：[{role:'user'|'assistant', content:'...'}]，按 target 持久化
     assistant_messages: Mapped[list] = mapped_column(JSON, default=list)
+    # 用户凭据：入队时从 Task.auth_bindings 匹配写入；worker 启动 bootstrap 用。
+    auth_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 最近一次凭据使用反馈（无明文）：status/kinds/reason/...
+    auth_status: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     assigned_worker: Mapped[str] = mapped_column(String(64), default="")
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -158,6 +164,9 @@ class Finding(Base):
     assistant_messages: Mapped[list] = mapped_column(JSON, default=list)
     self_check: Mapped[dict] = mapped_column(JSON, default=dict)
     dedup_key: Mapped[str] = mapped_column(String(128), default="", index=True)  # 漏洞级去重
+    # 端点池归因：submit 当时实际打出该洞的模型（单端点模式也会记录）
+    llm_model: Mapped[str] = mapped_column(String(200), default="")
+    llm_base_url: Mapped[str] = mapped_column(String(300), default="")
     # pending_review / reviewed
     status: Mapped[str] = mapped_column(String(20), default="pending_review", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

@@ -116,11 +116,6 @@ def resolve_role(token: str | None) -> str | None:
     return None
 
 
-def valid_token(token: str | None) -> bool:
-    """任意有效令牌（含只读/观摩）。"""
-    return resolve_role(token) is not None
-
-
 def observer_path_allowed(path: str) -> bool:
     """观摩令牌可访问的只读路径白名单。
 

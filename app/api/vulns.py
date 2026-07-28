@@ -49,6 +49,8 @@ def _vuln_dict(f: Finding, r: Review, task_name: str = "") -> dict:
             if isinstance(s, dict) and s.get("method")
         ],
         "created_at": to_cst_iso(f.created_at),
+        "llm_model": getattr(f, "llm_model", "") or "",
+        "llm_base_url": getattr(f, "llm_base_url", "") or "",
         "confidence": r.confidence,
         "score": r.score,
         "effective_severity": r.user_severity or r.severity_final,

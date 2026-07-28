@@ -1,6 +1,9 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
+import { useAuthBindings, emptyBinding } from "../composables/useAuthBindings.js";
+import LlmModelPicker from "./LlmModelPicker.vue";
+import LlmPoolEditor from "./LlmPoolEditor.vue";
 
 const props = defineProps({
   open: Boolean,
@@ -8,29 +11,35 @@ const props = defineProps({
 });
 const emit = defineEmits(["close", "saved"]);
 
-const models = ref([]);            // 拉取到的可用模型列表
+const models = ref([]);
 const modelsLoading = ref(false);
 const modelsError = ref("");
-const useCustomModel = ref(false); // 列表外手输模式
+const taskProviders = ref([]);
+const poolEditor = ref(null);
+// inherit | single | pool
+const modelMode = ref("inherit");
 
 async function loadModels() {
+  if (!props.task?.id || modelMode.value !== "single") return;
   modelsLoading.value = true;
   modelsError.value = "";
   try {
-    const res = await api.listModels(form.base_url || undefined, form.api_key || undefined);
+    const res = await api.taskModels(props.task.id, {
+      base_url: form.base_url || undefined,
+      api_key: form.api_key || undefined,
+      key_ref: form.key_ref || undefined,
+      protocol: form.protocol,
+    });
     if (res?.ok && res.models?.length) {
       models.value = res.models;
-      // 当前模型不在列表里 → 默认进入手输模式，避免选错
-      useCustomModel.value = !!form.model && !models.value.includes(form.model);
+      if (!form.model || !models.value.includes(form.model)) form.model = models.value[0];
     } else {
       models.value = [];
       modelsError.value = res?.error || "未获取到模型列表";
-      useCustomModel.value = true;
     }
   } catch (e) {
     models.value = [];
     modelsError.value = "拉取失败，可手动输入模型名";
-    useCustomModel.value = true;
   } finally {
     modelsLoading.value = false;
   }
@@ -49,7 +58,9 @@ const form = reactive({
   cas_sso_config: "",
   base_url: "",
   api_key: "",
+  key_ref: "",
   model: "",
+  protocol: "auto",
   prompt_version: "legacy",
   fofa_key: "",
   fofa_base_url: "",
@@ -60,9 +71,13 @@ const form = reactive({
   enable_killsweep_fofa_search: true,
   skip_site_recon: false,
 });
+const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions } =
+  useAuthBindings(() => form.manual_targets);
+const saving = ref(false);
 const original = reactive({
   base_url: "",
   model: "",
+  protocol: "auto",
   prompt_version: "legacy",
   intent_mode: "",
   fofa_base_url: "",
@@ -70,6 +85,32 @@ const original = reactive({
   page_size: 100,
 });
 const isSiteMode = computed(() => form.target_source === "site");
+const isFofaMode = computed(() => form.target_source === "fofa");
+const showAuthBindings = computed(() => !isFofaMode.value);
+
+function invalidateModelKey() {
+  form.key_ref = "";
+  models.value = [];
+  modelsError.value = "";
+}
+
+function loadAuthBindings(task) {
+  const rows = Array.isArray(task?.auth_bindings) ? task.auth_bindings : [];
+  if (!rows.length) {
+    authBindings.value = [emptyBinding()];
+    return;
+  }
+  authBindings.value = rows.map((b) => ({
+    target: b.target || "*",
+    raw: b.raw || "",
+    username: b.username || "",
+    password: b.password || "",
+    cookie: b.cookie || "",
+    authorization: b.authorization || "",
+    login_url: b.login_url || "",
+    note: b.note || "",
+  }));
+}
 
 function fill(task) {
   if (!task) return;
@@ -87,7 +128,9 @@ function fill(task) {
   form.cas_sso_config = task.cas_sso_config || "";
   form.base_url = modelCfg.base_url || "";
   form.api_key = "";
+  form.key_ref = modelCfg.key_ref || "";
   form.model = modelCfg.model || "";
+  form.protocol = modelCfg.protocol || "auto";
   form.prompt_version = modelCfg.prompt_version || "legacy";
   form.fofa_key = "";
   form.fofa_base_url = fofaCfg.base_url || "";
@@ -97,33 +140,104 @@ function fill(task) {
   form.concurrency = task.concurrency || 3;
   form.enable_worker_fofa_lookup = task.enable_worker_fofa_lookup ?? true;
   form.enable_killsweep_fofa_search = task.enable_killsweep_fofa_search ?? true;
+  loadAuthBindings(task);
+
+  const providers = Array.isArray(modelCfg.providers) ? modelCfg.providers : [];
+  taskProviders.value = providers.map((p, idx) => ({
+    name: p.name || `llm-${idx + 1}`,
+    base_url: p.base_url || "",
+    api_key: "",
+    api_key_set: !!p.api_key_set,
+    api_key_masked: p.api_key_masked || "",
+    key_ref: p.key_ref || "",
+    model: p.model || "",
+    protocol: p.protocol || "auto",
+    temperature: p.temperature ?? 0.3,
+    weight: p.weight ?? 1,
+    enabled: p.enabled !== false,
+    models: [],
+    modelsLoading: false,
+    modelsError: "",
+  }));
+
+  if (modelCfg.inherit_global !== false && !providers.length) {
+    modelMode.value = "inherit";
+  } else if (providers.length || modelCfg.mode === "pool") {
+    modelMode.value = "pool";
+  } else {
+    modelMode.value = "single";
+  }
   original.base_url = form.base_url;
   original.model = form.model;
+  original.protocol = form.protocol;
   original.prompt_version = form.prompt_version;
   original.intent_mode = form.intent_mode;
   original.fofa_base_url = form.fofa_base_url;
   original.max_pages = Number(form.max_pages);
   original.page_size = Number(form.page_size);
-  // 重置模型列表状态（打开弹窗时 watch 会随即自动 loadModels 拉好列表）
   models.value = [];
   modelsError.value = "";
-  useCustomModel.value = false;
 }
 
 watch(() => props.task, fill, { immediate: true });
 watch(() => props.open, (open) => {
   if (open) {
     fill(props.task);
-    loadModels();  // 打开即自动拉好可用模型列表，默认下拉选择
+    if (modelMode.value === "single") loadModels();
+  }
+});
+watch(modelMode, (mode) => {
+  if (mode === "single" && props.open) loadModels();
+  if (mode === "pool" && !taskProviders.value.length) {
+    taskProviders.value = [{
+      name: "llm-1",
+      base_url: form.base_url || "https://api.deepseek.com/v1",
+      api_key: "",
+      api_key_set: false,
+      api_key_masked: "",
+      key_ref: "",
+      model: form.model || "deepseek-chat",
+      protocol: form.protocol || "auto",
+      temperature: 0.3,
+      weight: 1,
+      enabled: true,
+      models: [],
+      modelsLoading: false,
+      modelsError: "",
+    }];
   }
 });
 
 async function save() {
-  const modelConfig = {};
-  if (form.base_url !== original.base_url) modelConfig.base_url = form.base_url;
-  if (form.model !== original.model) modelConfig.model = form.model;
+  if (modelMode.value === "single" && !form.api_key.trim() && !form.key_ref) return;
+  if (modelMode.value === "pool") {
+    const rows = poolEditor.value?.exportProviders?.() || [];
+    if (!rows.length || rows.some((p) => !p.base_url || !p.model || (!p.api_key && !p.key_ref))) {
+      alert("端点池每个端点都需要 base_url / 模型 / api_key（已保存的可留空保留）");
+      return;
+    }
+  }
+  if (saving.value) return;
+  saving.value = true;
+  try {
+  let modelConfig;
+  if (modelMode.value === "inherit") {
+    modelConfig = { inherit_global: true };
+  } else if (modelMode.value === "pool") {
+    modelConfig = {
+      inherit_global: false,
+      providers: poolEditor.value?.exportProviders?.() || [],
+    };
+  } else {
+    modelConfig = {
+      inherit_global: false,
+      base_url: form.base_url,
+      model: form.model,
+      protocol: form.protocol,
+    };
+    if (form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
+  }
   if (form.prompt_version !== original.prompt_version) modelConfig.prompt_version = form.prompt_version;
-  if (form.api_key.trim()) modelConfig.api_key = form.api_key.trim();
 
   const maxPages = parseInt(form.max_pages) || 20;
   const pageSize = parseInt(form.page_size) || 100;
@@ -133,7 +247,6 @@ async function save() {
   if (form.intent_mode !== original.intent_mode) fofaConfig.intent_mode = form.intent_mode;
   if (form.fofa_key.trim()) fofaConfig.key = form.fofa_key.trim();
   if (form.fofa_base_url !== original.fofa_base_url) fofaConfig.base_url = form.fofa_base_url;
-  // 单站模式：总是显式带上开关值，支持从 true 改回 false。
   if (isSiteMode.value) fofaConfig.skip_site_recon = !!form.skip_site_recon;
 
   const updated = await api.updateTask(props.task.id, {
@@ -144,6 +257,7 @@ async function save() {
     engine: form.engine,
     fofa_query: form.fofa_query,
     manual_targets: form.manual_targets.split("\n").map((s) => s.trim()).filter(Boolean),
+    auth_bindings: showAuthBindings.value ? exportAuthBindings() : [],
     src_rules: form.src_rules,
     cas_sso_config: form.cas_sso_config,
     concurrency: parseInt(form.concurrency) || 3,
@@ -153,6 +267,9 @@ async function save() {
     fofa_config: fofaConfig,
   });
   emit("saved", updated);
+  } finally {
+    saving.value = false;
+  }
 }
 </script>
 
@@ -198,20 +315,55 @@ async function save() {
         <label v-if="!isSiteMode">搜集方式
           <select v-model="form.intent_mode">
             <option value="">自动判断</option>
-            <option value="syntax">FOFA 语法</option>
+            <option value="syntax">查询语法（FOFA 或引擎原生均可）</option>
             <option value="intent">自然语言意图</option>
           </select>
         </label>
       </div>
 
       <label>漏洞类型（逗号分隔） <input v-model="form.vuln_types" /></label>
-      <label v-if="!isSiteMode">FOFA 语法 / 搜集意图 <input v-model="form.fofa_query" /></label>
-      <label v-else>目标相关信息 / 协作重点 / 已有凭据
-        <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置，以及【已有的登录凭据】。给了凭据 Agent 会先前台测、再登录进系统内部深挖。&#10;例：后台在 /admin；已有账号 test / Test@123；或 Cookie: JSESSIONID=xxxx"></textarea>
+      <label v-if="!isSiteMode">查询语法 / 搜集意图 <input v-model="form.fofa_query" /></label>
+      <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
+        FOFA 语法会自动翻译到当前引擎；直接写该引擎原生语法则原样透传。
+      </p>
+      <label v-else>目标相关信息 / 协作重点
+        <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>
       </label>
       <label>{{ isSiteMode ? "主目标 URL（每行一个，会自动拆成多条协作路线）" : "手动目标清单（每行一个）" }}
         <textarea v-model="form.manual_targets" rows="3"></textarea>
       </label>
+
+      <section v-if="showAuthBindings" class="auth-bindings">
+        <div class="auth-bindings-head">
+          <strong>登录凭据（按目标绑定，可选）</strong>
+          <button type="button" class="linkish" @click="addBinding">+ 添加一条</button>
+        </div>
+        <p class="field-hint">不填不影响挖掘。填了会强制尝试并在看板反馈成败。</p>
+        <div v-for="(b, i) in authBindings" :key="i" class="auth-binding-row">
+          <div class="auth-binding-top">
+            <label>绑定目标
+              <select v-model="b.target">
+                <option v-for="opt in bindingOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+            </label>
+            <button type="button" class="icon-btn" title="删除" @click="removeBinding(i)">×</button>
+          </div>
+          <label>快捷粘贴
+            <textarea v-model="b.raw" rows="2" placeholder="Cookie: ... / Bearer ... / 账号+密码"></textarea>
+          </label>
+          <details>
+            <summary>结构化字段</summary>
+            <div class="auth-grid">
+              <label>账号 <input v-model="b.username" autocomplete="off" /></label>
+              <label>密码 <input v-model="b.password" type="password" autocomplete="new-password" /></label>
+              <label class="span2">Cookie <input v-model="b.cookie" /></label>
+              <label class="span2">Authorization <input v-model="b.authorization" /></label>
+              <label class="span2">登录 URL <input v-model="b.login_url" /></label>
+            </div>
+          </details>
+        </div>
+      </section>
+
       <label v-if="isSiteMode" class="check-line">
         <input type="checkbox" v-model="form.skip_site_recon" />
         跳过入口盘点侦察（省 token）
@@ -223,38 +375,45 @@ async function save() {
 
       <details open>
         <summary>高级：模型 / FOFA</summary>
-        <div class="settings-grid">
-          <label>模型 base_url <input v-model="form.base_url" placeholder="https://api.deepseek.com/v1" /></label>
+        <div class="llm-mode-switch" role="tablist" aria-label="任务模型方案">
+          <button type="button" role="tab" :aria-selected="modelMode === 'inherit'" :class="{ active: modelMode === 'inherit' }" @click="modelMode = 'inherit'">跟随系统</button>
+          <button type="button" role="tab" :aria-selected="modelMode === 'single'" :class="{ active: modelMode === 'single' }" @click="modelMode = 'single'">单端点</button>
+          <button type="button" role="tab" :aria-selected="modelMode === 'pool'" :class="{ active: modelMode === 'pool' }" @click="modelMode = 'pool'">端点池</button>
+        </div>
+
+        <div v-if="modelMode === 'single'" class="settings-grid">
+          <label>模型 base_url <input v-model="form.base_url" required placeholder="https://api.deepseek.com/v1" @input="invalidateModelKey" /></label>
           <label class="model-field">
             模型名
-            <div class="model-picker">
-              <select v-if="models.length && !useCustomModel" v-model="form.model">
-                <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
-              </select>
-              <input v-else v-model="form.model" placeholder="deepseek-chat" />
-              <button type="button" class="ghost-btn" :disabled="modelsLoading" @click="loadModels" title="改了 base_url/api_key 后可重新拉取">
-                {{ modelsLoading ? "拉取中…" : "刷新" }}
-              </button>
-              <button
-                v-if="models.length"
-                type="button"
-                class="ghost-btn"
-                @click="useCustomModel = !useCustomModel"
-              >
-                {{ useCustomModel ? "选列表" : "手动输入" }}
-              </button>
-            </div>
-            <small v-if="modelsError" class="model-hint">{{ modelsError }}</small>
-            <small v-else-if="models.length" class="model-hint">已获取 {{ models.length }} 个可用模型</small>
+            <LlmModelPicker
+              v-model="form.model"
+              :models="models"
+              :loading="modelsLoading"
+              :error="modelsError"
+              required
+              refresh-label="刷新"
+              @refresh="loadModels"
+            />
           </label>
-          <label>Worker 提示词
-            <select v-model="form.prompt_version">
-              <option value="current">current（当前省 token 版）</option>
-              <option value="legacy">legacy（旧版 23/25 风格）</option>
-              <option value="modern">modern（当前完整版）</option>
+          <label>模型协议
+            <select v-model="form.protocol" @change="invalidateModelKey">
+              <option value="auto">自动识别</option>
+              <option value="openai_chat">OpenAI Chat Completions</option>
+              <option value="anthropic_messages">Anthropic Messages</option>
             </select>
           </label>
-          <label>模型 api_key <input v-model="form.api_key" type="password" placeholder="留空保留原值" /></label>
+          <label>模型 api_key <input v-model="form.api_key" :required="!form.key_ref" type="password" :placeholder="form.key_ref ? '已配置，留空保留原值' : 'sk-...'" /></label>
+        </div>
+
+        <LlmPoolEditor
+          v-else-if="modelMode === 'pool'"
+          ref="poolEditor"
+          v-model="taskProviders"
+          :task-id="task?.id || ''"
+          :defaults="{ base_url: form.base_url, model: form.model, protocol: form.protocol }"
+        />
+
+        <div class="settings-grid" style="margin-top: 12px">
           <label v-if="!isSiteMode">FOFA key <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
           <label v-if="!isSiteMode">FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>
           <label v-if="!isSiteMode">FOFA 最大页数 <input v-model="form.max_pages" type="number" min="1" max="200" /></label>
@@ -278,7 +437,7 @@ async function save() {
 
       <footer>
         <button type="button" @click="emit('close')">取消</button>
-        <button type="submit" class="primary">保存参数</button>
+        <button type="submit" class="primary" :disabled="saving">{{ saving ? "保存中…" : "保存参数" }}</button>
       </footer>
     </form>
   </div>

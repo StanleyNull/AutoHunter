@@ -2,144 +2,153 @@
 
 <img src="assets/banner.png" alt="AutoHunter" width="880">
 
-多 Agent 协同 · 24×7 自动挖洞 · 人工只做复审决策
+### 多 Agent 协同 · 24×7 自动挖洞 · 人工只做复审决策
 
 `锁定 · 侦察 · 出洞`
 
-Powered By **StanleyNull** · License: CC BY-NC 4.0
+[![Stars](https://img.shields.io/github/stars/StanleyNull/AutoHunter?style=flat-square&logo=github&color=f5c518)](https://github.com/StanleyNull/AutoHunter/stargazers)
+[![Forks](https://img.shields.io/github/forks/StanleyNull/AutoHunter?style=flat-square&logo=github)](https://github.com/StanleyNull/AutoHunter/network/members)
+[![Issues](https://img.shields.io/github/issues/StanleyNull/AutoHunter?style=flat-square&logo=github)](https://github.com/StanleyNull/AutoHunter/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/StanleyNull/AutoHunter?style=flat-square)](https://github.com/StanleyNull/AutoHunter/commits)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3-4FC08D?style=flat-square&logo=vue.js&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose%20v2-2496ED?style=flat-square&logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue?style=flat-square)
 
-作者 EDUSRC 主页：<https://src.sjtu.edu.cn/profile/46491/>
+**一台机器 = 24×7 不停歇的挖洞平台。你只当「人工复审员」，醒来几分钟完成裁决。**
 
-🌱 **本项目为 Demo 级别，作者抛砖引玉，希望对大家有所帮助。**
+[快速开始](#快速开始) · [功能亮点](#功能亮点) · [创建任务](#创建任务) · [配置](#必填与推荐配置) · [运维](#运维与长期运行) · [避坑](#注意事项与避坑)
 
-**战绩可查**
+Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/profile/46491/>
+
+<br>
 
 <img src="assets/proof-results.png" alt="战绩可查" width="480">
 
+<sub>战绩可查</sub>
+
 </div>
+
+> [!WARNING]
+> **仅限对已获明确书面授权的目标使用。** 本工具遵循 CC BY-NC 4.0，禁止任何商业用途，滥用后果自负。
+
+> [!NOTE]
+> 🌱 本项目为 **Demo 级别**，作者抛砖引玉，欢迎 Star / Issue / 二次开发。
+
+---
+
+## 目录
+
+- [这是什么](#这是什么)
+- [功能亮点](#功能亮点)
+- [快速开始](#快速开始)
+- [创建任务](#创建任务)
+- [必填与推荐配置](#必填与推荐配置)
+- [运维与长期运行](#运维与长期运行)
+- [注意事项与避坑](#注意事项与避坑)
+- [技术栈](#技术栈)
+- [贡献与反馈](#贡献与反馈)
+- [许可协议](#许可协议)
 
 ---
 
 ## 这是什么
 
-AutoHunter 是一个**多 Agent 协同的自动化漏洞挖掘系统**。你把一台机器交给它当作 7×24 小时不停歇的挖洞平台，自己只做「人工复审员」：
+**AutoHunter** 是一个多 Agent 协同的自动化漏洞挖掘系统。你把一台机器交给它当作 7×24 小时不停歇的挖洞平台，自己只做「人工复审员」——AI 初审去掉垃圾洞后，你几分钟内完成调级 / 通过 / 打回 / 编辑 / 标记提交。
 
-```
-Collector（搜集）  →  Worker（1:1 真实挖洞）  →  Reviewer（AI 初审去垃圾）  →  人工复审 → 待提交
-     ↑ FOFA/手动录目标        ↑ LLM + 真实工具链（nmap/nuclei/sqlmap/httpx/JS 分析…）
+```mermaid
+flowchart LR
+    C["🛰️ Collector 搜集<br/>FOFA / 手动录入<br/>探活 · 评分 · 归属"] --> W["⚔️ Worker 挖洞 1:1<br/>LLM 自主侦察<br/>nmap · nuclei · sqlmap · httpx"]
+    W --> R{"🧪 Reviewer<br/>极理性初审"}
+    R -->|够格| H["👤 人工复审"]
+    R -->|回炉深挖| W
+    R -.->|垃圾/误报| X["🗑️ 丢弃"]
+    H -->|通过| S["📤 待提交清单"]
+    H -->|通过| K["💥 通杀 Hunter<br/>一打一片"]
+    K -.->|同款验证| W
 ```
 
 - **Collector**：从 FOFA 持续产出目标，探活、预筛、评分、归属标注后入队。
-- **Worker**：每个目标一个 Worker，LLM 自主侦察 + 调用真实工具挖洞，出洞即提交。
-- **Reviewer**：极理性 AI 初审，过滤半成品/误报，只把够格的洞送到人工面前。
+- **Worker**：每个目标一个 Worker，LLM 自主侦察 + 调用真实工具链挖洞，出洞即提交。
+- **Reviewer**：极理性 AI 初审，过滤半成品 / 误报，只把够格的洞送到人工面前。
 - **控制台**：实时看板一眼看清每个 Worker 在干什么、目标优先级、事件流；结果区高效复审、编辑、标记提交。
-- **归属标注**：写报告时按目标 IP/域名离线反查所属高校（`app/data_static/edu_ip.db`），自动填充报告归属单位与 EduSRC 提交 JSON 的标题/单位；重建脚本见 `tools/edu_ip_builder/`。
-
-> ⚠️ **仅限对已获明确书面授权的目标使用。** 本工具遵循 CC BY-NC 4.0，禁止商用。滥用后果自负。
 
 ---
 
-## 各平台环境准备
+## 功能亮点
 
-AutoHunter 全程基于 **Docker + Docker Compose v2** 运行，任意装得上 Docker 的系统都能跑。下面按平台给出准备步骤，装好 Docker 后统一走 [一键部署](#一键部署推荐) 或 [手动部署](#手动部署)。
+| | |
+|---|---|
+| 🤝 **多 Agent 协同** | Collector / Worker / Reviewer / 通杀 / 扩大危害 全流水线自动跑 |
+| 🌙 **24×7 无人值守** | 挂机过夜，重启自动续跑；你醒来只做复审决策 |
+| 🔧 **真实工具链挖洞** | 容器内置 nmap · nuclei · sqlmap · httpx · whatweb，LLM 真实发包/执行，不是纸上谈兵 |
+| 🧪 **极理性 AI 初审** | 只认「实际可利用 + 实锤危害」，过滤半成品，减少无效人工复审 |
+| 🏫 **归属离线反查** | 按 IP/域名离线查所属高校，自动填报告归属单位 + EduSRC 提交 JSON |
+| 💥 **通杀 Hunter** | 出洞后自动分析能否「一打一片」，实打多个同款站点验证 |
+| 🧠 **情报沉淀复用** | 验证过的凭证/端点/指纹入全局情报库，后续 Worker 直接复用 |
+| 🛡️ **内置 WAF + 鉴权** | 应用层 WAF 默认开启，多角色访问令牌（全权/只读/观摩） |
 
-<details open>
-<summary><b>🐧 Linux 服务器（推荐，Ubuntu / Debian / CentOS）</b></summary>
+---
 
-生产环境首选。2C4G 起步，磁盘 ≥ 20G。
+## 快速开始
+
+> [!TIP]
+> 全程基于 **Docker + Docker Compose v2**，任意装得上 Docker 的系统都能跑。生产环境推荐 Linux（2C4G 起步，磁盘 ≥ 20G）。
 
 ```bash
-# 1. 安装 Docker（官方一键脚本，适配主流发行版）
-curl -fsSL https://get.docker.com | sh
-sudo systemctl enable --now docker
+# 1. 装 Docker（官方一键脚本，已装可跳过）
+curl -fsSL https://get.docker.com | sh && sudo systemctl enable --now docker
+sudo usermod -aG docker $USER && newgrp docker      # 免 sudo，重登生效
 
-# 2. 把当前用户加入 docker 组（免 sudo，重登生效）
-sudo usermod -aG docker $USER && newgrp docker
-
-# 3. 验证
-docker version && docker compose version
-
-# 4. 拉代码 + 部署
+# 2. 拉代码 + 一键部署（交互式引导：填 LLM/FOFA Key → 自动生成令牌 → 构建启动）
 git clone https://github.com/StanleyNull/AutoHunter.git autohunter && cd autohunter
 bash scripts/install.sh
 ```
 
-**开放端口**（默认 18800）：
+引导脚本会：检查 Docker → 引导填 **LLM API Key**（必填）、**FOFA Key**（推荐）→ 自动生成高强度访问令牌 → 构建镜像并启动 → 打印访问地址和令牌。
+
+> 首次构建会编译前端 + 安装挖洞工具，约 **5–15 分钟**，请耐心等待。构建完浏览器访问 `http://<服务器IP>:18800/`，用打印出的令牌登录。
+
+**开放端口**（默认 18800，云服务器还需在厂商安全组放行）：
 
 ```bash
-# Ubuntu/Debian(ufw)
-sudo ufw allow 18800/tcp
-# CentOS/RHEL(firewalld)
-sudo firewall-cmd --permanent --add-port=18800/tcp && sudo firewall-cmd --reload
+sudo ufw allow 18800/tcp                                              # Ubuntu/Debian
+sudo firewall-cmd --permanent --add-port=18800/tcp && sudo firewall-cmd --reload   # CentOS/RHEL
 ```
-
-> 云服务器还需在厂商**安全组**里放行 18800（或你自定义的 `AUTOHUNTER_HOST_PORT`）。
-
-**SSH 断开后仍要运行**：容器由 Docker 守护，`docker compose up -d` 已是后台运行，关掉 SSH 不影响。可选设开机自启见下方 [服务器长期运行](#服务器长期运行--开机自启)。
-
-</details>
 
 <details>
 <summary><b>🪟 Windows（Docker Desktop + WSL2）</b></summary>
 
-适合本地跑 / 自用。Windows 10/11 均可。
+<br>
 
-1. **装 WSL2**（管理员 PowerShell）：
-   ```powershell
-   wsl --install
-   ```
-   装完重启。
-
-2. **装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)**：安装时勾选 “Use WSL 2 based engine”，启动后在 Settings → Resources → WSL Integration 打开集成。
-
-3. **拉代码 + 部署**（在 PowerShell 或 WSL 终端里）：
-   ```powershell
-   git clone https://github.com/StanleyNull/AutoHunter.git autohunter
-   cd autohunter
+1. 管理员 PowerShell 装 WSL2：`wsl --install`，装完重启。
+2. 装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，安装勾选 “Use WSL 2 based engine”，Settings → Resources → WSL Integration 打开集成。
+3. 在 **WSL / Git Bash** 里：
+   ```bash
+   git clone https://github.com/StanleyNull/AutoHunter.git autohunter && cd autohunter
    bash scripts/install.sh
    ```
-   > `install.sh` 是 bash 脚本，在 **WSL / Git Bash** 里跑最顺。若只用 PowerShell，也可走 [手动部署](#手动部署)：`copy .env.example .env`，编辑后 `docker compose up -d --build`。
+4. 访问 `http://localhost:18800/`。
 
-4. 浏览器访问 `http://localhost:18800/`。
-
-> 💡 Windows 下代码放在 **WSL 文件系统内**（如 `~/autohunter`）比放在 `C:\` 挂载盘性能好很多。
+> 💡 代码放在 **WSL 文件系统内**（如 `~/autohunter`）比放 `C:\` 挂载盘性能好很多。只用 PowerShell 的话走下方手动部署。
 
 </details>
 
 <details>
 <summary><b>🍎 macOS（Docker Desktop）</b></summary>
 
-1. 装 [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/)（Apple Silicon / Intel 均支持），启动它。
-2. 部署：
-   ```bash
-   git clone https://github.com/StanleyNull/AutoHunter.git autohunter && cd autohunter
-   bash scripts/install.sh
-   ```
+<br>
+
+1. 装 [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/)（Apple Silicon / Intel 均支持）并启动。
+2. `git clone https://github.com/StanleyNull/AutoHunter.git autohunter && cd autohunter && bash scripts/install.sh`
 3. 访问 `http://localhost:18800/`。
 
 </details>
 
----
+<details>
+<summary><b>🔧 手动部署（不用 install.sh）</b></summary>
 
-## 一键部署（推荐）
-
-> 前置：一台 Linux 服务器（2C4G 起步，磁盘 ≥ 20G），已装 [Docker](https://docs.docker.com/engine/install/) + Docker Compose v2。
-
-```bash
-# 1. 拉取代码
-git clone <your-repo-url> autohunter && cd autohunter
-
-# 2. 运行引导脚本（带字符画，交互式采集必填参数，自动生成 .env、构建并启动）
-bash scripts/install.sh
-```
-
-脚本会：检查 Docker 环境 → 引导你填 **LLM API Key**（必填）、**FOFA Key**（推荐）→ 自动生成高强度访问令牌 → 构建镜像并启动 → 打印访问地址和令牌。
-
-> 首次构建会编译前端 + 安装挖洞工具（nmap / nuclei / sqlmap / httpx / whatweb 等），约 5–15 分钟，请耐心等待。
-
----
-
-## 手动部署
+<br>
 
 ```bash
 cp .env.example .env
@@ -150,42 +159,44 @@ docker compose up -d --build
 docker compose logs -f autohunter   # 看启动日志
 ```
 
-启动后访问 `http://<服务器IP>:18800/`，用你在 `.env` 里设置的 `AUTOHUNTER_API_TOKEN` 登录。
+启动后访问 `http://<服务器IP>:18800/`，用 `.env` 里设置的 `AUTOHUNTER_API_TOKEN` 登录。
+
+</details>
 
 ---
 
-## 创建任务：配置怎么填
+## 创建任务
 
-登录控制台 → 「新建挖掘任务」，各字段含义如下：
+登录控制台 → 「新建挖掘任务」，各字段含义：
 
 | 字段 | 填什么 | 说明 |
 |------|--------|------|
-| **任务名称** | 随便起，方便自己区分 | 如 `edu批量挖掘-2026` |
+| **任务名称** | 随便起，方便区分 | 如 `edu批量挖掘-2026` |
 | **任务模式** | `EduSRC` / `企业SRC` | 决定评分口径和审核标准，教育资产选 EduSRC |
-| **漏洞类型** | 逗号分隔 | 默认 `sql_injection,rce,unauthorized_access,idor,file_upload,captcha_bypass`，一般不用改 |
+| **漏洞类型** | 逗号分隔 | 默认 `sql_injection,rce,unauthorized_access,idor,file_upload,captcha_bypass,backdoor_compromised`，一般不用改 |
 | **目标来源** | `FOFA 自动搜` / `手动清单` / `两者` / `单站协作` | 想让它自己找目标就选 FOFA |
-| **搜集方式** | `自动判断` / `FOFA 语法` / `自然语言意图` | 见下方说明 |
-| **FOFA 语法 / 搜集意图** | 你的查询语句或大白话 | 见下方示例 |
-| **手动目标清单** | 每行一个 URL | 选了「手动/两者/单站」时填 |
+| **搜集方式** | `自动判断` / `FOFA 语法` / `自然语言意图` | 见下方 |
+| **FOFA 语法 / 搜集意图** | 查询语句或大白话 | 见下方示例 |
+| **手动目标清单** | 每行一个 URL | 选「手动/两者/单站」时填 |
 
 ### 两种搜集方式
 
-**① 我自己会写 FOFA 语法** → 搜集方式选 `FOFA 语法`，直接把语句粘进去。例如挖教育网（CERNET）下带「管理」后台的资产：
+**① 会写 FOFA 语法** → 选 `FOFA 语法`，直接粘语句。例如挖教育网（CERNET）下带「管理」后台的资产：
 
 ```text
 body="管理" && org="China Education and Research Network Center"
 ```
 
-**② 不会写语法，只想说要找什么** → 搜集方式选 `自然语言意图`，用大白话描述，搜集 Agent 会自动翻译成 FOFA 语法并逐轮演化。例如：
+**② 不会写语法，只想说要找什么** → 选 `自然语言意图`，用大白话描述，搜集 Agent 自动翻译成 FOFA 语法并逐轮演化：
 
 ```text
 找全国高校的统一身份认证登录系统
 找某集团的 OA / CRM / ERP / API 网关 / 运维后台资产
 ```
 
-> 留空「搜集方式」= **自动判断**：写得像语法就当语法，否则当意图，新手直接用这个即可。
+> 留空「搜集方式」= **自动判断**（写得像语法就当语法，否则当意图），新手直接用这个。
 
-### FOFA 语法速查（常用字段）
+### FOFA 语法速查
 
 | 字段 | 含义 | 示例 |
 |------|------|------|
@@ -194,37 +205,38 @@ body="管理" && org="China Education and Research Network Center"
 | `domain=` | 域名 | `domain=".edu.cn"` |
 | `host=` | 主机名 | `host="admin.example.com"` |
 | `org=` | 所属机构（归属收窄利器） | `org="China Education and Research Network Center"` |
-| `cert=` / `cert.subject.org=` | 证书信息 | `cert.subject.org="某某大学"` |
+| `cert.subject.org=` | 证书机构 | `cert.subject.org="某某大学"` |
 | `port=` / `country=` | 端口 / 国家 | `port="8080" && country="CN"` |
 
 组合逻辑：`&&`（且）、`||`（或）、`!=`（非）。**语句越精确、归属越收窄，Worker 越不会打到范围外资产。**
 
-### 高级选项（可留空，用服务端默认）
+> [!IMPORTANT]
+> **务必收窄授权范围**：只搜你有权限测试的资产。`org` / `domain` / `cert` 是最有效的归属过滤手段。
 
-展开「高级」可**按任务单独覆盖**：模型 `base_url`/`api_key`/模型名、Worker 提示词版本、FOFA key、FOFA 最大页数、Worker 并发数。不填就继承「设置」页的全局默认。
-
-> ⚠️ **务必收窄授权范围**：只搜你有权限测试的资产。`org` / `domain` / `cert` 是最有效的归属过滤手段。
+展开「高级」还可**按任务单独覆盖**：模型 `base_url`/`api_key`/模型名、FOFA key、FOFA 最大页数、Worker 并发数。不填就继承「设置」页全局默认。
 
 ---
 
-## 必填 / 推荐配置
+## 必填与推荐配置
 
 | 变量 | 必填 | 说明 | 获取方式 |
 |------|:---:|------|---------|
 | `LLM_API_KEY` | ✅ **必填** | 大模型 API Key，平台核心 | [DeepSeek](https://platform.deepseek.com/) / OpenAI / 通义 / Kimi 等 |
 | `LLM_BASE_URL` | 默认 DeepSeek | OpenAI 兼容接口地址（需含 `/v1`） | 默认 `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 默认 deepseek-chat | 模型名 | 按模型商填 |
-| `FOFA_KEY` | ⭐ 推荐 | 资产测绘，用于自动搜集目标 | [FOFA 个人中心](https://fofa.info/) |
-| `FOFA_BASE_URL` | 可选，默认官方地址 | 自定义 FOFA API 端点（私有部署/镜像/代理网关） | 默认 `https://fofa.info` |
-| `AUTOHUNTER_API_TOKEN` | ⭐ 强烈建议 | 控制台全权限访问令牌，**不设则任何人可访问** | `install.sh` 自动生成，或自填随机串 |
+| `FOFA_KEY` | ⭐ 推荐 | 资产测绘，自动搜集目标 | [FOFA 个人中心](https://fofa.info/) |
+| `FOFA_BASE_URL` | 可选 | 自定义 FOFA API 端点（私有/镜像/代理） | 默认 `https://fofa.info` |
+| `AUTOHUNTER_API_TOKEN` | ⭐ 强烈建议 | 控制台全权限令牌，**不设则任何人可访问** | `install.sh` 自动生成，或自填随机串 |
 | `AUTOHUNTER_HOST_PORT` | 默认 18800 | 对外访问端口 | 按需 |
 
-> 其余全部参数（Worker 预算、并发、超时、WAF 等）都有合理默认值，见 `.env.example` 内注释，按需微调即可。
-> 也支持**不填 `.env`、直接在控制台「设置」页填 LLM/FOFA Key**——设置会存进数据库，优先级高于 `.env`。
+> 其余参数（Worker 预算、并发、超时、WAF 等）都有合理默认，见 `.env.example` 注释按需微调。
+> 也支持**不填 `.env`、直接在控制台「设置」页填 LLM/FOFA Key**——存进数据库，优先级高于 `.env`。
 
 ---
 
-## 常用运维命令
+## 运维与长期运行
+
+**常用命令**
 
 ```bash
 docker compose logs -f autohunter     # 实时日志
@@ -233,15 +245,14 @@ docker compose down                    # 停止（数据保留在 volume）
 docker compose up -d --build           # 更新代码后重建
 ```
 
-数据持久化在 Docker volume：`ah_data`（SQLite 数据库 + 漏洞证据）、`ah_work`（Worker 临时工作区）。**升级/重启不丢数据。**
+数据持久化在 Docker volume：`ah_data`（SQLite + 漏洞证据）、`ah_work`（Worker 临时工作区）。**升级/重启不丢数据。**
 
----
+**开机自启**：`docker compose up -d` 的容器默认 `restart: unless-stopped`，崩溃/重启会自动拉起。若想托管给 systemd：
 
-## 服务器长期运行 / 开机自启
+<details>
+<summary><b>systemd unit 示例</b></summary>
 
-`docker compose up -d` 启动的容器默认已配置 `restart: unless-stopped`——**容器崩溃或服务器重启后会自动拉起**，一般无需额外操作。
-
-若想让整套服务随系统开机、并托管给 systemd 管理，可加一个 unit：
+<br>
 
 ```bash
 sudo tee /etc/systemd/system/autohunter.service >/dev/null <<EOF
@@ -253,7 +264,7 @@ After=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=$(pwd)          # 指向 autohunter 目录
+WorkingDirectory=$(pwd)
 ExecStart=/usr/bin/docker compose up -d --build
 ExecStop=/usr/bin/docker compose down
 
@@ -261,12 +272,12 @@ ExecStop=/usr/bin/docker compose down
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable --now autohunter
-sudo systemctl status autohunter
+sudo systemctl daemon-reload && sudo systemctl enable --now autohunter
 ```
 
-**（可选）反向代理 + HTTPS**：生产环境建议前面挂一层 Nginx/Caddy，做域名 + TLS，再把 `AUTOHUNTER_HOST_PORT` 只绑到 `127.0.0.1` 不对公网直接暴露。Caddy 示例（自动签发证书）：
+</details>
+
+**反向代理 + HTTPS**（可选，生产推荐）：前面挂 Nginx/Caddy 做域名 + TLS，把 `AUTOHUNTER_HOST_PORT` 只绑 `127.0.0.1` 不对公网直接暴露。Caddy 示例：
 
 ```caddyfile
 hunt.example.com {
@@ -276,23 +287,35 @@ hunt.example.com {
 
 ---
 
-## 注意事项 / 避坑
+## 注意事项与避坑
 
-- **授权边界**：只测你有权限的目标。FOFA 语法要收窄归属（域名 / 证书 / org），别让 Worker 打到范围外资产。
-- **访问控制**：公网部署**务必设 `AUTOHUNTER_API_TOKEN`**，否则控制台和挖洞能力对全网裸奔。内置应用层 WAF 默认开启，但令牌是第一道门。
-- **成本控制**：Worker 靠 LLM 驱动，目标越多 token 消耗越大。可用 `.env` 里的 `WORKER_MAX_ROUNDS` / `*_BUDGET_CAP` 收紧预算，或降低任务并发。
-- **资源**：每个并发 Worker 会跑真实工具子进程。小内存机器请调小 `AUTOHUNTER_AGENT_THREAD_POOL_SIZE` 和任务并发数。
-- **网络**：服务器需能访问 LLM API 和目标网络。若走代理，给 Docker/容器配好出网。
-- **重启恢复**：`AUTOHUNTER_RESTORE_ON_STARTUP=1` 时重启会自动续跑之前 running 的任务；受限机器可设 `0`，只起 Web/API。
+> [!CAUTION]
+> **授权边界**：只测你有权限的目标，FOFA 语法要收窄归属（域名/证书/org），别让 Worker 打到范围外资产。
+> **访问控制**：公网部署**务必设 `AUTOHUNTER_API_TOKEN`**，否则控制台和挖洞能力对全网裸奔。内置 WAF 默认开启，但令牌是第一道门。
+
+- **成本控制**：Worker 靠 LLM 驱动，目标越多 token 越贵。用 `.env` 的 `WORKER_MAX_ROUNDS` / `*_BUDGET_CAP` 收紧预算，或降低并发。
+- **资源**：每个并发 Worker 会跑真实工具子进程。小内存机器调小 `AUTOHUNTER_AGENT_THREAD_POOL_SIZE` 和任务并发数。
+- **网络**：服务器需能访问 LLM API 和目标网络；走代理要给 Docker/容器配好出网。
+- **重启恢复**：`AUTOHUNTER_RESTORE_ON_STARTUP=1` 时重启自动续跑之前 running 的任务；受限机器设 `0` 只起 Web/API。
 
 ---
 
 ## 技术栈
 
-- 后端：Python 3.12 · FastAPI · SQLAlchemy(SQLite) · asyncio
-- 前端：Vue 3 · Vite
-- 模型：任意 OpenAI 兼容接口（DeepSeek / OpenAI / 通义 / Kimi …）
-- 工具链（容器内置）：nmap · nuclei · sqlmap · httpx · whatweb · curl/wget/jq 等
+| 层 | 选型 |
+|---|---|
+| 后端 | Python 3.12 · FastAPI · SQLAlchemy(SQLite) · asyncio |
+| 前端 | Vue 3 · Vite |
+| 模型 | 任意 OpenAI 兼容接口（DeepSeek / OpenAI / 通义 / Kimi …） |
+| 工具链（容器内置） | nmap · nuclei · sqlmap · httpx · whatweb · curl/wget/jq |
+
+---
+
+## 贡献与反馈
+
+- 🐛 发现 bug / 有建议 → 提 [Issue](https://github.com/StanleyNull/AutoHunter/issues)
+- ⭐ 觉得有用 → 点个 Star 支持一下
+- 🔀 欢迎 Fork 二次开发（保留署名、非商业用途）
 
 ---
 

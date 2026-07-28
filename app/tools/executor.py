@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import selectors
-import shlex
 import signal
 import sqlite3
 import subprocess
@@ -41,6 +40,9 @@ _PROXY_FAIL_THRESHOLD = 2
 # 单目标工作目录落地日志体积上限（字节）。24x7 防撞盘：超限后停止写新日志文件，
 # 仍把截断输出回传给 LLM，不影响挖掘，只是不再落地完整证据。
 _WORKDIR_MAX_BYTES = int(os.environ.get("WORKER_WORKDIR_MAX_BYTES", str(50 * 1024 * 1024)))
+# 每写这么多次日志做一次真实全目录体积校准（捕获 shell 子进程 curl -o/wget/重定向直落的顶层文件；
+# _dir_size 用非递归 glob，只数顶层文件，git clone 落的子目录树不在统计内）。
+_WORKDIR_RESCAN_EVERY = 32
 _SHELL_CAPTURE_MAX_BYTES = int(os.environ.get("WORKER_SHELL_CAPTURE_MAX_BYTES", str(512 * 1024)))
 _HTTP_MAX_BYTES = int(os.environ.get("WORKER_HTTP_MAX_BYTES", str(1024 * 1024)))
 
@@ -78,6 +80,7 @@ def _normalize_headers(headers: Any) -> dict[str, str]:
     elif isinstance(headers, (list, tuple)):
         for item in headers:
             if isinstance(item, dict):
+                # list[{"name":..,"value":..}] 或 list[{"K":"V"}]
                 if "name" in item and "value" in item:
                     lines.append(f"{item['name']}: {item['value']}")
                 else:
@@ -122,12 +125,18 @@ class ToolExecutor:
         # 会话态：worker 登录/拿到 token 后自动携带到后续 http_request，
         # 解决"明明登进去了，深挖请求却忘带凭证导致越权失败"的断链问题。
         # 每个 target 独立 executor 实例、session jar 相互隔离，不会串号。
-        # 全模式启用（登录后同样必须带登录态深入）。
+        # 全模式启用（edu 用泄露凭证/用户凭证登录后同样必须带登录态深入）。
         self._session_cookies: dict[str, str] = {}
         self._session_headers: dict[str, str] = {}
         # 工作笔记：worker 用 update_notes 工具维护，每轮注入回 messages，
         # 解决"历史压缩后忘了自己发现过什么"的连续性断裂问题。
         self._worker_notes: str = ""
+        # HTTP 会话复用：持久 httpx.Client（惰性创建），避免同 host 大量请求每次重做 TCP+TLS 握手。
+        self._client: Optional[httpx.Client] = None
+        # 工作目录体积：增量估算 + 周期性全目录校准（见 _write_log），避免每次写日志都全目录扫描。
+        self._workdir_bytes: int = self._dir_size()
+        self._writes_since_scan: int = 0
+        self._over_cap: bool = False   # 一旦确认超上限即置位：work_dir 只增不删，此后直接短路不再全扫
 
         # 代理模式：本地 IP 被目标 WAF 封禁后，http_request 透明改走 SSH 代理，
         # 保留同一 worker 的上下文与会话态（cookie jar 原地延续），无需重派。
@@ -155,6 +164,7 @@ class ToolExecutor:
         """
         for proc in list(self._active_procs):
             self._kill_process_group(proc)
+        self.close_http_client()
 
     # ---- run_shell ----
     def run_shell(self, command: str, timeout: Optional[int] = None) -> dict[str, Any]:
@@ -275,16 +285,61 @@ class ToolExecutor:
             return 0
 
     def _write_log(self, content: str) -> Optional[Path]:
-        """落地日志文件；工作目录超体积上限则跳过（返回 None），不再写盘。"""
-        if self._dir_size() >= _WORKDIR_MAX_BYTES:
+        """落地日志文件；工作目录超体积上限则跳过（返回 None），不再写盘。
+
+        体积用增量计数 self._workdir_bytes 估算，避免每次写日志都全目录扫描（聚合 O(files²)）；
+        每 _WORKDIR_RESCAN_EVERY 次写入做一次真实全目录扫描校准——因为 run_shell 的子进程
+        （curl -o / wget / 输出重定向等直落顶层文件）会绕过本函数，纯计数器会漏统计、弱化
+        _WORKDIR_MAX_BYTES 的防撞盘保护。估算值一旦达上限即置 _over_cap 终态、停止写盘且不再全扫。
+        """
+        # 超上限是终态（work_dir 只增不删）：直接短路，绝不再触发全目录扫描。
+        if self._over_cap:
+            return None
+        data = content.encode("utf-8")
+        # 仅按“写入次数”周期性校准，不再因“已达上限”而每次全扫（否则撞盘后退化成每写必扫）。
+        if self._writes_since_scan >= _WORKDIR_RESCAN_EVERY:
+            self._workdir_bytes = self._dir_size()
+            self._writes_since_scan = 0
+        if self._workdir_bytes >= _WORKDIR_MAX_BYTES:
+            self._over_cap = True
             return None
         self._log_seq += 1
         log_file = self.work_dir / f"shell_{self._log_seq}.log"
         try:
-            log_file.write_text(content, encoding="utf-8")
+            log_file.write_bytes(data)  # 与 write_text(encoding="utf-8") 字节数一致，便于精确计数
         except Exception:
             return None
+        self._workdir_bytes += len(data)
+        self._writes_since_scan += 1
         return log_file
+
+    def _get_http_client(self) -> httpx.Client:
+        """惰性复用的持久 HTTP client（连接池），避免同 host 大量请求重复 TCP+TLS 握手。
+
+        per-request 的 timeout/follow_redirects 在 build_request/send 时逐次覆盖；cookie 每次
+        请求前清空再从 self._session_cookies 重灌，保证会话态唯一真值来源、jar 不跨 host 累积。
+        """
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(
+                verify=False,
+                timeout=20,
+                follow_redirects=False,
+                limits=httpx.Limits(
+                    max_keepalive_connections=8, max_connections=32, keepalive_expiry=30.0
+                ),
+            )
+        return self._client
+
+    def close_http_client(self) -> None:
+        # 经 kill_processes 调用。正常完成时无 in-flight 请求；取消路径（cancel_running →
+        # kill_processes）下 worker 线程可能正在 send/iter，此时 close 会让该请求抛异常并被
+        # http_request 的 except 兜成 {ok:false}——这正是取消语义（放弃在途请求），有意为之。
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
 
     # ---- http_request ----
     def http_request(
@@ -316,21 +371,28 @@ class ToolExecutor:
             # 「302 连环跳 + 每跳发新 Cookie（lt→CASTGC→ST ticket→JSESSIONID）」登录链的关键。
             # 之前每次新建无 jar 的 Client + 只读最终 resp.cookies，会丢掉中间跳的 CASTGC/跨域
             # JSESSIONID，导致「明明账号对却始终登不进、没法进系统深挖」。
-            with httpx.Client(verify=False, follow_redirects=follow_redirects, timeout=timeout) as client:
-                # 先把已维持的 session cookie 灌进 client jar，重定向跳转时自动携带。
-                for _ck, _cv in self._session_cookies.items():
-                    try:
-                        client.cookies.set(_ck, _cv)
-                    except Exception:
-                        pass
-                req = client.build_request(
-                    method.upper(), url, headers=merged_headers, content=data, json=json_body
-                )
-                resp = client.send(req, stream=True)
-                body, truncated = self._read_limited_response(resp)
-                # 吸收整条重定向链（resp.history 里每个中间 302 + 最终响应）的 Set-Cookie，
-                # 而不是只读最终 resp.cookies；再兜底吸收 client.cookies jar 里的全部。
-                session_updated = self._absorb_redirect_chain(resp, client)
+            # 持久复用的 client（连接池）；timeout/follow_redirects 逐请求覆盖。
+            client = self._get_http_client()
+            # 每次请求前清空 jar 并仅灌入当前维持的 session cookie，保持与“每次新建 Client”
+            # 完全一致的会话语义，避免持久 jar 跨请求/跨 host 累积串号。
+            try:
+                client.cookies.clear()
+            except Exception:
+                pass
+            for _ck, _cv in self._session_cookies.items():
+                try:
+                    client.cookies.set(_ck, _cv)
+                except Exception:
+                    pass
+            req = client.build_request(
+                method.upper(), url, headers=merged_headers, content=data, json=json_body,
+                timeout=timeout,
+            )
+            resp = client.send(req, stream=True, follow_redirects=follow_redirects)
+            body, truncated = self._read_limited_response(resp)
+            # 吸收整条重定向链（resp.history 里每个中间 302 + 最终响应）的 Set-Cookie，
+            # 而不是只读最终 resp.cookies；再兜底吸收 client.cookies jar 里的全部。
+            session_updated = self._absorb_redirect_chain(resp, client)
         except Exception as e:
             return {"ok": False, "error": f"HTTP 请求异常: {e}", "url": url}
 
@@ -701,6 +763,7 @@ class ToolExecutor:
                     pass
             for name, value in resp.cookies.items():
                 self._put_cookie(name, value, updated)
+            # 兜底：client jar 里可能还有 history/resp.cookies 没暴露出来的（不同域）。
             try:
                 for ck in client.cookies.jar:
                     if ck.name and ck.value:
@@ -757,18 +820,43 @@ class ToolExecutor:
         进度（端点/凭据/已试方向/下一步计划），不会重复扫同一条路。
         """
         lines = ["# 当前状态（跨轮持久，每轮自动注入）"]
+        # 会话态
         cookies = sorted(self._session_cookies.keys()) if self._session_cookies else []
         headers = sorted(self._session_headers.keys()) if self._session_headers else []
         if cookies or headers:
             lines.append(f"- 会话态：持有 cookie {cookies}，鉴权头 {headers}（http_request 自动携带）")
         else:
             lines.append("- 会话态：暂无登录态（拿到凭证后用 session_set 登记）")
+        # 工作笔记
         if self._worker_notes:
             lines.append("- 工作笔记：")
             lines.append(self._worker_notes)
         else:
             lines.append("- 工作笔记：（暂无。发现端点/凭据/token/突破口后用 update_notes 记录，否则跨轮会忘）")
         return "\n".join(lines) + "\n\n"
+
+    def export_resume_state(self) -> dict[str, Any]:
+        """导出可跨 worker 续挖的进度快照（笔记 + 会话态）。"""
+        return {
+            "worker_notes": self._worker_notes or "",
+            "session_cookies": dict(self._session_cookies or {}),
+            "session_headers": dict(self._session_headers or {}),
+        }
+
+    def restore_resume_state(
+        self,
+        *,
+        worker_notes: str = "",
+        session_cookies: dict | None = None,
+        session_headers: dict | None = None,
+    ) -> None:
+        """从上一轮 LLM 中断快照恢复笔记与会话态。"""
+        if worker_notes:
+            self._worker_notes = str(worker_notes).strip()[:4000]
+        cookies = session_cookies if isinstance(session_cookies, dict) else {}
+        headers = session_headers if isinstance(session_headers, dict) else {}
+        if cookies or headers:
+            self.session_set(cookies=cookies or None, headers=headers or None)
 
     # ---- decode_transform ----
     def decode_transform(self, value: str = "", mode: str = "auto") -> dict[str, Any]:

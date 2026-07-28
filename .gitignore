@@ -17,3 +17,8 @@ AGENTS.md
 frontend/node_modules/
 node_modules/
 .qoder/
+
+# SQLite 运行时 sidecar（测试打开 edu_ip.db 等会生成，勿提交）
+*.db-wal
+*.db-shm
+*.db-journal

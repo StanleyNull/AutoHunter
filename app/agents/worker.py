@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
@@ -16,9 +18,10 @@ from pydantic import ValidationError
 
 from app.agents.history import compact_messages
 from app.agents.prompts import is_enterprise_src, normalize_worker_prompt_version, worker_system_prompt
+from app.agents import auth_bootstrap
 from app.config import worker_config
 from app import dedup
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, LLMError
 from app.schemas import Finding, Verdict, WorkerResult
 from app.tools.executor import ToolExecutor
 from app.tools.schemas import (
@@ -40,6 +43,13 @@ _JS_INTENT_RE = re.compile(
 _WORKER_STATIC_PREFIX = (
     "下一条是目标/情报。只打当前目标；确认无攻击面才快速 finish。工具按信号开放，JS 线索再用 analyze_javascript。"
 )
+
+# LLM 调用失败时，worker 内软重试次数（清粘性后换端点/同端点再试），耗尽才整轮收尾回队。
+_WORKER_LLM_SOFT_RETRIES = int(os.environ.get("WORKER_LLM_SOFT_RETRIES", "3"))
+_WORKER_LLM_SOFT_RETRY_KINDS = {
+    "rate_limit", "timeout", "network", "upstream", "provider_cooldown",
+    "blocked", "unknown", "quota",
+}
 
 
 class Worker:
@@ -141,7 +151,7 @@ class Worker:
         playbook = self._playbook_block()
         # 即使没有资产情报，只要有泄露凭证/情报库命中也要带出去（企业目标常无 school/org/title）。
         if not (school or org or title or source):
-            return site + playbook + self._creds_block() + self._intel_lib_block()
+            return site + playbook + self._user_auth_block() + self._creds_block() + self._intel_lib_block()
         owner_label = "候选归属单位/系统" if is_enterprise_src(self.src_type) else "候选归属学校"
         prefix = [b.rstrip() for b in (site, playbook) if b.strip()]
         lines = prefix + ["# 资产情报（搜集阶段提供，需你核实）"]
@@ -157,7 +167,29 @@ class Worker:
                 lines.append(f"- 通杀上下文：{priority_reason}")
             lines.append("注意：你只负责把当前站点的实际漏洞证据打出来，不要围绕该产品继续做通杀扩散判断。")
         lines.append("提交漏洞时，请核实归属（域名/备案/证书CN/页脚版权/FOFA org/登录页品牌）后把最终归属写进 submit_finding 的 owner 字段。")
-        return "\n".join(lines) + "\n\n" + self._creds_block() + self._intel_lib_block()
+        return "\n".join(lines) + "\n\n" + self._user_auth_block() + self._creds_block() + self._intel_lib_block()
+
+    def _user_auth_block(self) -> str:
+        """用户在凭据区提供的 Cookie/账密（系统已尝试后的回执）。"""
+        ctx = (self.target_meta or {}).get("user_auth") or (self.target_meta or {}).get("auth_context")
+        attempt = (self.target_meta or {}).get("auth_attempt")
+        if not ctx and not attempt:
+            return ""
+        return auth_bootstrap.user_auth_prompt_block(ctx, attempt)
+
+    def _bootstrap_user_auth(self) -> None:
+        """启动时确定性使用用户凭据：注入 Cookie/Bearer 或尝试账密登录，并 emit 反馈。"""
+        ctx = (self.target_meta or {}).get("user_auth") or (self.target_meta or {}).get("auth_context")
+        if not ctx:
+            return
+        result = auth_bootstrap.bootstrap_auth(self.executor, ctx, self.target)
+        payload = result.as_event()
+        self.target_meta["auth_attempt"] = payload
+        self._emit(
+            "auth_status",
+            message=auth_bootstrap.format_auth_status_message(result),
+            **payload,
+        )
 
     def _playbook_block(self) -> str:
         """目标打法路由：编排层生成的短路线块。"""
@@ -228,6 +260,17 @@ class Worker:
             if _pre.get("ok"):
                 self._emit("proxy_mode_enabled", round=0,
                             servers=_pre.get("proxy_servers", []), source="ip_ban_retest")
+        # 用户凭据：在任何 LLM 轮次前强制尝试，结果写进 target_meta 供 prompt 与看板。
+        try:
+            self._bootstrap_user_auth()
+        except Exception as e:
+            self._emit("auth_status", used=True, matched=True, status="login_fail",
+                       kinds=[], reason=f"凭据启动异常: {type(e).__name__}: {e}"[:300],
+                       message=f"凭据启动异常: {e}")
+
+        # 上一轮 LLM 中断留下的进度：笔记 + 会话态先恢复，再开挖
+        self._restore_interrupt_progress()
+
         if self.deepen_context:
             user_content = self._intel_block() + self._cas_sso_block() + self._duplicate_block() + self._build_proxy_block() + self._deepen_brief()
             self._emit("worker_start", target=self.target, mode="deepen", prompt_version=self.prompt_version)
@@ -253,6 +296,7 @@ class Worker:
         consecutive_blocked = 0
         consecutive_arg_errors = 0
         consecutive_network_failures = 0
+        consecutive_llm_failures = 0
         # 按 src_type 取预算：企业模式给更大深挖空间（110/60），edu 走量沿用 90/45。
         max_rounds, soft_rounds = self._route_rounds(*worker_config.rounds_for(self.src_type))
         while rounds < max_rounds:
@@ -265,7 +309,7 @@ class Worker:
                 # fofa_lookup 被任务级开关禁用时从工具列表移除，LLM 不会看到它
                 if not self._enable_fofa_lookup:
                     tools = [t for t in tools if t.get("function", {}).get("name") != "fofa_lookup"]
-                # 会话保持工具全模式开放：拿到凭证登录后固化登录态再深挖。
+                # 会话保持工具全模式开放：拿到泄露/用户凭证登录后固化登录态再深挖。
                 tools += SESSION_TOOL_SCHEMAS
                 # 代理切换工具：仅当 SSH 代理已配置时开放，IP 被封时切代理继续测
                 if self._proxy_available:
@@ -283,11 +327,41 @@ class Worker:
                 # 持有哪些登录态、记录了哪些关键进度，不会跨轮"失忆"重复扫。
                 send_messages.append({"role": "user", "content": self.executor.session_status_block()})
                 msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
+                consecutive_llm_failures = 0
             except Exception as e:
                 self._emit("llm_error", error=str(e))
-                return WorkerResult(
-                    target=self.target, verdict=Verdict.error,
-                    findings=self.findings, rounds=rounds, error=f"LLM 调用失败: {e}",
+                failure_kind = e.kind if isinstance(e, LLMError) else ""
+                retry_after = e.retry_after if isinstance(e, LLMError) else 0
+                if self._should_soft_retry_llm(e) and consecutive_llm_failures < _WORKER_LLM_SOFT_RETRIES:
+                    consecutive_llm_failures += 1
+                    clearer = getattr(self.llm, "clear_sticky_provider", None)
+                    if callable(clearer):
+                        clearer()
+                    wait_s = min(2 ** (consecutive_llm_failures - 1), 8)
+                    if retry_after:
+                        wait_s = max(wait_s, min(int(retry_after), 30))
+                    self._emit(
+                        "llm_soft_retry",
+                        round=rounds,
+                        attempt=consecutive_llm_failures,
+                        max_attempts=_WORKER_LLM_SOFT_RETRIES,
+                        kind=failure_kind or "unknown",
+                        wait_seconds=wait_s,
+                        error=str(e)[:240],
+                    )
+                    # 不消耗轮次预算：基础设施抖动不应吃掉挖掘配额
+                    rounds = max(0, rounds - 1)
+                    if self.cancel_event.wait(wait_s):
+                        return self._cancelled_result(rounds)
+                    continue
+                err_text = str(e)
+                if not err_text.startswith("LLM"):
+                    err_text = f"LLM 调用失败：{err_text}"
+                return self._llm_interrupt_result(
+                    rounds=rounds,
+                    error=err_text,
+                    failure_kind=failure_kind,
+                    retry_after=retry_after,
                 )
             if self.cancel_event.is_set():
                 return self._cancelled_result(rounds)
@@ -325,7 +399,10 @@ class Worker:
             if not tool_calls:
                 no_tool_rounds += 1
                 if no_tool_rounds >= 6:
-                    self._auto_finish("模型连续 6 轮没有调用工具或 finish，系统自动收敛。")
+                    self._auto_finish(
+                        "模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。",
+                        "model_behavior",
+                    )
                     break
                 # 没有工具调用也没结束，提醒模型继续或收尾
                 messages.append({"role": "user", "content": "继续调用工具验证，或 finish。"})
@@ -398,7 +475,10 @@ class Worker:
                     consecutive_blocked = 0
                     continue
                 if consecutive_arg_errors >= 3:
-                    self._auto_finish("连续 3 次工具参数错误，模型未修正，系统自动收敛。")
+                    self._auto_finish(
+                        "连续 3 次工具参数错误，模型未修正，本轮未得到可靠结论。",
+                        "tool_argument",
+                    )
                     break
                 if consecutive_network_failures >= 3:
                     self._auto_finish("连续 3 次网络/超时失败，目标当前不可稳定验证，系统自动收敛。")
@@ -468,7 +548,10 @@ class Worker:
             findings=self.findings,
             summary=(self._finished or {}).get("summary", ""),
             rounds=rounds,
-            error=None if self._finished else f"达到最大轮数 {max_rounds} 未主动结束",
+            error=(self._finished or {}).get("error") or (
+                None if self._finished else f"达到最大轮数 {max_rounds} 未主动结束"
+            ),
+            failure_kind=(self._finished or {}).get("failure_kind", ""),
             deepen_lead=(self._finished or {}).get("deepen_lead", ""),
             auth_assessment=(self._finished or {}).get("auth_assessment"),
             reported_intel=self._reported_intel,
@@ -502,6 +585,99 @@ class Worker:
             summary="任务已被 pause/stop 控制面取消，结果由 orchestrator 丢弃。",
             rounds=rounds,
             error="worker cancelled by task control",
+            resume_context=self._build_resume_context(rounds),
+        )
+
+    @staticmethod
+    def _should_soft_retry_llm(exc: BaseException) -> bool:
+        """限流/超时/网络/冷却/策略拦截等：同轮内再试（池模式会换端点）。"""
+        if isinstance(exc, LLMError):
+            return exc.kind in _WORKER_LLM_SOFT_RETRY_KINDS or not exc.kind
+        # 非 LLMError 的瞬时异常也给一次机会
+        text = str(exc).lower()
+        return any(k in text for k in ("timeout", "timed out", "connection", "network", "429", "rate"))
+
+    def _build_resume_context(self, rounds: int) -> dict:
+        snap = self.executor.export_resume_state()
+        notes = (snap.get("worker_notes") or "").strip()
+        cookies = snap.get("session_cookies") or {}
+        headers = snap.get("session_headers") or {}
+        has_progress = bool(notes or cookies or headers or self.findings or rounds >= 2)
+        if not has_progress:
+            return {}
+        directive_bits = [
+            "上一轮因 LLM 调用中断，请从已有进度继续，不要从头泛扫。",
+        ]
+        if notes:
+            directive_bits.append(f"工作笔记：\n{notes[:1500]}")
+        if cookies or headers:
+            directive_bits.append(
+                f"已恢复会话态（cookie {sorted(cookies.keys())}，鉴权头 {sorted(headers.keys())}），"
+                "优先用现有登录态继续深挖。"
+            )
+        if self.findings:
+            directive_bits.append(
+                f"本轮已提交 {len(self.findings)} 个漏洞，继续挖其它入口或 finish。"
+            )
+        return {
+            "directive": "\n".join(directive_bits)[:2000],
+            "worker_notes": notes[:4000],
+            "session_cookies": cookies,
+            "session_headers": headers,
+            "rounds_done": rounds,
+            "source": "llm_interrupt",
+            "original_summary": notes[:1000],
+        }
+
+    def _restore_interrupt_progress(self) -> None:
+        ctx = self.deepen_context or {}
+        if ctx.get("source") != "llm_interrupt" and not (
+            ctx.get("worker_notes") or ctx.get("session_cookies") or ctx.get("session_headers")
+        ):
+            return
+        notes = str(ctx.get("worker_notes") or "")
+        cookies = ctx.get("session_cookies") if isinstance(ctx.get("session_cookies"), dict) else {}
+        headers = ctx.get("session_headers") if isinstance(ctx.get("session_headers"), dict) else {}
+        self.executor.restore_resume_state(
+            worker_notes=notes,
+            session_cookies=cookies,
+            session_headers=headers,
+        )
+        self._emit(
+            "worker_resume",
+            notes_len=len(notes),
+            cookies=sorted(cookies.keys())[:20],
+            headers=sorted(headers.keys())[:20],
+            rounds_done=int(ctx.get("rounds_done") or 0),
+        )
+
+    def _llm_interrupt_result(
+        self,
+        *,
+        rounds: int,
+        error: str,
+        failure_kind: str,
+        retry_after: int,
+    ) -> WorkerResult:
+        resume = self._build_resume_context(rounds)
+        self._emit(
+            "llm_interrupt",
+            round=rounds,
+            failure_kind=failure_kind or "unknown",
+            has_resume=bool(resume),
+            findings=len(self.findings),
+            error=error[:240],
+        )
+        return WorkerResult(
+            target=self.target,
+            verdict=Verdict.error,
+            findings=self.findings,
+            summary="LLM 调用失败，已保存进度供回队续挖。" if resume else "",
+            rounds=rounds,
+            error=error,
+            failure_kind=failure_kind,
+            retry_after_seconds=int(retry_after or 0),
+            resume_context=resume,
         )
 
     def _build_proxy_block(self) -> str:
@@ -552,6 +728,21 @@ class Worker:
         directive = ctx.get("directive", "").strip()
         original = ctx.get("original_title", "") or ctx.get("vuln_type", "")
         summary = (ctx.get("original_summary", "") or "").strip()
+        if ctx.get("source") == "llm_interrupt":
+            parts = [
+                f"目标：{self.target}",
+                "",
+                "⚡ 这是一次【断点续挖】：上一轮 LLM 中断，会话态与工作笔记已恢复。",
+            ]
+            if summary:
+                parts.append(f"已有进度摘要：{summary[:800]}")
+            parts += [
+                "",
+                f"👉 继续任务：{directive or '从已有笔记与登录态接着打，不要重新泛扫。'}",
+                "",
+                "要求：直接接上进度验证/深挖；打穿就 submit_finding；确认无增量就 finish。",
+            ]
+            return "\n".join(parts)
         parts = [
             f"目标：{self.target}",
             "",
@@ -789,6 +980,7 @@ class Worker:
                 "deepen_lead": (args.get("deepen_lead") or "").strip(),
                 "auth_assessment": args.get("auth_assessment") if args.get("verdict") == "needs_auth" else None,
             }
+            self._report_provider_success()
             self._emit("worker_finish", verdict=self._finished["verdict"],
                        summary=self._finished["summary"][:300],
                        deepen_lead=self._finished["deepen_lead"][:300])
@@ -868,7 +1060,11 @@ class Worker:
         }
 
     def _recovery_hint(self, tool: str, result: dict) -> str:
-        """工具失败时返回针对性恢复提示，帮模型在同流里快速纠偏而非从头推理。"""
+        """工具失败时返回针对性恢复提示，帮模型在同流里快速纠偏而非从头推理。
+
+        只在 result 不含 guidance 时才会被采用（调用方用 setdefault）。
+        针对 http_request 的各类状态码、run_shell 的各类失败、以及通用错误分别给提示。
+        """
         if result.get("ok") is True or result.get("guidance"):
             return ""
         if tool == "http_request":
@@ -896,15 +1092,50 @@ class Worker:
             if result.get("timed_out"):
                 return "命令超时：可能命令本身耗时(如 nmap 全端口)或挂起。换更小范围或加 timeout 参数；别重复跑超时命令。"
             if result.get("blocked"):
-                return ""
+                return ""  # blocked 已有自己的 guidance
         if "参数" in str(result.get("error", "")) or "JSON" in str(result.get("error", "")):
             return "参数格式错误：检查工具参数是否合法 JSON、必填字段是否齐全。对照工具 schema 修正后重试一次。"
         return ""
 
-    def _auto_finish(self, reason: str) -> None:
+    def _auto_finish(self, reason: str, failure_kind: str = "") -> None:
+        if failure_kind:
+            self._finished = {
+                "verdict": "error",
+                "summary": reason,
+                "error": reason,
+                "failure_kind": failure_kind,
+            }
+            self._report_provider_failure(reason, failure_kind)
+            self._emit(
+                "worker_auto_finish",
+                verdict="error",
+                failure_kind=failure_kind,
+                summary=reason[:300],
+            )
+            return
         verdict = "found" if self.findings else "no_vuln"
         self._finished = {"verdict": verdict, "summary": reason}
         self._emit("worker_auto_finish", verdict=verdict, summary=reason[:300])
+
+    def _report_provider_failure(self, reason: str, failure_kind: str) -> None:
+        if failure_kind not in {"model_behavior", "tool_argument"}:
+            return
+        reporter = getattr(self.llm, "report_current_provider_failure", None)
+        if not reporter:
+            return
+        try:
+            reporter(reason, kind=failure_kind)
+        except Exception as exc:
+            self._emit("provider_degrade_error", error=str(exc), failure_kind=failure_kind)
+
+    def _report_provider_success(self) -> None:
+        reporter = getattr(self.llm, "report_current_provider_success", None)
+        if not reporter:
+            return
+        try:
+            reporter()
+        except Exception as exc:
+            self._emit("provider_health_error", error=str(exc))
 
     @staticmethod
     def _tool_outcome(result: dict) -> str:

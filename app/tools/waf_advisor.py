@@ -244,20 +244,3 @@ def _header_variants(priorities: tuple[str, ...]) -> list[dict[str, str]]:
     ]
     return variants
 
-
-def render_waf_advice(result: dict[str, Any]) -> str:
-    """给调试/日志用的简短 markdown。"""
-    if not result.get("ok"):
-        return str(result.get("error", ""))
-    lines = [
-        f"WAF: {result.get('waf_type')} ({result.get('evidence')})",
-        "策略优先级: " + ", ".join(result.get("strategy_priority", [])),
-        "候选 payload:",
-    ]
-    for item in result.get("payload_variants", [])[:8]:
-        lines.append(f"- {item['strategy']}/{item['technique']}: {item['payload']}")
-    if result.get("header_variants"):
-        lines.append("候选 header:")
-        for item in result["header_variants"][:4]:
-            lines.append(f"- {item}")
-    return "\n".join(lines)

@@ -10,7 +10,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "http_request",
-            "description": "发一个 HTTP 请求并返回完整的请求包、响应包、状态码、响应头和响应体。挖洞取证的首选工具。会自动携带并吸收 Cookie（含整条重定向链每一跳的 Set-Cookie），登录后深挖无需每次手拼凭证。【登录/CAS/SSO 场景】务必把 follow_redirects 设为 true：一次 POST 账号密码即可自动走完 302 连环跳（lt→CASTGC→ST ticket→JSESSIONID），返回里的 redirect_chain/final_url 可看清跳到哪、是否登录成功；别再手动一跳跳拼 ticket。",
+            "description": "发一个 HTTP 请求并返回完整的请求包，以及状态码、响应头和响应体。挖洞取证的首选工具。会自动携带并吸收 Cookie（含整条重定向链每一跳的 Set-Cookie），登录后深挖无需每次手拼凭证。【登录/CAS/SSO 场景】务必把 follow_redirects 设为 true：一次 POST 账号密码即可自动走完 302 连环跳（lt→CASTGC→ST ticket→JSESSIONID），返回里的 redirect_chain/final_url 可看清跳到哪、是否登录成功；别再手动一跳跳拼 ticket。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -466,8 +466,8 @@ KILLSWEEP_TOOL_SCHEMAS = [
                     "fingerprint": {"type": "string", "description": "指纹依据：用了哪些 title/body/server/favicon 特征"},
                     "asset_count": {"type": "integer", "description": "全网同款资产规模(FOFA size)"},
                     "edu_count": {"type": "integer", "description": "教育行业同款规模"},
-                    "verified_url": {"type": "string", "description": "实际打的那个同款站点 URL（验证成功才填）"},
-                    "verified": {"type": "boolean", "description": "是否打了1个同款站点并实证同样中招"},
+                    "verified_url": {"type": "string", "description": "代表性的一个已验证同款站点 URL；实打成功的每个站点都要列进 affected_table 并标 status=verified，这里填其中一个即可"},
+                    "verified": {"type": "boolean", "description": "是否至少打通 1 个同款站点并实证同样中招（打通多个时也为 true）"},
                     "affected_table": {
                         "type": "array",
                         "description": "通杀影响明细表：每行是一个学校/单位与对应通杀洞，后端会写入查重库，避免后续重复报同一通杀洞。",
@@ -479,7 +479,7 @@ KILLSWEEP_TOOL_SCHEMAS = [
                                 "host": {"type": "string", "description": "归一化 host，可不填，后端会补"},
                                 "title": {"type": "string", "description": "站点标题"},
                                 "vuln_title": {"type": "string", "description": "该学校对应的通杀漏洞标题"},
-                                "status": {"type": "string", "enum": ["verified", "candidate"], "description": "verified=已打1个验证成功；candidate=FOFA圈定同款候选"},
+                                "status": {"type": "string", "enum": ["verified", "candidate"], "description": "verified=已实打复现成功的同款站点（可有多个）；candidate=FOFA圈定同款候选"},
                                 "evidence": {"type": "string", "description": "证据/依据，如 FOFA命中、标题特征、验证响应摘要"},
                             },
                             "required": ["school", "url", "vuln_title", "status"],
@@ -656,7 +656,6 @@ TOOL_SCHEMAS = _compact_descriptions(TOOL_SCHEMAS)
 JS_ANALYZER_TOOL_SCHEMAS = _compact_descriptions(JS_ANALYZER_TOOL_SCHEMAS)
 SESSION_TOOL_SCHEMAS = _compact_descriptions(SESSION_TOOL_SCHEMAS)
 # 向后兼容别名（历史命名，全模式已可用）。
-ENTERPRISE_SESSION_TOOL_SCHEMAS = SESSION_TOOL_SCHEMAS
 REVIEWER_TOOL_SCHEMAS = _compact_descriptions(REVIEWER_TOOL_SCHEMAS)
 KILLSWEEP_TOOL_SCHEMAS = _compact_descriptions(KILLSWEEP_TOOL_SCHEMAS)
 ESCALATE_TOOL_SCHEMAS = _compact_descriptions(ESCALATE_TOOL_SCHEMAS)
