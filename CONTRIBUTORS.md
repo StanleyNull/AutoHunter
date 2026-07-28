@@ -6,12 +6,11 @@
 
 有两条路，**自己就能走完**，不用等作者私信加：
 
-### 方式 A：合并代码（自动上墙）
+### 方式 A：合并代码
 
 1. Fork 本仓库，改完后开 Pull Request 合进 `main`
-2. 合并成功后，GitHub Contributors 与 README 里的
-   [contrib.rocks](https://contrib.rocks/preview?repo=StanleyNull/AutoHunter) 动态墙会**自动**带上你的头像  
-   （缓存偶发延迟，一般几分钟到几小时）
+2. 合并成功后会出现在 [GitHub Contributors](https://github.com/StanleyNull/AutoHunter/graphs/contributors)
+3. 维护者会把你补进 README 署名表与下方头像墙
 
 适合：修 bug、加功能、补测试等有 commit 的贡献。
 
@@ -20,7 +19,7 @@
 适合：文档、设计、复测报告、思路建议等**不一定有 commit**，或想改展示名 / 角色标签。
 
 1. Fork → 编辑本文件下方「署名名单」表格，**追加一行自己的信息**（不要删别人的）
-2. 同步改 `README.md` 顶部 Contributors 表格（头像 + 链接 + 简短角色）
+2. 同步改 `README.md`：顶部 Contributors 表格 + 下方头像墙（各加一处）
 3. 开 PR，标题建议：`docs: add @你的GitHub用户名 to contributors`
 4. 维护者 review 合并后即生效
 
