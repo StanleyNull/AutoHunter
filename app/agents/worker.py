@@ -369,10 +369,11 @@ class Worker:
             if not tool_calls:
                 no_tool_rounds += 1
                 if no_tool_rounds >= 6:
-                    # 全程零工具调用最常见的根因是「所选模型不支持 function calling」，
-                    # 明说出来，省得用户以为是目标无洞（在设置页「测试连接」可确认模型能力）。
-                    hint = ("（提示：若该模型全程从不调用工具，多半是它不支持 function calling，"
-                            "AutoHunter 需要支持工具调用的模型——可在设置页“测试连接”确认后更换）"
+                    # 全程零工具调用最常见的根因是「模型接受 tools 参数但不真正支持 function
+                    # calling」（硬报错的已被 LLM 层自动切提示词模拟兜底，不会走到这里）。
+                    hint = ("（提示：该模型全程未调用任何工具，多半是它「接受 tools 参数却不真正"
+                            "支持 function calling」。可在服务端设置 AUTOHUNTER_TOOL_COMPAT=prompt "
+                            "强制启用提示词模拟工具调用，或更换支持工具调用的模型；设置页“测试连接”可确认）"
                             if sum(self._tool_counts.values()) == 0 else "")
                     self._auto_finish(
                         f"模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。{hint}",

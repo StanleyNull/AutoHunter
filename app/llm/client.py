@@ -260,6 +260,233 @@ def _is_max_tokens_unsupported(err: LLMError) -> bool:
     )
 
 
+# ─── 提示词模拟工具调用（tool-calling 兼容层）─────────────────────────────
+# 部分模型/网关不支持原生 function calling。为了让这类模型也能跑 AutoHunter 的
+# agent 循环，这里提供一个「文本模拟」兜底：把 tools 描述注入提示词、要求模型用
+# 固定 JSON 格式表达工具调用，再把返回文本解析回 tool_calls。对话历史里的
+# assistant.tool_calls / role:"tool" 在发送前改写成纯文本，agent 层完全无感。
+#
+# 只对不支持工具的模型启用（tool_compat=prompt 或 auto 命中硬报错自动切换），
+# 原生可用的模型走原路径、零影响。
+
+def _resolve_tool_compat(config: Any) -> str:
+    """工具调用兼容模式：native / prompt / auto（默认）。
+
+    auto：先走原生；若端点对 tools 参数硬报错(不支持)，自动切到提示词模拟。
+    prompt：始终用提示词模拟（给「接受 tools 参数但从不真正调用」的哑模型用）。
+    native：只用原生，永不模拟（等价旧行为）。
+    """
+    v = (
+        (getattr(config, "tool_compat", None) or "")
+        or os.environ.get("AUTOHUNTER_TOOL_COMPAT")
+        or os.environ.get("LLM_TOOL_COMPAT")
+        or "auto"
+    )
+    v = str(v).strip().lower()
+    return v if v in ("auto", "prompt", "native") else "auto"
+
+
+def _is_tools_unsupported(err: LLMError) -> bool:
+    """端点/模型明确不支持 tools 参数（区别于「只是不支持强制 tool_choice」）。
+
+    只在信号明确时判 True，避免把原生可用的模型误切成模拟模式。"""
+    text = (getattr(err, "detail", "") or str(err) or "").lower()
+    if not text:
+        return False
+    markers = (
+        "does not support tools", "do not support tools", "not support tool use",
+        "tool use is not supported", "tools is not supported", "tools are not supported",
+        "function calling is not supported", "does not support function calling",
+        "no endpoints found that support tool use", "no endpoints found that support tools",
+        "unsupported parameter: 'tools'", "unsupported parameter: \"tools\"",
+        "unknown parameter: 'tools'", "unrecognized request argument supplied: tools",
+        "unexpected keyword argument 'tools'", "'tools' is not a valid",
+        "tool_calls is not supported", "tools not supported", "不支持工具", "不支持函数调用",
+    )
+    return any(m in text for m in markers)
+
+
+def _tool_schema_fields(t: dict[str, Any]) -> tuple[str, str, dict]:
+    """从 OpenAI 或 Anthropic 风格的 tool schema 里取 name/description/parameters。"""
+    if isinstance(t, dict) and isinstance(t.get("function"), dict):
+        fn = t["function"]
+        return str(fn.get("name") or ""), str(fn.get("description") or ""), (fn.get("parameters") or {})
+    if isinstance(t, dict):
+        return (
+            str(t.get("name") or ""),
+            str(t.get("description") or ""),
+            (t.get("input_schema") or t.get("parameters") or {}),
+        )
+    return "", "", {}
+
+
+def _emulation_preamble(tools: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for t in tools or []:
+        name, desc, params = _tool_schema_fields(t)
+        if not name:
+            continue
+        try:
+            pj = json.dumps(params, ensure_ascii=False)
+        except Exception:
+            pj = "{}"
+        lines.append(f"- {name}: {desc}\n  参数(JSON Schema): {pj}")
+    tool_block = "\n".join(lines)
+    return (
+        "【工具调用协议 · 必须遵守】当前模型不支持原生 function calling，改用文本模拟协议：\n"
+        "1) 需要行动时，只输出一个 ```json 代码块，格式：\n"
+        '   {"tool_calls": [{"name": "工具名", "arguments": {参数对象}}]}\n'
+        "   可包含多个调用；代码块之外不要写任何其它内容。\n"
+        "2) 不要用自然语言直接给最终结论——一切行动与结论都通过调用下列工具完成"
+        "（完成时调用对应的 finish / submit_* 工具）。\n"
+        "3) 上一步工具结果会以「[工具返回] 工具名: ...」的用户消息给你，据此继续下一步。\n\n"
+        "可用工具：\n" + tool_block
+    )
+
+
+def _build_prompt_tools_messages(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """把「带 tools 的原生对话」改写成「纯文本对话」：注入协议说明，
+    并把 assistant.tool_calls / role:"tool" 转成模型能读的纯文本。"""
+    preamble = _emulation_preamble(tools)
+    out: list[dict[str, Any]] = []
+    injected = False
+    for m in messages:
+        role = m.get("role")
+        if role == "system" and not injected:
+            base = m.get("content") or ""
+            out.append({"role": "system", "content": f"{base}\n\n{preamble}" if base else preamble})
+            injected = True
+            continue
+        if role == "assistant":
+            tcs = m.get("tool_calls")
+            if tcs:
+                calls = []
+                for tc in tcs:
+                    fn = tc.get("function") if isinstance(tc, dict) else {}
+                    fn = fn or {}
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args or "{}")
+                        except Exception:
+                            args = args
+                    calls.append({"name": fn.get("name", ""), "arguments": args if args is not None else {}})
+                body = json.dumps({"tool_calls": calls}, ensure_ascii=False)
+                prose = (m.get("content") or "").strip()
+                text = (f"{prose}\n" if prose else "") + f"```json\n{body}\n```"
+                out.append({"role": "assistant", "content": text})
+            else:
+                out.append({"role": "assistant", "content": m.get("content") or ""})
+            continue
+        if role == "tool":
+            name = m.get("_tool") or "tool"
+            out.append({"role": "user", "content": f"[工具返回] {name}:\n{m.get('content') or ''}"})
+            continue
+        out.append({"role": role or "user", "content": m.get("content") or ""})
+    if not injected:
+        out.insert(0, {"role": "system", "content": preamble})
+    return out
+
+
+def _first_balanced_json(s: str) -> str | None:
+    """返回 s 中第一个大括号平衡的 JSON 对象子串（考虑字符串转义）。"""
+    start = s.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(s)):
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return s[start:i + 1]
+        start = s.find("{", start + 1)
+    return None
+
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+
+
+def _extract_emulated_calls(obj: Any) -> list[Any] | None:
+    if not isinstance(obj, dict):
+        return None
+    items: Any = None
+    if isinstance(obj.get("tool_calls"), list):
+        items = obj["tool_calls"]
+    elif obj.get("name"):
+        items = [obj]
+    elif obj.get("tool"):
+        items = [{"name": obj.get("tool"), "arguments": obj.get("arguments", {})}]
+    if not items:
+        return None
+    calls: list[Any] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        fn = it.get("function") if isinstance(it.get("function"), dict) else it
+        name = fn.get("name") or it.get("name")
+        if not name:
+            continue
+        args = fn.get("arguments", it.get("arguments", {}))
+        args_str = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
+        calls.append(SimpleNamespace(
+            id="call_" + uuid.uuid4().hex[:24],
+            type="function",
+            function=SimpleNamespace(name=str(name), arguments=args_str),
+        ))
+    return calls or None
+
+
+def _parse_emulated_tool_calls(text: str) -> tuple[str, list[Any] | None]:
+    """从模型文本里解析模拟工具调用，返回 (去掉调用块后的文本, tool_calls 或 None)。"""
+    if not text:
+        return text, None
+    candidates: list[str] = []
+    for inner in _FENCE_RE.findall(text):
+        obj_str = _first_balanced_json(inner)
+        if obj_str:
+            candidates.append(obj_str)
+    if not candidates:
+        obj_str = _first_balanced_json(text)
+        if obj_str:
+            candidates.append(obj_str)
+    for raw in reversed(candidates):  # 最后一个动作块优先
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        calls = _extract_emulated_calls(obj)
+        if calls:
+            content = text.replace(raw, "")
+            content = _FENCE_RE.sub("", content).replace("```json", "").replace("```", "").strip()
+            return content, calls
+    return text, None
+
+
+def _apply_emulated_tool_calls(msg: Any) -> Any:
+    """把模拟模式下的纯文本响应解析成带 tool_calls 的 message。"""
+    text = getattr(msg, "content", None) or ""
+    content, calls = _parse_emulated_tool_calls(text)
+    if calls:
+        return SimpleNamespace(content=content, tool_calls=calls, role="assistant")
+    return msg
+
+
 def _dict_to_message(msg: dict[str, Any]) -> SimpleNamespace:
     """把网关 dict message 转成与 OpenAI SDK 相近的 SimpleNamespace。"""
     content = msg.get("content")
@@ -548,6 +775,12 @@ class LLMClient:
         self._sticky_provider_ref = ""
         self._provider_slot_owner = uuid.uuid4().hex
         self._activate_provider(self.providers[0])
+        # 工具调用兼容：不支持原生 function calling 的模型走「提示词模拟」兜底。
+        self._tool_compat = _resolve_tool_compat(self.config)
+        self._prompt_tools_active = self._tool_compat == "prompt"
+
+    def _prompt_tools_enabled(self) -> bool:
+        return self._tool_compat == "prompt" or self._prompt_tools_active
 
     def _provider_order(self) -> list[LLMConfig]:
         if len(self.providers) <= 1:
@@ -916,6 +1149,18 @@ class LLMClient:
         max_tokens: Optional[int] = None,
     ):
         """单次对话调用，返回完整 message 对象（可能含 tool_calls）。"""
+        # 工具调用兼容层：不支持原生 function calling 的模型改用「提示词模拟」——
+        # 把 tools 注入提示词、请求不带 tools 参数，返回文本再解析回 tool_calls。
+        messages_orig, tools_orig = messages, tools
+        prompt_tools = bool(tools) and self._prompt_tools_enabled()
+        if prompt_tools:
+            messages = _build_prompt_tools_messages(messages_orig, tools_orig)
+            tools = None
+            tool_choice = "auto"
+
+        def _finish(msg: Any) -> Any:
+            return _apply_emulated_tool_calls(msg) if prompt_tools else msg
+
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -941,13 +1186,13 @@ class LLMClient:
         for _attempt in range(max_retries + 5):
             try:
                 if self._messages_protocol:
-                    return self._messages_chat(
+                    return _finish(self._messages_chat(
                         messages, tools, active_tool_choice,
                         kwargs.get("temperature", 0.3), kwargs.get("max_tokens", 4096),
-                    )
+                    ))
                 resp = self.client.chat.completions.create(**kwargs)
                 self._record_openai_usage(resp)
-                return _coerce_chat_message(resp)
+                return _finish(_coerce_chat_message(resp))
             except Exception as e:  # 网络/超时/限流/5xx 统一重试
                 # TLS 自适应：https 中转自签证书导致校验失败时，自动降级不校验并立即重试。
                 # 只会降级一次（之后 _insecure_tls=True，再进来直接返回 False），不会死循环。
@@ -957,6 +1202,28 @@ class LLMClient:
                 kind = getattr(last_exc, "kind", "?")
                 # 协议自适应：端点用错协议（走错路径 404 等）时自动切 messages/openai 重试。
                 if self._maybe_switch_protocol(last_exc):
+                    continue
+                # 工具调用兼容：端点对 tools 参数硬报错「不支持」时，自动切提示词模拟重试。
+                # 仅 auto 模式、仅命中明确「不支持工具」的信号才切，原生可用模型不受影响。
+                if (
+                    tools_orig
+                    and not prompt_tools
+                    and self._tool_compat == "auto"
+                    and isinstance(last_exc, LLMError)
+                    and _is_tools_unsupported(last_exc)
+                ):
+                    logger.warning(
+                        "LLM tools 参数不被支持，切换为提示词模拟工具调用 (model=%s, detail=%s)",
+                        self.config.model, (getattr(last_exc, "detail", "") or "")[:200],
+                    )
+                    self._prompt_tools_active = True
+                    prompt_tools = True
+                    messages = _build_prompt_tools_messages(messages_orig, tools_orig)
+                    tools = None
+                    active_tool_choice = "auto"
+                    kwargs["messages"] = messages
+                    kwargs.pop("tools", None)
+                    kwargs.pop("tool_choice", None)
                     continue
                 if (
                     tools

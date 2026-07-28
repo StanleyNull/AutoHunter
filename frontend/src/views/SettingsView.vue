@@ -331,7 +331,11 @@ function resultText(item) {
   if (item.latency_ms) parts.push(`${item.latency_ms}ms`);
   if (item.ok && item.reply) parts.push(`reply: ${item.reply}`);
   if (item.ok && item.tool_calling) {
-    const tc = { yes: "工具调用 ✓", no: "工具调用 ✗ 该模型不支持 function calling，挖洞无法工作", unknown: "工具调用 ? 未检测到（可能不支持）" };
+    const tc = {
+      yes: "工具调用 ✓",
+      no: "工具调用 ✗ 不支持原生 function calling（系统会自动用提示词模拟兜底；如仍异常可设 AUTOHUNTER_TOOL_COMPAT=prompt）",
+      unknown: "工具调用 ? 未检测到（若挖洞全程不调用工具，可设 AUTOHUNTER_TOOL_COMPAT=prompt 强制模拟）",
+    };
     parts.push(tc[item.tool_calling] || "");
   }
   if (!item.ok && item.error) parts.push(item.error);
