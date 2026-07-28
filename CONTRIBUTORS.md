@@ -36,6 +36,7 @@
 | <img src="https://avatars.githubusercontent.com/u/64454088?v=4&s=64" width="40" height="40" alt="Star-233" /> | [@Star-233](https://github.com/Star-233) | Agent 可见性与运行中可控 |
 | <img src="https://avatars.githubusercontent.com/u/121371300?v=4&s=64" width="40" height="40" alt="SD9ard3n" /> | [@SD9ard3n](https://github.com/SD9ard3n) | 模型端点池 |
 | <img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=64" width="40" height="40" alt="YiKongk" /> | [@YiKongk](https://github.com/YiKongk) | 自定义 FOFA API |
+| <img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=64" width="40" height="40" alt="1diot9" /> | [@1diot9](https://github.com/1diot9) | Contributor |
 
 <!-- 新贡献者请在上一行表格末尾追加，保持格式一致 -->
 
