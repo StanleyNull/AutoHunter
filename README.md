@@ -56,16 +56,24 @@
   </tr>
 </table>
 
+<br>
+
 <p>
   <a href="https://github.com/StanleyNull/AutoHunter/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=StanleyNull/AutoHunter&max=48" alt="All contributors" />
   </a>
 </p>
 
+<br>
+
 <sub>
 合并进 <code>main</code> 的代码贡献会自动出现在上方动态墙 ·
 想署名（含文档 / 设计 / 复测）→ 见 <a href="CONTRIBUTORS.md">如何成为 Contributor</a>
 </sub>
+
+<br><br>
+
+---
 
 <br>
 
