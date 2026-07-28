@@ -92,6 +92,18 @@ def _escalation_is_significant(orig_severity: str, res: dict) -> bool:
 LOOP_INTERVAL = 3.0
 LOW_WATERMARK = 5
 MAX_RETRY = 1  # 单 target 最多再挖 1 次
+# Worker 细粒度轨迹：落库供刷新回看（payload 已截断，避免 DB 膨胀）。
+_WORKER_TRACE_KINDS = frozenset({
+    "worker_start", "worker_finish", "worker_cancelled", "worker_auto_finish",
+    "worker_thought", "worker_directive", "worker_resume",
+    "tool_http", "tool_shell", "tool_shell_blocked", "tool_arg_error",
+    "tool_exception", "tool_js_analyze", "tool_decode", "tool_waf_advice",
+    "tool_fofa_lookup", "tool_session_set",
+    "llm_round_start", "llm_error", "llm_soft_retry", "llm_interrupt",
+    "finding_submitted", "finding_duplicate", "finding_invalid",
+    "auth_status", "finish_blocked",
+})
+_TRACE_TEXT_KEYS = ("text", "command", "url", "error", "message", "reason", "query", "summary")
 # 单 target 超时兜底。
 # WORKER_WALL_TIMEOUT 保持向后兼容：现在作为「无活动空闲超时」默认值。
 # 活跃 worker 可继续运行到 WORKER_MAX_WALL_TIMEOUT，避免深挖正在推进时被 30min 一刀切。
@@ -345,9 +357,14 @@ class TaskRunner:
         self._escalation_inflight: set[str] = set()  # 正在做扩大危害深挖的 finding_id
         self._escalation_tasks: dict[str, asyncio.Task] = {}
         self._escalation_cancel_events: dict[str, threading.Event] = {}
+        # 扩大危害活态（看板展示）
+        self._live_escalations: dict[str, dict] = {}
         # 实时看板：每个在跑 worker 的活态 {target_id: {host, url, round, action, started_at, findings}}
         self._live: dict[str, dict] = {}
         self._worker_last_activity: dict[str, float] = {}
+        # 人工 mid-run 指令队列：target_id → [directive, ...]（线程安全）
+        self._worker_directives: dict[str, list[str]] = {}
+        self._worker_directive_lock = threading.Lock()
         # 临时 LLM 错误回队计数（内存级，不耗 retry_count）：防止模型持续抽风时目标无限回队。
         self._transient_llm_requeue: dict[str, int] = {}
         # 企业模式缓存：企业目标多为用户指定的具体资产，不做同款簇冷却/限流
@@ -365,6 +382,117 @@ class TaskRunner:
 
     def live_workers(self) -> list[dict]:
         return list(self._live.values())
+
+    def live_escalations(self) -> list[dict]:
+        return list(self._live_escalations.values())
+
+    def inject_directive(self, target_id: str, directive: str) -> dict:
+        """向运行中的 worker 注入人工实时指令，下一轮 LLM 前生效。"""
+        text = (directive or "").strip()
+        if not text:
+            return {"ok": False, "error": "指令不能为空"}
+        if target_id not in self._active_workers:
+            return {"ok": False, "error": "该目标当前没有运行中的 worker"}
+        text = text[:2000]
+        with self._worker_directive_lock:
+            self._worker_directives.setdefault(target_id, []).append(text)
+        live = self._live.get(target_id) or {}
+        host = live.get("host") or target_id
+        try:
+            asyncio.get_running_loop().create_task(bus.publish(self.task_id, {
+                "agent": "orchestrator",
+                "kind": "worker_directive_queued",
+                "target_id": target_id,
+                "host": host,
+                "text": text[:300],
+                "message": f"已向 {host} 排队人工指令（下一轮生效）",
+                "ts": _now_iso(),
+            }))
+        except RuntimeError:
+            pass
+        return {"ok": True, "target_id": target_id, "host": host, "queued": True}
+
+    def _pop_directive(self, target_id: str) -> str | None:
+        with self._worker_directive_lock:
+            q = self._worker_directives.get(target_id) or []
+            if not q:
+                return None
+            text = q.pop(0)
+            if not q:
+                self._worker_directives.pop(target_id, None)
+            return text
+
+    def cancel_escalation(self, finding_id: str, reason: str = "用户取消扩大危害") -> dict:
+        """取消单个正在进行的扩大危害任务。"""
+        if finding_id not in self._escalation_inflight and finding_id not in self._escalation_tasks:
+            return {"ok": False, "error": "该洞当前没有进行中的扩大危害"}
+        if ev := self._escalation_cancel_events.get(finding_id):
+            ev.set()
+        if t := self._escalation_tasks.get(finding_id):
+            t.cancel()
+        live = self._live_escalations.pop(finding_id, None) or {}
+        title = live.get("title") or finding_id
+        try:
+            asyncio.get_running_loop().create_task(bus.publish(self.task_id, {
+                "agent": "escalation",
+                "kind": "escalate_cancelled",
+                "finding_id": finding_id,
+                "message": f"扩大危害已取消：{title}",
+                "reason": reason,
+                "ts": _now_iso(),
+            }))
+        except RuntimeError:
+            pass
+        return {"ok": True, "finding_id": finding_id, "title": title}
+
+    @staticmethod
+    def _truncate_trace_payload(payload: dict) -> dict:
+        out: dict = {}
+        for k, v in (payload or {}).items():
+            if k in ("finding",):
+                continue
+            if k in _TRACE_TEXT_KEYS and isinstance(v, str):
+                out[k] = v[:500]
+            elif isinstance(v, str) and len(v) > 300:
+                out[k] = v[:300]
+            elif isinstance(v, (str, int, float, bool)) or v is None:
+                out[k] = v
+            elif isinstance(v, list) and len(v) <= 8:
+                out[k] = v
+            elif isinstance(v, dict) and len(v) <= 12:
+                out[k] = {sk: (sv[:200] if isinstance(sv, str) and len(sv) > 200 else sv)
+                          for sk, sv in list(v.items())[:12]
+                          if isinstance(sv, (str, int, float, bool, type(None)))}
+        return out
+
+    async def _persist_worker_trace(self, task_id: str, target_id: str, kind: str, payload: dict) -> None:
+        """选择性落库 worker 细粒度事件，刷新后可回看。"""
+        if kind not in _WORKER_TRACE_KINDS:
+            return
+        safe = self._truncate_trace_payload(payload)
+        msg = ""
+        if kind == "worker_thought":
+            msg = (safe.get("text") or "")[:300]
+        elif kind == "tool_http":
+            msg = f"{safe.get('method', 'GET')} {safe.get('url', '')}"[:300]
+        elif kind == "tool_shell":
+            msg = f"$ {safe.get('command', '')}"[:300]
+        elif kind == "worker_directive":
+            msg = f"人工指令: {(safe.get('text') or '')[:200]}"
+        elif kind in ("llm_error", "tool_exception", "tool_arg_error"):
+            msg = str(safe.get("error") or safe.get("message") or kind)[:300]
+        else:
+            msg = str(safe.get("message") or kind)[:200]
+        try:
+            async with SessionLocal() as session:
+                session.add(TaskEvent(
+                    task_id=task_id, agent="worker", kind=kind, level="info",
+                    message=msg,
+                    payload={"target_id": target_id, **safe},
+                ))
+                await session.commit()
+        except Exception:
+            logger.debug("persist worker trace failed task=%s kind=%s", task_id[:8], kind, exc_info=True)
 
     def diagnostic_snapshot(self) -> dict:
         return {
@@ -1175,6 +1303,7 @@ class TaskRunner:
         self._escalation_tasks.clear()
         self._escalation_inflight.clear()
         self._escalation_cancel_events.clear()
+        self._live_escalations.clear()
 
     def _queue_or_dead_after_attempt(self, tgt: Target, reason: str) -> bool:
         """失败/恢复后的统一回队策略。返回 True=回队，False=终态 dead。
@@ -1611,6 +1740,8 @@ class TaskRunner:
                 st["action"] = f"工具异常: {data.get('tool','')}"
             elif kind == "worker_thought":
                 st["action"] = "💭 " + (data.get("text") or "")[:120]
+            elif kind == "worker_directive":
+                st["action"] = "🎛 执行人工指令: " + (data.get("text") or "")[:100]
             elif kind == "llm_round_start":
                 st["action"] = "LLM 思考中…"
             elif kind == "llm_error":
@@ -1667,6 +1798,11 @@ class TaskRunner:
                     if kind == "auth_status":
                         at = asyncio.create_task(self._persist_auth_status(target_id, dict(payload)))
                         at.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_auth_status"))
+                    if kind in _WORKER_TRACE_KINDS:
+                        tr = asyncio.create_task(
+                            self._persist_worker_trace(task_id, target_id, kind, dict(payload))
+                        )
+                        tr.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_worker_trace"))
                     _update_live(kind, payload)
                     pt = asyncio.create_task(bus.publish(
                         task_id, {"agent": "worker", "kind": kind, "target_id": target_id, **payload}))
@@ -1778,7 +1914,8 @@ class TaskRunner:
                             duplicate_history=duplicate_history,
                             cancel_event=cancel_event, src_type=src_type,
                             fofa_key=fofa_key, fofa_base_url=fofa_base_url,
-                            prompt_version=prompt_version)
+                            prompt_version=prompt_version,
+                            pop_directive=lambda: self._pop_directive(target_id))
             worker_holder["worker"] = worker
             try:
                 return worker.run().model_dump(mode="json")
@@ -1788,6 +1925,8 @@ class TaskRunner:
                 #  导致每个正常完成的 worker 都被下方 externally_cancelled 判定误判为"被取消"而丢弃结果，
                 #  findings/done 永远为 0、出洞概率暴跌。）
                 worker.executor.kill_processes()
+                with self._worker_directive_lock:
+                    self._worker_directives.pop(target_id, None)
 
         cancelled = False
         # 区分「超时」与「外部取消(pause/stop/reclaim)」：两者都会 set cancel_event(通知
@@ -3036,6 +3175,7 @@ class TaskRunner:
             self._escalation_inflight.discard(finding_id)
             self._escalation_tasks.pop(finding_id, None)
             self._escalation_cancel_events.pop(finding_id, None)
+            self._live_escalations.pop(finding_id, None)
 
     async def _run_escalation_inner(self, task_id: str, finding_id: str, orig_severity: str) -> None:
         from app.agents.escalate import EscalateHunter
@@ -3063,8 +3203,32 @@ class TaskRunner:
         )
         cancel_event = threading.Event()
         self._escalation_cancel_events[finding_id] = cancel_event
+        self._live_escalations[finding_id] = {
+            "finding_id": finding_id,
+            "target_id": target_id,
+            "title": finding_dict.get("title") or "",
+            "severity": orig_severity,
+            "action": "扩大危害启动中…",
+            "started_at": _now_iso(),
+        }
 
         def emit(kind: str, data: dict):
+            st = self._live_escalations.get(finding_id)
+            if st is not None:
+                if kind == "escalate_http":
+                    st["action"] = f"HTTP {data.get('url', '')}"[:160]
+                elif kind == "escalate_shell":
+                    st["action"] = f"$ {data.get('command', '')}"[:160]
+                elif kind == "escalate_session":
+                    st["action"] = "会话态更新"
+                elif kind == "escalate_done":
+                    st["action"] = f"升级完成: {data.get('severity', '')}"
+                elif kind == "escalate_abandon":
+                    st["action"] = f"放弃: {(data.get('reason') or '')[:100]}"
+                elif kind == "escalate_error":
+                    st["action"] = f"异常: {(data.get('error') or '')[:100]}"
+                elif kind == "escalate_start":
+                    st["action"] = "扩大危害进行中…"
             asyncio.run_coroutine_threadsafe(
                 bus.publish(task_id, {"agent": "escalation", "kind": kind, "finding_id": finding_id, **data}),
                 loop,
@@ -3226,6 +3390,19 @@ class OrchestratorManager:
             tgt.last_error = ""
             await session.commit()
         return {"ok": True, "target_id": target_id, "host": host}
+
+    def inject_directive(self, task_id: str, target_id: str, directive: str) -> dict:
+        runner = self.get_runner(task_id)
+        if runner is None:
+            return {"ok": False, "error": "任务未在运行"}
+        return runner.inject_directive(target_id, directive)
+
+    def cancel_escalation(self, task_id: str, finding_id: str,
+                          reason: str = "用户取消扩大危害") -> dict:
+        runner = self.get_runner(task_id)
+        if runner is None:
+            return {"ok": False, "error": "任务未在运行"}
+        return runner.cancel_escalation(finding_id, reason)
 
     def diagnostic_snapshot(self) -> dict:
         return {

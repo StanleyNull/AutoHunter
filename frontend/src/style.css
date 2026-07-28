@@ -1803,6 +1803,8 @@ main {
   transition: border-color .15s ease, transform .15s ease, background-color .15s ease;
 }
 .worker-card:hover { transform: translateY(-1px); border-color: var(--border); background: var(--surface); }
+.worker-card.clickable { cursor: pointer; }
+.worker-card.clickable:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .wc-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .wc-host {
   font-weight: 600; font-size: 13.5px; color: var(--ink);
@@ -1891,6 +1893,103 @@ main {
 .ag-worker { color: var(--warn); }
 .ag-reviewer { color: var(--ok); }
 .ag-killsweep { color: var(--accent-ink); }
+.ag-escalation { color: #b45309; }
+
+.ev.expandable { cursor: pointer; }
+.ev.expandable:hover { background: var(--surface); border-color: var(--border-soft); }
+.ev.expandable.open { background: var(--surface); border-color: var(--border); }
+.ev-toggle {
+  width: 12px; flex: none; font-size: 9px; color: var(--faint);
+  text-align: center; line-height: 1;
+}
+.ev-toggle.spacer { visibility: hidden; }
+.ev-details {
+  margin: 0 0 6px 22px;
+  padding: 6px 8px 8px;
+  border-left: 2px solid var(--border);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ev-detail-row {
+  display: grid;
+  grid-template-columns: 36px 92px 1fr auto;
+  gap: 8px; align-items: baseline;
+  padding: 3px 4px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px; color: var(--ink-2);
+}
+.ev-detail-row.muted { color: var(--faint); grid-template-columns: 1fr; }
+.ev-detail-round { color: var(--accent-ink); font-weight: 700; }
+.ev-detail-kind { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-detail-msg { min-width: 0; word-break: break-word; }
+.ev-detail-time { color: var(--faint); white-space: nowrap; font-size: 10.5px; }
+@media (max-width: 640px) {
+  .ev-detail-row { grid-template-columns: 32px 1fr auto; }
+  .ev-detail-kind { display: none; }
+}
+
+.col-head.sub { margin-top: 16px; margin-bottom: 8px; }
+.escalate-block { margin-top: 4px; }
+.escalate-card .wc-host::before { background: #b45309; }
+
+/* Worker 轨迹抽屉 */
+.worker-trace-drawer {
+  width: min(560px, 96vw);
+}
+.worker-trace-drawer .drawer-content { padding: 0; }
+.trace-head {
+  display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;
+  padding: 18px 20px 14px; border-bottom: 1px solid var(--border-soft);
+}
+.trace-head h3 {
+  margin: 4px 0 6px; font-size: 17px; line-height: 1.3;
+  word-break: break-all;
+}
+.trace-head .eyebrow {
+  font-size: 11px; letter-spacing: .08em; color: var(--faint);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+.trace-close {
+  flex: none; border: 1px solid var(--border); background: var(--surface);
+  border-radius: 8px; padding: 8px 12px; cursor: pointer; color: var(--ink-2);
+}
+.trace-directive {
+  padding: 14px 20px; border-bottom: 1px solid var(--border-soft);
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--surface);
+}
+.trace-directive label { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.trace-directive textarea {
+  width: 100%; resize: vertical; min-height: 72px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); color: var(--ink); padding: 10px 12px;
+  font: inherit; line-height: 1.45;
+}
+.trace-directive button.primary {
+  align-self: flex-end; background: var(--accent); color: #fff;
+  border: none; border-radius: 8px; padding: 9px 14px; cursor: pointer; font-weight: 600;
+}
+.trace-directive button.primary:disabled { opacity: .5; cursor: not-allowed; }
+.trace-list {
+  flex: 1; overflow-y: auto; padding: 10px 12px 24px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.trace-row {
+  display: grid;
+  grid-template-columns: 42px 110px 1fr auto;
+  gap: 8px; align-items: baseline;
+  padding: 7px 8px; border-radius: 8px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11.5px;
+  border: 1px solid transparent;
+}
+.trace-row:hover { background: var(--surface); border-color: var(--border-soft); }
+.trace-round { color: var(--accent-ink); font-weight: 700; }
+.trace-kind { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-msg { color: var(--ink-2); word-break: break-word; min-width: 0; }
+.trace-time { color: var(--faint); font-size: 11px; white-space: nowrap; }
+@media (max-width: 640px) {
+  .trace-row { grid-template-columns: 36px 1fr auto; }
+  .trace-kind { display: none; }
+}
 
 /* ---------- 结果行 ---------- */
 .result-row {

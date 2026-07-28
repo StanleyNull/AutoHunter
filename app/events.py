@@ -29,7 +29,15 @@ class EventBus:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                pass  # 慢消费者丢弃，不阻塞
+                # 慢消费者：丢掉最旧事件再塞入最新，避免静默整段失联。
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    continue
+                try:
+                    q.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
 
 
 bus = EventBus()

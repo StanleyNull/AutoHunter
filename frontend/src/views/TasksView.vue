@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyToken } from "../api.js";
 import TaskEditModal from "../components/TaskEditModal.vue";
@@ -11,6 +11,7 @@ const editOpen = ref(false);
 const editingTask = ref(null);
 const writable = computed(() => authRoleRef.value === "full");
 const router = useRouter();
+let pollTimer = null;
 
 const STATUS_LABEL = {
   running: "运行中",
@@ -37,13 +38,25 @@ function taskScopeText(t) {
   return t?.fofa_query || "手动清单";
 }
 
-async function load() {
+const hasRunning = computed(() => tasks.value.some((t) => t.status === "running"));
+
+function syncPoller() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+  // 有运行中任务时加快刷新；否则慢轮询，仍能感知远端状态变化。
+  const ms = hasRunning.value ? 5000 : 15000;
+  pollTimer = setInterval(() => load({ background: true }), ms);
+}
+
+async function load(opts = {}) {
+  const background = !!opts.background;
   if (!tasks.value.length) initialLoading.value = true;
-  else refreshing.value = true;
+  else if (!background) refreshing.value = true;
   try { tasks.value = await api.listTasks(); }
   finally {
     initialLoading.value = false;
     refreshing.value = false;
+    syncPoller();
   }
 }
 async function openEdit(task) {
@@ -115,9 +128,14 @@ onMounted(async () => {
   if (!authReadyRef.value) await loadAuthRole();
   await load();
 });
+onUnmounted(() => {
+  clearInterval(pollTimer);
+  pollTimer = null;
+});
 watch(authReadyRef, (ready) => {
   if (ready) load();
 });
+watch(hasRunning, () => syncPoller());
 </script>
 
 <template>
