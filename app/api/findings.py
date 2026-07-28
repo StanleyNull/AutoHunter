@@ -1236,4 +1236,7 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
         r.user_status = "deepening"
         r.user_reviewed_at = _now()
     await session.commit()
+    # 空闲任务深挖入队后需重新拉起调度，否则目标会一直挂在 queued。
+    from app.orchestrator import manager
+    await manager.wake_idle(f.task_id)
     return {"ok": True, "message": suffix.strip(" →")}

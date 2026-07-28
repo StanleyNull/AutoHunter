@@ -1,16 +1,17 @@
 import { createApp } from "vue";
 import { createRouter, createWebHashHistory } from "vue-router";
-import App from "./App.vue";
-import TasksView from "./views/TasksView.vue";
-import CreateView from "./views/CreateView.vue";
-import BoardView from "./views/BoardView.vue";
-import SettingsView from "./views/SettingsView.vue";
-import HardTargetsView from "./views/HardTargetsView.vue";
-import IntelView from "./views/IntelView.vue";
-import KnowledgeView from "./views/KnowledgeView.vue";
-import VulnsView from "./views/VulnsView.vue";
-import RuntimeLogsView from "./views/RuntimeLogsView.vue";
-import { authReadyRef, authRoleRef, loadAuthRole } from "./api.js";
+ import App from "./App.vue";
+ // 路由懒加载：按需加载各视图，减小首屏体积
+ const TasksView = () => import("./views/TasksView.vue");
+ const CreateView = () => import("./views/CreateView.vue");
+ const BoardView = () => import("./views/BoardView.vue");
+ const SettingsView = () => import("./views/SettingsView.vue");
+ const HardTargetsView = () => import("./views/HardTargetsView.vue");
+ const IntelView = () => import("./views/IntelView.vue");
+ const KnowledgeView = () => import("./views/KnowledgeView.vue");
+ const VulnsView = () => import("./views/VulnsView.vue");
+ const RuntimeLogsView = () => import("./views/RuntimeLogsView.vue");
+ import { authReadyRef, authRoleRef, loadAuthRole } from "./api.js";
 import "./style.css";
 
 const router = createRouter({

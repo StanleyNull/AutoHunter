@@ -346,6 +346,33 @@ nav { display: flex; gap: 2px; }
 .bottom-nav {
   display: none;
 }
+/* ---------- 右下角 toast：已完成任务再次启动等场景提示 ---------- */
+.done-toast-stack {
+  position: fixed; right: 24px; bottom: 24px; z-index: var(--z-toast);
+  display: flex; flex-direction: column-reverse; gap: 10px;
+  pointer-events: none;
+}
+.done-toast {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface-2); color: var(--ink);
+  border: 1px solid var(--border); border-left: 3px solid var(--accent, #4f8cff);
+  padding: 12px 18px; border-radius: var(--radius); font-weight: 500;
+  box-shadow: var(--shadow-lg); max-width: min(360px, 80vw);
+}
+.done-toast-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent, #4f8cff); flex: none;
+}
+.done-toast-text { line-height: 1.4; }
+.done-toast-enter-active { transition: all .22s cubic-bezier(.22,1,.36,1); }
+.done-toast-leave-active { transition: all .22s ease; position: absolute; right: 0; }
+.done-toast-enter-from { opacity: 0; transform: translateX(24px); }
+.done-toast-leave-to { opacity: 0; transform: translateX(24px); }
+/* 右下角 toast 移动端：避开底部导航栏 */
+@media (max-width: 768px) {
+  .done-toast-stack { left: 12px; right: 12px; bottom: calc(72px + env(safe-area-inset-bottom, 0px)); }
+  .done-toast { max-width: none; }
+}
 .mobile-only-nav { display: none; }
 .desktop-only-nav { display: flex; }
 

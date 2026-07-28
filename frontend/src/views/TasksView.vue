@@ -5,6 +5,7 @@ import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyTo
 import TaskEditModal from "../components/TaskEditModal.vue";
 import DailyCalendar from "../components/DailyCalendar.vue";
 import { taskListState } from "../taskListState.js";
+import { showToast } from "../toast.js";
 
 const tasks = ref([]);
 const initialLoading = ref(true);
@@ -186,12 +187,17 @@ function onSaved() {
 const batchBusy = ref(false);
 const batchMsg = ref("");
 // ===== 单任务启动/暂停（列表内快捷操作） =====
-const busyTaskId = ref(null);   // 正在操作的某个任务 id（防重复点击）
+const busyTaskIds = ref([]);    // 正在操作的任务 id 集合（按任务加锁，不互斥其它任务）
 const actionMsg = ref("");      // 单任务操作结果反馈
 
 async function ctl(task, action) {
-  if (busyTaskId.value) return;
-  busyTaskId.value = task.id;
+  if (busyTaskIds.value.includes(task.id)) return; // 仅防同一任务重复点击
+  // 已完成任务（所有目标均已处理完毕）点击启动：右下角提示，不真正发起启动请求
+  if (action === "start" && (task.progress_pct ?? 0) >= 100) {
+    showToast(`「${task.name}」任务已完成`);
+    return;
+  }
+  busyTaskIds.value = [...busyTaskIds.value, task.id];
   actionMsg.value = "";
   try {
     await api[action](task.id);
@@ -202,7 +208,7 @@ async function ctl(task, action) {
   } catch (e) {
     actionMsg.value = `操作失败：${e.message || e}`;
   } finally {
-    busyTaskId.value = null;
+    busyTaskIds.value = busyTaskIds.value.filter(id => id !== task.id);
     setTimeout(() => (actionMsg.value = ""), 3000);
   }
 }
@@ -389,12 +395,12 @@ watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
         <div class="task-card-side">
           <time class="meta task-time">{{ t.created_at.slice(0, 19).replace("T", " ") }}</time>
           <div v-if="writable" class="task-actions">
-            <button class="mini-action primary" type="button"
-              :disabled="busyTaskId === t.id || t.status === 'running'"
-              @click.stop="ctl(t, 'start')">启动</button>
-            <button class="mini-action" type="button"
-              :disabled="busyTaskId === t.id || t.status !== 'running'"
-              @click.stop="ctl(t, 'pause')">暂停</button>
+           <button class="mini-action primary" type="button"
+              :disabled="busyTaskIds.includes(t.id) || t.status === 'running'"
+             @click.stop="ctl(t, 'start')">启动</button>
+           <button class="mini-action" type="button"
+              :disabled="busyTaskIds.includes(t.id) || t.status !== 'running'"
+             @click.stop="ctl(t, 'pause')">暂停</button>
             <button class="mini-action" type="button" @click.stop="openEdit(t)">编辑参数</button>
             <button class="mini-action danger" type="button" @click.stop="askDelete(t)">删除</button>
           </div>

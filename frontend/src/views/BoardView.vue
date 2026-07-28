@@ -8,6 +8,7 @@ import { copyText } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildReportPy, reportSlug } from "../report.js";
 import ReportDrawer from "../components/ReportDrawer.vue";
 import TaskEditModal from "../components/TaskEditModal.vue";
+import { showToast } from "../toast.js";
 
 const props = defineProps({ id: String });
 const router = useRouter();
@@ -58,7 +59,20 @@ const SUBMIT_PAGE_SIZE = 120;
 const EXPORT_PAGE_SIZE = 80;
 let ws = null, poll = null, boardPoll = null, searchTimer = null, poolPoll = null;
 let wsReconnectTimer = null, wsReconnectAttempt = 0, wsIntentionalClose = false;
-let eventRefreshTimer = null, eventRefreshPending = null;
+ let eventRefreshTimer = null, eventRefreshPending = null;
+ // 事件唯一自增 id，保证 v-for :key 稳定，避免 unshift 触发整列重算
+ let _evUid = 0;
+ 
+ // liveWorkers 签名比较：关键字段未变则视为相同，跳过数组替换
+ function workersSigEqual(a, b) {
+   if (a === b) return true;
+   const la = a?.length ?? 0, lb = b?.length ?? 0;
+   if (la !== lb) return false;
+   if (la === 0) return true;
+   const sig = (w) => `${w.target_id}|${w.round ?? 0}|${w.findings ?? 0}|${w.score ?? 0}|${w.action ?? ""}|${w.started_at ?? ""}`;
+   for (let i = 0; i < la; i++) if (sig(a[i]) !== sig(b[i])) return false;
+   return true;
+ }
 const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived", "discarded"]);
 // 记录哪些列表 tab 已经加载过数据：首屏只拉看板，列表按需加载；后台只刷新看过的列表。
 const loadedTabs = ref(new Set());
@@ -476,9 +490,13 @@ function phaseStateText(state) {
 async function loadBoard() {
   const id = props.id;
   const b = await api.board(id);
-  if (id !== props.id) return;
-  liveWorkers.value = b.live_workers || [];
-  siteCollab.value = b.site_collab || null;
+ if (id !== props.id) return;
+   // 浅比较：字段未变则不替换数组，避免 worker-card 全列重渲染
+   const nextWorkers = b.live_workers || [];
+   if (!workersSigEqual(nextWorkers, liveWorkers.value)) {
+     liveWorkers.value = nextWorkers;
+   }
+ siteCollab.value = b.site_collab || null;
   retestSummary.value = b.retest_summary || null;
   if (task.value) {
     if (b.task_status) task.value.status = b.task_status;
@@ -488,12 +506,12 @@ async function loadBoard() {
     if (b.llm_usage) task.value.llm_usage = b.llm_usage;
         if (b.llm_usage_by_model) task.value.llm_usage_by_model = b.llm_usage_by_model;
   }
-  if (!events.value.length && b.events?.length) {
-    events.value = b.events
-      .filter(isImportantEvent)
-      .map((e) => ({ ...e, _text: fmtEvent(e) }))
-      .filter((e) => e._text);
-  }
+ if (!events.value.length && b.events?.length) {
+   events.value = b.events
+     .filter(isImportantEvent)
+     .map((e) => ({ ...e, _text: fmtEvent(e), _uid: ++_evUid }))
+     .filter((e) => e._text);
+ }
 }
 
 function connectWs() {
@@ -514,9 +532,9 @@ function connectWs() {
     if (!isImportantEvent(ev)) return;
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
     const text = fmtEvent(ev);
-    if (!text) return;
-    events.value.unshift({ ...ev, _text: text });
-    if (events.value.length > 200) events.value.pop();
+   if (!text) return;
+   events.value.unshift({ ...ev, _text: text, _uid: ++_evUid });
+   if (events.value.length > 200) events.value.pop();
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
         || k.includes("target_needs") || k.includes("submit")
@@ -557,16 +575,17 @@ function syncPollers() {
   clearInterval(poll);
   clearInterval(boardPoll);
   clearInterval(poolPoll);
-  const running = task.value?.status === "running";
-  boardPoll = setInterval(loadBoard, running ? 2500 : 12000);
-  poll = setInterval(() => refreshAll({
-    background: true,
-    includeTask: false,
-    includeBoard: false,
-  }), running ? 15000 : 30000);
-  // 连接池状态：运行中 5s 刷新，空闲 30s
-  loadPoolStats();
-  poolPoll = setInterval(loadPoolStats, running ? 5000 : 30000);
+ const running = task.value?.status === "running";
+ // 运行态 5s、空闲 12s；实时性由 WebSocket 事件刷新兜底，轮询可更慢
+ boardPoll = setInterval(loadBoard, running ? 5000 : 12000);
+ poll = setInterval(() => refreshAll({
+   background: true,
+   includeTask: false,
+   includeBoard: false,
+ }), running ? 20000 : 30000);
+ // 连接池状态：运行中 10s 刷新，空闲 30s
+ loadPoolStats();
+ poolPoll = setInterval(loadPoolStats, running ? 10000 : 30000);
 }
 
 onMounted(async () => {
@@ -606,10 +625,11 @@ watch(tab, (t) => {
   loadTabData(t);
 });
 
-watch(searchDraft, (v) => {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { searchText.value = v; }, 120);
-});
+ watch(searchDraft, (v) => {
+   clearTimeout(searchTimer);
+   // 250ms debounce，减少输入过程中的 computed 重算
+   searchTimer = setTimeout(() => { searchText.value = v; }, 250);
+ });
 
 function elapsed(iso) {
   if (!iso) return "";
@@ -619,6 +639,11 @@ function elapsed(iso) {
 }
 
 async function ctl(action) {
+  // 已完成任务（所有目标均已处理完毕）点击启动：右下角提示，不真正发起启动请求
+  if (action === "start" && progressPct.value >= 100) {
+    showToast(`「${task.value?.name || "该任务"}」任务已完成`);
+    return;
+  }
   await api[action](props.id);
   toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
   await Promise.all([loadTask(), loadBoard()]);
@@ -1270,7 +1295,7 @@ function phaseLabel(phase) {
 const runState = computed(() => {
   const s = task.value?.status || "unknown";
   const label = { running: "运行中", idle: "空闲", paused: "已暂停", stopped: "已停止", created: "未启动" }[s] || s;
-  const hint = s === "running" ? "24×7 自动补队列" : s === "idle" ? "等待新目标或人工动作" : "调度已收敛";
+  const hint = s === "running" ? "24×7 自动补队列" : s === "idle" ? "调度已释放，有新目标或点启动后再挖" : "调度已收敛";
   return { label, hint };
 });
 const retestCard = computed(() => {
@@ -1739,7 +1764,7 @@ function fmtTime(iso) {
         <div class="col-head"><span>Activity Stream</span><small>重要事件</small></div>
         <div class="event-log">
           <div v-if="!events.length" class="empty sm">等待事件…</div>
-          <div v-for="(ev, i) in events" :key="i" :class="evClass(ev)">
+         <div v-for="ev in events" :key="ev._uid" :class="evClass(ev)">
             <span class="ev-icon" :class="`ag-${ev.agent}`">{{ AGENT_ICON[ev.agent] || "•" }}</span>
             <span class="ev-agent" :class="`ag-${ev.agent}`">{{ AGENT_LABEL[ev.agent] || ev.agent }}</span>
             <span class="ev-msg">{{ ev._text }}</span>

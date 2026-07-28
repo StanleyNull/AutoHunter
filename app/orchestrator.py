@@ -17,7 +17,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, urlunparse
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -138,6 +138,11 @@ QUEUE_LIVENESS_BATCH_SIZE = max(1, int(os.environ.get("QUEUE_LIVENESS_BATCH_SIZE
 RETEST_LOCAL_TIMEOUT = float(os.environ.get("RETEST_LOCAL_TIMEOUT", "4"))
 RETEST_SERVER_TIMEOUT = float(os.environ.get("RETEST_SERVER_TIMEOUT", "5"))
 RETEST_SSH_CONNECT_TIMEOUT = float(os.environ.get("RETEST_SSH_CONNECT_TIMEOUT", "3"))
+# 重测完成后进入冷却期：避免重测刚标 dead 的目标（其 dead_reason 仍可能命中
+# _RETEST_DEAD_PATTERNS，例如 worker 在重测中产生的「系统自动收敛」）被下一轮
+# retest_start 立即再次选中，形成「重测→标 dead→立刻重测」的死循环。
+# 冷却期内不重新启动重测；过期后清空 retest_state，重新收集失败目标。
+RETEST_DONE_COOLDOWN_MINUTES = int(os.environ.get("RETEST_DONE_COOLDOWN_MINUTES", "60"))
 
 _LOW_SUCCESS_SCORE_MARKERS = (
     "pure_frontend", "pure_marketing_site", "static_assets", "data_display_platform",
@@ -490,6 +495,23 @@ class TaskRunner:
                 )
             await session.commit()
 
+    def _park_idle(self) -> None:
+        """空闲停转：退出主循环并异步从 manager 注销，不再每 3s 占 DB 连接。
+
+        不取消审核/通杀/扩大危害——这些后台任务继续跑完；release 侧会等它们结束，
+        若期间又入队了新目标则重新拉起 runner。
+        """
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        try:
+            asyncio.get_running_loop().create_task(
+                manager.release_idle_runner(self.task_id, self),
+                name=f"release-idle-{self.task_id[:8]}",
+            )
+        except RuntimeError:
+            pass
+
     async def run_forever(self) -> None:
         async with SessionLocal() as session:
             await self.recover(session)
@@ -511,18 +533,22 @@ class TaskRunner:
                         # 只记可读的异常摘要（类名+消息），不糊整条 SQL/参数。
                         await self._log(s, "orchestrator", "error",
                                         f"主循环异常: {summary}", level="error")
+            if self._stop.is_set():
+                break
             await asyncio.sleep(LOOP_INTERVAL)
 
     async def _tick(self) -> None:
         async with SessionLocal() as session:
             task = await session.get(Task, self.task_id)
             if not task:
+                self._park_idle()
                 return
             if task.status == "stopped":
                 # 停止：清除重测状态（完全重置）
                 if task.retest_state:
                     task.retest_state = None
                     await session.commit()
+                self._park_idle()
                 return
             if task.status == "paused":
                 # 暂停：保留 retest_state，恢复后从断点继续休眠/重测
@@ -537,6 +563,16 @@ class TaskRunner:
                         level="info",
                     )
                 return
+            if task.status == "idle":
+                # 空闲 runner 不应常驻：有活则唤醒继续本轮，无活则停转释放连接池。
+                queued = await self._count(session, "queued")
+                inflight = await self._count_inflight(session)
+                if queued or inflight or self._active_workers:
+                    task.status = "running"
+                    await session.commit()
+                else:
+                    self._park_idle()
+                    return
             self._is_enterprise = is_enterprise_src(task.src_type)
 
             # 1. 队列水位低 → 补目标
@@ -626,12 +662,14 @@ class TaskRunner:
                     queued = 1  # 保持 running，不进 idle
 
             if queued == 0 and not busy and task.status == "running":
-                if task.status != "idle":
-                    task.status = "idle"
-                    await session.commit()
-            elif task.status == "idle" and (queued or busy):
-                task.status = "running"
+                task.status = "idle"
                 await session.commit()
+                await self._log(
+                    session, "orchestrator", "idle_park",
+                    "任务空闲，已释放调度循环（不再占用连接池；有新目标时再拉起）",
+                    level="info",
+                )
+                self._park_idle()
 
     async def _count(self, session: AsyncSession, status: str) -> int:
         from sqlalchemy import func
@@ -672,8 +710,23 @@ class TaskRunner:
 
         phase = state.get("phase", "")
 
-        # 已完成 → 清理
+        # 已完成 → 冷却期检查：避免重测产生的 dead（dead_reason 仍命中模式词，
+        # 例如 worker 在重测中产生的「系统自动收敛」）被下一轮 _retest_start 立即
+        # 重新选中，形成「重测→标 dead→立刻重测」的死循环。冷却期内保持 done，
+        # 不重新启动重测；过期后清空 retest_state，下次 tick 重新收集失败目标。
         if phase == "done":
+            done_at_str = state.get("done_at")
+            if not done_at_str:
+                # 首次进入 done：记录完成时间，进入冷却期（不立即清空，避免立刻重启）
+                state["done_at"] = datetime.now(CST).isoformat()
+                await self._retest_save(session, task)
+                return 0
+            done_at = datetime.fromisoformat(done_at_str)
+            cooldown = timedelta(minutes=RETEST_DONE_COOLDOWN_MINUTES)
+            if datetime.now(CST) < done_at + cooldown:
+                # 冷却期内：保持 done，不重新启动重测
+                return 0
+            # 冷却期结束：清空 retest_state，下次 tick 可重新收集失败目标启动重测
             task.retest_state = None
             await self._retest_save(session, task)
             return 0
@@ -751,7 +804,8 @@ class TaskRunner:
             state["current_id"] = current_id
             phase = state.get("phase")
 
-            # Phase 2: 直接派 worker（ip_banned 目标已确认需要代理测试）
+            # Phase 2: 对 phase1 直接代理测试后仍为 ip_banned（代理也封）的残留目标再测一次，
+            # 给代理临时抖动一次重试机会；仍 ip_banned 则留给 phase2 转换的探活交叉验证。
             if phase == "phase2":
                 tgt = await session.get(Target, current_id)
                 if not tgt or tgt.status != "ip_banned":
@@ -855,24 +909,43 @@ class TaskRunner:
                     break
 
             if server_reachable:
-                # 服务器可达 → 标记 ip_banned
-                tgt.status = "ip_banned"
-                tgt.ip_ban_confirmed = True
+                # 服务器可达 → 本机 IP 被封，直接派 worker 用代理测试（不等 phase2 集中处理）。
+                # worker 代理可达则正常出结果(done/dead)；代理也不可达则 verdict=ip_banned，
+                # 目标重新设回 ip_banned（见 _persist_worker_result），留给 phase2/phase3 休眠判断。
+                tgt.status = "queued"
+                tgt.verdict = ""
                 tgt.assigned_worker = ""
                 tgt.heartbeat_at = None
                 tgt.dead_reason = ""
-                tgt.last_error = "重测探活：本机不可达但服务器可达，标记 IP 封禁"
+                tgt.last_error = "重测探活：本机不可达但服务器可达，直接用代理测试"
+                tgt.retry_count = 0
+                tgt.ip_ban_confirmed = True
+                tgt.deepen_context = {
+                    "directive": "IP 封禁复测：你的 IP 被目标 WAF 封禁，必须全程通过 SSH 代理发送请求。",
+                    "ip_ban_retest": True,
+                    "source": "ip_ban_retest",
+                }
+                tgt.priority_score = (tgt.priority_score or 0) + 50.0
+                tgt.priority_reason = "[重测] IP 封禁，代理复测"
                 await self._log(
-                    session, "orchestrator", "retest_ip_banned",
-                    f"重测探活：{tgt.host} 本机不可达但服务器可达，标记 IP 封禁",
-                    level="warn", target_id=current_id,
+                    session, "orchestrator", "retest_ip_ban_test",
+                    f"重测探活：{tgt.host} 本机不可达但服务器可达，直接派代理测试",
+                    level="info", target_id=current_id,
                 )
+                await self._retest_save(session, task)
+                self._spawn_worker(task, tgt)
+                state["current_step"] = "testing"
+                await self._retest_save(session, task)
+                return 1
             else:
                 # 全部不可达 → 标记 dead
                 tgt.status = "dead"
                 tgt.assigned_worker = ""
                 tgt.heartbeat_at = None
-                tgt.dead_reason = "本机和所有服务器均探活失败，确定服务不可达"
+                # 注意：dead_reason 不得命中 _RETEST_DEAD_PATTERNS（如「探活失败」），
+                # 否则重测刚标 dead 的目标会被下一轮 retest_start 再次选中，形成死循环。
+                # 用「重测确认不可达」语义，不匹配重测模式词，避免反复重测。
+                tgt.dead_reason = "重测确认：本机与所有代理服务器均不可达，服务已下线"
                 await self._log(
                     session, "orchestrator", "retest_dead",
                     f"重测探活：{tgt.host} 本机和所有服务器均不可达，标记 dead",
@@ -964,7 +1037,7 @@ class TaskRunner:
                 state["current_id"] = None
                 state["current_step"] = "idle"
                 await self._log(session, "orchestrator", "retest_phase2",
-                                f"Phase 1 完成，{len(banned)} 个 IP 封禁目标进入 Phase 2 服务器测试",
+                                f"Phase 1 完成，{len(banned)} 个代理也封的目标进入 Phase 2 重试",
                                 level="info")
                 await self._retest_save(session, task)
                 return 1
@@ -1020,7 +1093,8 @@ class TaskRunner:
                         tgt.status = "dead"
                         tgt.assigned_worker = ""
                         tgt.heartbeat_at = None
-                        tgt.dead_reason = "本机和所有服务器均探活失败，确定服务不可达"
+                        # dead_reason 不命中 _RETEST_DEAD_PATTERNS，避免重测产出被再次选中
+                        tgt.dead_reason = "重测确认：本机与所有代理服务器均不可达，服务已下线"
                     state["phase"] = "done"
                     await self._log(session, "orchestrator", "retest_done",
                                     f"Phase 2 后探活服务器也不可达，{len(still_banned)} 个目标标记 dead",
@@ -3066,8 +3140,10 @@ class TaskRunner:
                     deepen_directive=rv.get("deepen_directive", ""),
                 ))
                 extra = ""
+                deepened = False
                 if rv["verdict"] == "deepen":
                     extra = await self._apply_deepen(session, f, rv)
+                    deepened = True
                 else:
                     f.status = "reviewed"
                 await session.commit()
@@ -3083,6 +3159,9 @@ class TaskRunner:
                     and f.worker_id != "escalation"  # 断递归：升级洞不再触发升级
                     and should_escalate(f.vuln_type, f.title, rv.get("severity_final") or "")
                 )
+                # 审核打回深挖可能发生在任务刚变 idle、runner 正在停转时——需要唤醒。
+                if deepened:
+                    await manager.wake_idle(task_id)
         # commit 之后、脱离 session 再触发，避免把后台任务寿命绑在本次事务上。
         if escalate_finding:
             self.trigger_escalation(task_id, finding_id, rv.get("severity_final") or "")
@@ -3260,6 +3339,7 @@ class TaskRunner:
 
             # 判定可通杀 + 实证验证成功 → 把那个同款站点入挖掘队列出货
             enq = ""
+            added = False
             if res.get("is_killsweep") and res.get("verified") and res.get("verified_url"):
                 added = await self._enqueue_killsweep_target(
                     session, task_id, res["verified_url"], origin_host)
@@ -3271,6 +3351,8 @@ class TaskRunner:
                             f"(全网{res.get('asset_count',0)}/教育{res.get('edu_count',0)}){enq}",
                             finding_id=finding_id, is_killsweep=res.get("is_killsweep"),
                             asset_count=res.get("asset_count", 0))
+            if added:
+                await manager.wake_idle(task_id)
 
     async def _enqueue_killsweep_target(self, session: AsyncSession, task_id: str,
                                         url: str, origin: str) -> bool:
@@ -3512,7 +3594,14 @@ class OrchestratorManager:
 
     async def ensure_running(self, task_id: str) -> None:
         existing_task = self._tasks.get(task_id)
-        if task_id in self._runners and existing_task and not existing_task.done():
+        existing_runner = self._runners.get(task_id)
+        # 已在跑且未停转：直接复用。
+        if (
+            existing_runner
+            and not existing_runner._stop.is_set()
+            and existing_task
+            and not existing_task.done()
+        ):
             return
         if existing_task and existing_task.done():
             self._tasks.pop(task_id, None)
@@ -3522,6 +3611,90 @@ class OrchestratorManager:
             self._runners[task_id] = runner
         self._runners[task_id] = runner
         self._tasks[task_id] = asyncio.create_task(runner.run_forever())
+
+    async def wake_idle(self, task_id: str) -> bool:
+        """空闲任务有新活时唤醒：idle→running 并拉起 runner。返回是否唤醒。"""
+        async with SessionLocal() as session:
+            task = await session.get(Task, task_id)
+            if not task or task.status != "idle":
+                return False
+            task.status = "running"
+            await session.commit()
+            await self._log_wake(session, task_id)
+        await self.ensure_running(task_id)
+        return True
+
+    @staticmethod
+    async def _log_wake(session: AsyncSession, task_id: str) -> None:
+        session.add(TaskEvent(
+            task_id=task_id, agent="orchestrator", kind="idle_wake",
+            level="info",
+            message="空闲任务因新目标入队已重新拉起调度",
+            payload={},
+        ))
+        await session.commit()
+
+    async def release_idle_runner(self, task_id: str, runner: "TaskRunner") -> None:
+        """空闲停转收尾：等后台审核/通杀结束后注销 runner；若又有活则重新拉起。"""
+        # 最多等 30 分钟：正常审核/通杀应远短于此；超时仍注销，避免永久挂住。
+        deadline = asyncio.get_running_loop().time() + 1800
+        while (
+            runner._active_workers
+            or runner._review_tasks
+            or runner._killsweep_tasks
+            or runner._escalation_tasks
+        ):
+            if asyncio.get_running_loop().time() >= deadline:
+                logger.warning(
+                    "release_idle_runner[%s] 等待后台任务超时，强制注销 runner "
+                    "(workers=%d reviews=%d killsweep=%d escalation=%d)",
+                    task_id[:8],
+                    len(runner._active_workers),
+                    len(runner._review_tasks),
+                    len(runner._killsweep_tasks),
+                    len(runner._escalation_tasks),
+                )
+                break
+            await asyncio.sleep(0.5)
+
+        # 期间可能已被 stop/ensure_running 替换成新 runner。
+        if self._runners.get(task_id) is not runner:
+            return
+
+        async with SessionLocal() as session:
+            task = await session.get(Task, task_id)
+            queued = 0
+            inflight = 0
+            if task:
+                queued = (await session.execute(
+                    select(func.count()).select_from(Target).where(
+                        Target.task_id == task_id, Target.status == "queued")
+                )).scalar() or 0
+                inflight = (await session.execute(
+                    select(func.count()).select_from(Target).where(
+                        Target.task_id == task_id,
+                        Target.status.in_(("assigned", "scanning")))
+                )).scalar() or 0
+            has_work = bool(queued or inflight)
+            if task and (task.status == "running" or has_work):
+                if task.status == "idle" and has_work:
+                    task.status = "running"
+                    await session.commit()
+                # 旧 runner 已 _stop，换新实例继续调度。
+                self._runners.pop(task_id, None)
+                t = self._tasks.pop(task_id, None)
+                if t and not t.done():
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await t
+                await self.ensure_running(task_id)
+                return
+
+        if self._runners.get(task_id) is runner:
+            self._runners.pop(task_id, None)
+        t = self._tasks.get(task_id)
+        if t is not None and t.done():
+            self._tasks.pop(task_id, None)
 
     async def stop(self, task_id: str) -> None:
         runner = self._runners.pop(task_id, None)
@@ -3539,17 +3712,17 @@ class OrchestratorManager:
             await runner.pause()
 
     async def restore_on_startup(self) -> None:
-        """重启恢复：把 running/idle 的任务重新拉起。"""
+        """重启恢复：只拉起 running 任务。idle 不占 runner/连接池，有新活时再唤醒。"""
         async with SessionLocal() as session:
-            rows = await session.execute(select(Task).where(Task.status.in_(["running", "idle"])))
+            rows = await session.execute(select(Task).where(Task.status == "running"))
             for task in rows.scalars().all():
                 await self.ensure_running(task.id)
 
     async def pause_on_startup(self) -> None:
-        """安全启动模式：只恢复 Web/API，把历史运行任务暂停并回收半路目标。"""
+        """安全启动模式：只恢复 Web/API，把历史 running 任务暂停并回收半路目标。"""
         async with SessionLocal() as session:
             rows = (await session.execute(
-                select(Task).where(Task.status.in_(["running", "idle"]))
+                select(Task).where(Task.status == "running")
             )).scalars().all()
             for task in rows:
                 runner = TaskRunner(task.id)
@@ -3558,7 +3731,7 @@ class OrchestratorManager:
                 await session.commit()
                 await runner._log(
                     session, "orchestrator", "safe_startup_pause",
-                    "安全启动模式：容器启动未自动恢复任务，已暂停历史 running/idle 任务",
+                    "安全启动模式：容器启动未自动恢复任务，已暂停历史 running 任务",
                     level="warn",
                 )
 

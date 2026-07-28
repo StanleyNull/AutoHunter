@@ -27,12 +27,24 @@ case "$MODE" in
     if [ -d web/dist ]; then
       docker cp web/dist/. "$SERVICE":/app/web/dist/
     fi
-    # 依赖冲突检测：pyppeteer/selenium 等包可能将 websockets 降级到 <13，
-    # 导致 uvicorn[standard] 启动失败。热更新前自动检测并修复。
-    WS_OK=$(docker exec "$SERVICE" python3 -c "import websockets; exit(0 if float(websockets.__version__.split('.')[0])>=13 else 1)" 2>/dev/null && echo yes || echo no)
-    if [ "$WS_OK" = "no" ]; then
-      echo "[hot] websockets < 13.0 detected, repairing dependency conflict..."
-      docker exec "$SERVICE" python3 -m pip install --quiet 'websockets>=13.0' 2>/dev/null || true
+   # 依赖冲突检测：pyppeteer/selenium 等包可能将 websockets 降级到 <13，
+   # 导致 uvicorn[standard] 启动失败。热更新前自动检测并修复。
+    # 容器内 import/pip 偶发挂死，用容器内 timeout 兜底，避免永久阻塞热更新。
+    # 三态：ok=版本达标；bad=明确版本<13，需修复；fail=超时/异常，只告警不盲动。
+    WS_VER=$(docker exec "$SERVICE" timeout 15 python3 -c "import websockets,sys; sys.stdout.write(websockets.__version__)" 2>/dev/null || true)
+    WS_MAJOR="${WS_VER%%.*}"
+    if [ -n "$WS_MAJOR" ] && [ "$WS_MAJOR" -ge 13 ] 2>/dev/null; then
+      WS_OK="ok"
+    elif [ -n "$WS_MAJOR" ] && [ "$WS_MAJOR" -lt 13 ] 2>/dev/null; then
+      WS_OK="bad"
+    else
+      WS_OK="fail"
+    fi
+    if [ "$WS_OK" = "bad" ]; then
+      echo "[hot] websockets ${WS_VER:-?} < 13.0 detected, repairing dependency conflict..."
+      docker exec "$SERVICE" timeout 60 python3 -m pip install --quiet 'websockets>=13.0' 2>/dev/null || true
+    elif [ "$WS_OK" = "fail" ]; then
+      echo "[hot] websockets version probe failed/timed out (got '${WS_VER:-empty}'); skip auto-repair, continue."
     fi
     # Graceful stop (-t 30) gives the lifespan shutdown hook time to cancel running
     # workers and let them flush already-found findings before the process is killed.

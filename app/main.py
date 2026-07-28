@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
             "生产/公网部署务必设置 AUTOHUNTER_API_TOKEN，或仅监听 127.0.0.1。"
         )
     if os.environ.get("AUTOHUNTER_RESTORE_ON_STARTUP", "1").lower() not in {"0", "false", "no", "off"}:
-        await manager.restore_on_startup()  # 重启恢复 running/idle 任务
+        await manager.restore_on_startup()  # 重启只恢复 running；idle 不占 runner
     else:
         await manager.pause_on_startup()
     try:

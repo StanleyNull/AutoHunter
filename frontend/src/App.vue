@@ -9,6 +9,7 @@ import {
   loadAuthRole,
   submitTokenModal,
 } from "./api.js";
+import { toastList } from "./toast.js";
 const route = useRoute();
 
 const theme = ref("dark");
@@ -197,5 +198,14 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <div v-if="toastMsg" class="toast app-toast">{{ toastMsg }}</div>
+ <div v-if="toastMsg" class="toast app-toast">{{ toastMsg }}</div>
+
+  <div class="done-toast-stack" aria-live="polite">
+    <TransitionGroup name="done-toast">
+      <div v-for="t in toastList" :key="t.id" class="done-toast">
+        <span class="done-toast-dot" aria-hidden="true"></span>
+        <span class="done-toast-text">{{ t.msg }}</span>
+      </div>
+    </TransitionGroup>
+  </div>
 </template>

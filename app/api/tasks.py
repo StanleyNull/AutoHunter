@@ -897,6 +897,7 @@ async def redig_target(task_id: str, target_id: str, request: Request,
         payload={"target_id": target_id, "existing_findings": finding_count or 0},
     ))
     await session.commit()
+    await manager.wake_idle(task_id)
 
     return {
         "ok": True,
@@ -973,6 +974,7 @@ async def provide_credentials(task_id: str, target_id: str, request: Request,
         payload={"target_id": target_id, "cred_type": cred_type},
     ))
     await session.commit()
+    await manager.wake_idle(task_id)
 
     return {
         "ok": True,
@@ -1021,8 +1023,7 @@ async def collect_targets(task_id: str, request: Request,
 
     从已有 Target 和 FOFA 语法中提取根域名，通过 crt.sh 发现子域名，
     经过预筛/评分/去重后入库。新增 Target 标记为 source="ct"。
-    无论任务处于何种状态均可执行；若任务处于 running/idle，
-    新入队目标会被编排器自动拾取。
+    无论任务处于何种状态均可执行；若任务空闲，入队后会自动唤醒调度。
     """
     if _is_observer(request):
         raise HTTPException(403, "观察者模式无写入权限")
@@ -1044,6 +1045,8 @@ async def collect_targets(task_id: str, request: Request,
         payload=result,
     ))
     await session.commit()
+    if result.get("added"):
+        await manager.wake_idle(task_id)
 
     return {"ok": True, **result}
 
@@ -1086,6 +1089,11 @@ async def reset_task_progress(task_id: str, request: Request,
         reset_count += 1
 
     # 统计已有 findings
+    # 清空重测状态：重置进度意味着全新开始。残留的 retest_state（尤其 done 冷却期）
+    # 会让 retest_active 仍为 true，前端任务列表会持续显示黄色重测边框。
+    if task.retest_state:
+        task.retest_state = None
+
     finding_count = await session.scalar(
         select(func.count()).where(
             Finding.task_id == task_id, Finding.status != "superseded")
@@ -1168,6 +1176,10 @@ async def reset_failed_targets(task_id: str, request: Request,
         reset_count += 1
 
     if reset_count:
+        # 清空重测状态：失败目标已被重新入队，残留的 retest_state（done 冷却期）
+        # 会让前端任务列表持续显示黄色重测边框。
+        if task.retest_state:
+            task.retest_state = None
         session.add(TaskEvent(
             task_id=task_id, agent="orchestrator", kind="task_reset_failed",
             level="info",
@@ -1193,9 +1205,9 @@ async def reset_failed_targets(task_id: str, request: Request,
 
 @router.post("/batch/pause")
 async def batch_pause_tasks(session: AsyncSession = Depends(get_session)):
-    """一键暂停所有运行中/空闲的任务。"""
+    """一键暂停所有运行中的任务（空闲 idle 任务不纳入，保持与单任务暂停一致）。"""
     rows = (await session.execute(
-        select(Task).where(Task.status.in_(["running", "idle"]))
+        select(Task).where(Task.status == "running")
     )).scalars().all()
     paused_ids = []
     for task in rows:
