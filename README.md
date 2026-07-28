@@ -65,16 +65,20 @@
 <br>
 
 <p>
-  <a href="https://github.com/StanleyNull/AutoHunter/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=StanleyNull/AutoHunter&max=48" alt="All contributors" />
-  </a>
+  <a href="https://github.com/StanleyNull"><img src="https://avatars.githubusercontent.com/u/121541453?v=4&s=96" width="48" height="48" alt="StanleyNull" /></a>&nbsp;
+  <a href="https://github.com/bitter999"><img src="https://avatars.githubusercontent.com/u/160144268?v=4&s=96" width="48" height="48" alt="bitter999" /></a>&nbsp;
+  <a href="https://github.com/Star-233"><img src="https://avatars.githubusercontent.com/u/64454088?v=4&s=96" width="48" height="48" alt="Star-233" /></a>&nbsp;
+  <a href="https://github.com/SD9ard3n"><img src="https://avatars.githubusercontent.com/u/121371300?v=4&s=96" width="48" height="48" alt="SD9ard3n" /></a>&nbsp;
+  <a href="https://github.com/YiKongk"><img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=96" width="48" height="48" alt="YiKongk" /></a>&nbsp;
+  <a href="https://github.com/1diot9"><img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=96" width="48" height="48" alt="1diot9" /></a>
 </p>
 
 <br>
 
 <sub>
-合并进 <code>main</code> 的代码贡献会自动出现在上方动态墙 ·
-想署名（含文档 / 设计 / 复测）→ 见 <a href="CONTRIBUTORS.md">如何成为 Contributor</a>
+完整名单与加入方式 → <a href="CONTRIBUTORS.md">如何成为 Contributor</a>
+（有 commit 合进 <code>main</code> 的也会出现在
+<a href="https://github.com/StanleyNull/AutoHunter/graphs/contributors">GitHub Contributors</a>）
 </sub>
 
 <br><br>
