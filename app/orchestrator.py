@@ -682,16 +682,53 @@ class TaskRunner:
                 return
             self._is_enterprise = is_enterprise_src(task.src_type)
 
-            # 1. 队列水位低 → 补目标
+            # 先清掉被 stop/取消打断留下的「正在入队 x/y」中间态，避免看板永久假卡死。
+            # 必须放在派发/搜集之前：_pop_queued 探活可能很慢，不能等 refill 才清。
+            fc0 = dict(task.fofa_config or {})
+            phase0 = str(fc0.get("collector_phase") or "")
+            text0 = str(fc0.get("collector_phase_text") or "")
+            if phase0 in ("enrich", "dispatch") and (
+                "正在入队" in text0 or "补充泄露凭据" in text0 or "补充凭据" in text0
+            ):
+                queued0 = await self._count(session, "queued")
+                if queued0 >= LOW_WATERMARK:
+                    fc0["collector_phase"] = "idle"
+                    fc0["collector_phase_text"] = (
+                        f"队列充足（queued={queued0}），搜集待命"
+                    )
+                    task.fofa_config = fc0
+                    await session.commit()
+
+            # 1. 先派发已有队列，再跑搜集。
+            # 大批量手动入队（如 8000+）可能卡在补凭据/分批 commit 很久；
+            # 若先 await refill，worker 会整段空转，看板也像「卡死」。
+            self._reap_workers()
+            await self._reclaim_stale(session)
+            effective_cap = min(task.concurrency, WORKER_MAX_CONCURRENCY)
+            free = effective_cap - len(self._active_workers)
+            for _ in range(max(0, free)):
+                target = await self._pop_queued(session)
+                if not target:
+                    break
+                self._spawn_worker(task, target)
+
+            # 2. 队列水位低 → 补目标（可能很慢，但不再堵住上面的派发）
             async def collector_progress(phase: str, text: str, payload: dict) -> None:
-                await self._log(
-                    session,
-                    "collector",
-                    "collector_phase",
-                    text,
-                    phase=phase,
-                    **payload,
-                )
+                # _persist=False：入队中间态只 commit fofa_config 给看板进度条，
+                # 不写 TaskEvent（避免「正在入队 x/y」刷屏）。
+                data = dict(payload or {})
+                persist = data.pop("_persist", True)
+                if persist:
+                    await self._log(
+                        session,
+                        "collector",
+                        "collector_phase",
+                        text,
+                        phase=phase,
+                        **data,
+                    )
+                    return
+                await session.commit()
 
             added = await collector.refill(
                 session,
@@ -747,7 +784,7 @@ class TaskRunner:
                                 query=cur_q, skipped_low=skipped_low,
                                 skipped_cluster=skipped_cluster, skipped_filter=skipped_filter)
 
-            # 2. 派发前先回收：清理已完成 task + 抢救心跳超时的僵尸目标
+            # 3. 入队结束后再补一轮派发（吃掉本轮新进队列）
             self._reap_workers()
             await self._reclaim_stale(session)
             # task.concurrency 是用户在 UI 配的期望并发；worker 实际并发还受全局信号量
@@ -761,10 +798,10 @@ class TaskRunner:
                     break
                 self._spawn_worker(task, target)
 
-            # 3. 派发审核（pending_review → reviewed）
+            # 4. 派发审核（pending_review → reviewed）
             await self._dispatch_reviews(session, task)
 
-            # 4. idle 标记
+            # 5. idle 标记
             queued = await self._count(session, "queued")
             # 除了 queued 和内存里的活跃 worker，还要看 DB 里有没有 assigned/scanning 的
             # 在途目标：幽灵 scanning(协程已死但状态没回收)期间不能误判 idle，否则前端显示

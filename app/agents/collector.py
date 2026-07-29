@@ -51,6 +51,8 @@ _TARGET_FILTER_HARD_TIMEOUT = float(os.environ.get("TARGET_FILTER_HARD_TIMEOUT",
 # 泄露凭证查询走外部 logs API，并发要小、节奏要慢，避免把对方打挂或被限流。
 _LEAK_CONCURRENCY = int(os.environ.get("LEAK_QUERY_CONCURRENCY", "2"))
 _LEAK_QUERY_DELAY = float(os.environ.get("LEAK_QUERY_DELAY", "0.6"))
+# 大批量入队时分批 commit，避免一次 flush 上万行把 SQLite 冲垮。
+_ENQUEUE_COMMIT_BATCH = max(50, int(os.environ.get("ENQUEUE_COMMIT_BATCH", "200")))
 # 连续 N 轮无新增资产 → 结束当前语法（不再空翻后续页）
 _EMPTY_STREAK_STOP = max(1, int(os.environ.get("FOFA_EMPTY_STREAK_STOP", "5")))
 # 连续 M 条语法都搜空 → 永久停止搜集（仍允许 intent 至少演化一轮）
@@ -358,9 +360,28 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
             Target.task_id == task.id, Target.status == "queued")
     )).scalar() or 0
     if queued >= low_watermark:
+        # 上次大批量入队若被 stop/取消打断，看板会永久停在「正在入队 8000/8025」。
+        # 队列已够用时清掉这种中间态，避免误判卡死。
+        cfg = dict(task.fofa_config or {})
+        phase = str(cfg.get("collector_phase") or "")
+        text = str(cfg.get("collector_phase_text") or "")
+        if phase in ("enrich", "dispatch") and (
+            "正在入队" in text or "补充泄露凭据" in text or "补充凭据" in text
+        ):
+            cfg["collector_phase"] = "idle"
+            cfg["collector_phase_text"] = (
+                f"队列充足（queued={queued}），搜集待命"
+            )
+            task.fofa_config = cfg
+            await session.commit()
         return 0
 
-    async def progress(phase: str, text: str, **payload) -> None:
+    async def progress(phase: str, text: str, *, persist: bool = True, **payload) -> None:
+        """更新搜集阶段文案。
+
+        persist=True（默认）：写 TaskEvent + commit，适合阶段切换。
+        persist=False：只落 fofa_config 进度，不刷事件表——大批量入队中间态用。
+        """
         cfg = dict(task.fofa_config or {})
         cfg.update(
             collector_phase=phase,
@@ -369,7 +390,7 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
         )
         task.fofa_config = cfg
         if progress_cb:
-            await progress_cb(phase, text, payload)
+            await progress_cb(phase, text, {**payload, "_persist": persist})
 
     seen = await _existing_hosts(session, task.id)
     cluster_state = await _existing_cluster_state(session, task.id)
@@ -411,7 +432,8 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                 survivors=len(pending),
             )
             await _enrich_leaked_creds(pending)
-            for c in pending:
+            manual_added = 0
+            for i, c in enumerate(pending, 1):
                 url = c["url"]
                 session.add(Target(
                     task_id=task.id, url=url, host=c["host"],
@@ -419,7 +441,29 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                     leaked_creds=c.get("leaked_creds") or None,
                     auth_context=_auth_context_for(task, url),
                 ))
+                manual_added += 1
                 added += 1
+                # 大批量分批落库，避免一次 commit 上万行把 SQLite 冲垮。
+                if i % _ENQUEUE_COMMIT_BATCH == 0:
+                    await session.commit()
+                    await progress(
+                        "enrich",
+                        f"手动清单：补充凭据完成，正在入队 {i}/{len(pending)}",
+                        survivors=len(pending),
+                        enqueued=i,
+                        persist=False,
+                    )
+                    # 让出事件循环：入队期间 API/看板/worker 派发不被长时间饿死。
+                    await asyncio.sleep(0)
+            # 余数（如 8001..8025）必须显式收口，否则进度永久停在上一批整数关口。
+            if manual_added % _ENQUEUE_COMMIT_BATCH != 0:
+                await session.commit()
+            await progress(
+                "idle",
+                f"手动清单：入队完成 {manual_added}/{len(pending)}",
+                survivors=len(pending),
+                enqueued=manual_added,
+            )
 
     # 2) FOFA 智能搜集
     if task.target_source in ("fofa", "both"):
