@@ -19,7 +19,7 @@
 适合：文档、设计、复测报告、思路建议等**不一定有 commit**，或想改展示名 / 角色标签。
 
 1. Fork → 编辑本文件下方「署名名单」表格，**追加一行自己的信息**（不要删别人的）
-2. 同步改 `README.md` 顶部 Contributors 表格：在最后一格后追加自己的 `<td>`；一行满 5 个就新起一行 `<tr>`
+2. 同步改 `README.md` 顶部 Contributors：在最后一个 `<table>` 的行里追加自己的 `<td>`；满 6 个就再起一个 `<table>`（整块在 `<div align="center">` 内，未填满的一行会自动居中）
 3. 开 PR，标题建议：`docs: add @你的GitHub用户名 to contributors`
 4. 维护者 review 合并后即生效
 
