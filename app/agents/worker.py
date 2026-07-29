@@ -369,16 +369,26 @@ class Worker:
             if not tool_calls:
                 no_tool_rounds += 1
                 if no_tool_rounds >= 6:
-                    # 全程零工具调用最常见的根因是「模型接受 tools 参数但不真正支持 function
-                    # calling」（硬报错的已被 LLM 层自动切提示词模拟兜底，不会走到这里）。
-                    hint = ("（提示：该模型全程未调用任何工具，多半是它「接受 tools 参数却不真正"
-                            "支持 function calling」。可在服务端设置 AUTOHUNTER_TOOL_COMPAT=prompt "
-                            "强制启用提示词模拟工具调用，或更换支持工具调用的模型；设置页“测试连接”可确认）"
-                            if sum(self._tool_counts.values()) == 0 else "")
-                    self._auto_finish(
-                        f"模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。{hint}",
-                        "model_behavior",
-                    )
+                    # 两种情况分开说清楚，别再堆黑话：
+                    # ① 全程一个工具都没调过 → 是所选模型本身不会 function calling（哑模型）。
+                    #    注意：真·报错「不支持 tools」的已被 LLM 层自动切提示词模拟兜底，走不到这里；
+                    #    能走到这里说明模型没报错、返回正常，只是从不发起工具调用。
+                    # ② 之前调过工具、但最近连续 6 轮又不调也不 finish → 模型在原地绕圈，空转收尾。
+                    if sum(self._tool_counts.values()) == 0:
+                        reason_msg = (
+                            "本次未能挖掘：当前配置的大模型【不会调用工具(function calling)】——"
+                            "连续 6 轮都只回复文字、从不发起任何工具调用，挖掘流程无法推进。"
+                            "这不是目标站的问题，也不是报错，而是所选模型本身的能力限制。"
+                            "解决办法(任选其一)：① 换一个支持工具调用的模型(如 DeepSeek/GPT/Claude/通义/Kimi 等主流模型)；"
+                            "② 在服务端设置环境变量 AUTOHUNTER_TOOL_COMPAT=prompt，用「提示词模拟工具调用」强制让它能挖(效果略弱但可用)。"
+                            "在【设置页 → 测试连接】可直接检测某个模型是否支持工具调用。"
+                        )
+                    else:
+                        reason_msg = (
+                            "本次自动收尾：模型连续 6 轮既没有调用任何工具、也没有主动结束(finish)，"
+                            "疑似在原地绕圈空转，为避免浪费已自动收尾。可稍后重试，或换用更强的模型。"
+                        )
+                    self._auto_finish(reason_msg, "model_behavior")
                     break
                 # 没有工具调用也没结束，提醒模型继续或收尾
                 messages.append({"role": "user", "content": "继续调用工具验证，或 finish。"})
