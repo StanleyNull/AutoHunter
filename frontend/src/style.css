@@ -1935,8 +1935,8 @@ main {
 .worker-trace-drawer { width: min(580px, 96vw); }
 .worker-trace-drawer .drawer-content { padding: 0; }
 
-/* 抽屉遮罩：轻微背景模糊，把注意力聚到实时轨迹上 */
-.trace-mask { backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+/* 抽屉遮罩：仅加深聚焦，不做背景模糊——blur 会在长列表滚动时触发整屏重绘，明显卡顿 */
+.trace-mask { background: oklch(0% 0 0 / 0.62); }
 
 /* ── 头部：实时状态点 + 轮次/耗时药丸 ── */
 .trace-head {
@@ -2028,6 +2028,9 @@ main {
   display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: start;
   padding: 8px 8px 8px 0; border-radius: 10px; border: 1px solid transparent;
   transition: background .15s ease, border-color .15s ease;
+  /* 长轨迹（可达 300 行）滚动优化：视口外的行不参与渲染/绘制，滚动不再卡顿 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 42px;
 }
 .trace-row:hover { background: var(--surface-2); border-color: var(--border-soft); }
 .trace-node { display: flex; align-items: center; justify-content: center; padding-top: 1px; }
@@ -2075,9 +2078,9 @@ main {
 .trace-enter-from { opacity: 0; transform: translateY(-10px) scale(.98); }
 .trace-enter-active { transition: opacity .35s cubic-bezier(.16,1,.3,1), transform .35s cubic-bezier(.16,1,.3,1); }
 .trace-enter-active .trace-glyph { animation: trace-glyph-pop .42s cubic-bezier(.16,1,.3,1); }
-.trace-move { transition: transform .35s cubic-bezier(.16,1,.3,1); }
 .trace-leave-active { transition: opacity .18s ease; }
 .trace-leave-to { opacity: 0; }
+/* 不给存量行做整列位移动画：新事件插入时其余行直接就位，避免 300 行同时过渡造成卡顿 */
 /* 打开抽屉时前若干行错峰入场；延迟只加在 enter 上，不拖慢 hover / 位移。
    新插入行永远是第 1 个（延迟 0），保持实时手感。 */
 .trace-row.trace-enter-active:nth-child(2)   { transition-delay: 30ms; }
@@ -2091,7 +2094,7 @@ main {
 @keyframes trace-glyph-pop { from { transform: scale(.5); } to { transform: scale(1); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .trace-enter-active, .trace-move, .trace-leave-active { transition: none !important; transition-delay: 0ms !important; }
+  .trace-enter-active, .trace-leave-active { transition: none !important; transition-delay: 0ms !important; }
   .trace-enter-from { opacity: 1; transform: none; }
   .trace-enter-active .trace-glyph { animation: none; }
   .trace-live { animation: none; }

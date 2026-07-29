@@ -326,12 +326,31 @@ function isImportantEvent(ev) {
   return false;
 }
 
+// 每条轨迹分配一个稳定唯一 id，作为渲染 key：既保证 TransitionGroup 只对真正新增
+// 的那条做进入动画，也彻底避免「重复内容 → 重复 key → Vue diff 崩坏」导致的卡顿。
+let _traceUid = 0;
+
+// 去重键：落库 ts 与实时推送 ts 常有毫秒级差异（同一事件两个副本），
+// 用「kind + 轮次 + 文案 + 秒级时间」而非精确 ts 归并，才能真正去掉重复行。
+function traceDedupKey(ev) {
+  const sec = Math.floor(parseEventTs(ev.ts).getTime() / 1000);
+  const text = ev._text || ev.message || ev.kind || "";
+  return `${ev.kind || ""}|${ev.round || ""}|${text}|${sec}`;
+}
+function evEpoch(ev) { return parseEventTs(ev.ts).getTime(); }
+
 function pushLiveTrace(ev) {
   const tid = ev.target_id;
   if (!tid || !TRACE_KINDS.has(ev.kind || "")) return;
   const map = { ...liveTraceByTarget.value };
   const list = [...(map[tid] || [])];
-  list.push({ ...ev, _text: fmtEvent(ev) || ev.kind });
+  const item = { ...ev, _text: fmtEvent(ev) || ev.kind, _uid: ++_traceUid };
+  // 近端去重：同一事件的落库/实时两个副本只会挨得很近，扫最近若干条即可。
+  const key = traceDedupKey(item);
+  for (let i = list.length - 1, floor = Math.max(0, list.length - 60); i >= floor; i--) {
+    if (traceDedupKey(list[i]) === key) return;
+  }
+  list.push(item);
   if (list.length > 300) list.splice(0, list.length - 300);
   map[tid] = list;
   liveTraceByTarget.value = map;
@@ -384,12 +403,12 @@ async function toggleEventExpand(ev, i) {
     const seen = new Set();
     const merged = [];
     for (const e of [...(liveTraceByTarget.value[tid] || []), ...rows]) {
-      const k = `${e.ts || ""}|${e.kind}|${e.message || e._text || ""}|${e.round || ""}`;
+      const k = traceDedupKey(e);
       if (seen.has(k)) continue;
       seen.add(k);
-      merged.push(e);
+      merged.push(e._uid != null ? e : { ...e, _uid: ++_traceUid });
     }
-    merged.sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
+    merged.sort((a, b) => evEpoch(a) - evEpoch(b));
     liveTraceByTarget.value = { ...liveTraceByTarget.value, [tid]: merged };
   } catch {
     /* 展开区显示空态即可 */
@@ -509,8 +528,10 @@ const _CAT_ICON = {
   warn: "!", phase: "○", auth: "◈", action: "›", muted: "·", neutral: "·",
 };
 function evIcon(cat) { return _CAT_ICON[cat] || "·"; }
-// 内容型稳定 key：让 TransitionGroup 在新事件插到顶部时只对这一条做进入动画，其余平滑位移。
+// 稳定唯一 key：优先用入库时分配的 _uid（保证唯一且跨刷新稳定），
+// 这样 TransitionGroup 只对真正新增的那条做进入动画，绝不会因重复内容撞 key。
 function evKey(ev) {
+  if (ev?._uid != null) return `u${ev._uid}`;
   return `${ev?.ts || ""}|${ev?.kind || ""}|${ev?.round || ""}|${ev?._text || ev?.message || ""}`;
 }
 
@@ -733,20 +754,21 @@ async function openWorkerTrace(w) {
   try {
     const res = await api.targetTrace(props.id, w.target_id, 200);
     const rows = (res.events || []).map((e) => ({ ...e, _text: fmtEvent(e) || e.message || e.kind }));
-    // 落库轨迹 + 内存实时轨迹合并去重（按 ts+kind+message）
+    // 落库轨迹 + 内存实时轨迹合并去重（秒级内容键，抹平两副本的毫秒 ts 差异）
     const seen = new Set();
     const merged = [];
     for (const e of [...rows, ...(liveTraceByTarget.value[w.target_id] || [])]) {
-      const key = `${e.ts || ""}|${e.kind}|${e.message || e._text || ""}|${e.round || ""}`;
+      const item = { ...e, _text: e._text || fmtEvent(e) || e.message || e.kind };
+      const key = traceDedupKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
-      merged.push({ ...e, _text: e._text || fmtEvent(e) || e.message || e.kind });
+      merged.push(item._uid != null ? item : { ...item, _uid: ++_traceUid });
     }
-    merged.sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
-    traceEvents.value = merged.reverse();
+    merged.sort((a, b) => evEpoch(a) - evEpoch(b));   // 稳定时间序（数值比较，不受 tz/精度影响）
+    traceEvents.value = [...merged].reverse();          // 展示为最新在上
     liveTraceByTarget.value = {
       ...liveTraceByTarget.value,
-      [w.target_id]: [...merged],
+      [w.target_id]: merged,                            // 缓存保持时间正序，供实时追加
     };
   } catch (e) {
     if (!traceEvents.value.length) toast(`加载轨迹失败：${e?.message || e}`);
