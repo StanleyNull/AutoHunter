@@ -376,17 +376,15 @@ class Worker:
                     # ② 之前调过工具、但最近连续 6 轮又不调也不 finish → 模型在原地绕圈，空转收尾。
                     if sum(self._tool_counts.values()) == 0:
                         reason_msg = (
-                            "本次未能挖掘：当前配置的大模型【不会调用工具(function calling)】——"
-                            "连续 6 轮都只回复文字、从不发起任何工具调用，挖掘流程无法推进。"
-                            "这不是目标站的问题，也不是报错，而是所选模型本身的能力限制。"
-                            "解决办法(任选其一)：① 换一个支持工具调用的模型(如 DeepSeek/GPT/Claude/通义/Kimi 等主流模型)；"
-                            "② 在服务端设置环境变量 AUTOHUNTER_TOOL_COMPAT=prompt，用「提示词模拟工具调用」强制让它能挖(效果略弱但可用)。"
-                            "在【设置页 → 测试连接】可直接检测某个模型是否支持工具调用。"
+                            "没挖成：当前模型不会调用工具(function calling)，连续 6 轮只回文字、不调工具，没法挖。"
+                            "不是目标站问题，也不是报错，是模型能力不够。"
+                            "解决：换个支持工具调用的模型(DeepSeek/GPT/Claude/通义/Kimi 等)，"
+                            "或在服务端设 AUTOHUNTER_TOOL_COMPAT=prompt 强制模拟。设置页「测试连接」可检测。"
                         )
                     else:
                         reason_msg = (
-                            "本次自动收尾：模型连续 6 轮既没有调用任何工具、也没有主动结束(finish)，"
-                            "疑似在原地绕圈空转，为避免浪费已自动收尾。可稍后重试，或换用更强的模型。"
+                            "自动收尾：模型连续 6 轮既不调工具也不结束(finish)，在原地绕圈，已收尾。"
+                            "可重试或换更强的模型。"
                         )
                     self._auto_finish(reason_msg, "model_behavior")
                     break
