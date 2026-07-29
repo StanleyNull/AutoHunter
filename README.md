@@ -53,6 +53,8 @@
         <sub><b>SD9ard3n</b></sub>
       </a><br /><sup>LLM Pool</sup>
     </td>
+  </tr>
+  <tr>
     <td align="center" width="100">
       <a href="https://github.com/YiKongk">
         <img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=128" width="72" height="72" alt="YiKongk" /><br />
@@ -79,20 +81,6 @@
     </td>
   </tr>
 </table>
-
-<br>
-
-<p>
-  <a href="https://github.com/StanleyNull"><img src="https://avatars.githubusercontent.com/u/121541453?v=4&s=96" width="48" height="48" alt="StanleyNull" /></a>&nbsp;
-  <a href="https://github.com/bitter999"><img src="https://avatars.githubusercontent.com/u/160144268?v=4&s=96" width="48" height="48" alt="bitter999" /></a>&nbsp;
-  <a href="https://github.com/Star-233"><img src="https://avatars.githubusercontent.com/u/64454088?v=4&s=96" width="48" height="48" alt="Star-233" /></a>&nbsp;
-  <a href="https://github.com/2234223561"><img src="https://avatars.githubusercontent.com/u/56070426?v=4&s=96" width="48" height="48" alt="2234223561" /></a>&nbsp;
-  <a href="https://github.com/SD9ard3n"><img src="https://avatars.githubusercontent.com/u/121371300?v=4&s=96" width="48" height="48" alt="SD9ard3n" /></a>&nbsp;
-  <a href="https://github.com/YiKongk"><img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=96" width="48" height="48" alt="YiKongk" /></a>&nbsp;
-  <a href="https://github.com/1diot9"><img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=96" width="48" height="48" alt="1diot9" /></a>&nbsp;
-  <a href="https://github.com/qianchongceng0-cyber"><img src="https://avatars.githubusercontent.com/u/310190087?v=4&s=96" width="48" height="48" alt="qianchongceng0-cyber" /></a>&nbsp;
-  <a href="https://github.com/jacketser"><img src="https://avatars.githubusercontent.com/u/277248294?v=4&s=96" width="48" height="48" alt="jacketser" /></a>
-</p>
 
 <br>
 
