@@ -636,6 +636,10 @@ function updateCollectorStatus(ev) {
     collector_phase_text: ev.message || "",
     last_target_filter_total: Number(ev.survivors || 0),
     last_target_filter_evaluated: Number(ev.filter_evaluated || 0),
+    leak_roots_total: Number(ev.leak_roots_total ?? task.value.fofa_config?.leak_roots_total ?? 0),
+    leak_roots_done: Number(ev.leak_roots_done ?? task.value.fofa_config?.leak_roots_done ?? 0),
+    leak_hits: Number(ev.leak_hits ?? task.value.fofa_config?.leak_hits ?? 0),
+    leak_targets: Number(ev.leak_targets ?? task.value.fofa_config?.leak_targets ?? 0),
   };
 }
 
@@ -1035,10 +1039,18 @@ const collectorPct = computed(() => {
   const phase = collectorCfg.value.collector_phase || "";
   const total = Number(collectorCfg.value.last_target_filter_total || 0);
   const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
+  const leakTotal = Number(collectorCfg.value.leak_roots_total || 0);
+  const leakDone = Number(collectorCfg.value.leak_roots_done || 0);
   if (phase === "prefilter") return 18;
   if (phase === "scoring") return 38;
   if (phase === "target_filter") return 62;
-  if (phase === "enrich") return total > 0 ? Math.max(72, Math.min(88, Math.round((done / total) * 100))) : 78;
+  if (phase === "enrich") {
+    // 凭据库进度：用根域已查/总数驱动进度条（72%→88%）
+    if (leakTotal > 0) {
+      return Math.max(72, Math.min(88, 72 + Math.round((leakDone / leakTotal) * 16)));
+    }
+    return total > 0 ? Math.max(72, Math.min(88, Math.round((done / total) * 100))) : 78;
+  }
   if (phase === "dispatch") return 100;
   return 25;
 });
@@ -1060,6 +1072,14 @@ const collectorText = computed(() =>
   (isCollecting.value ? "正在初始化搜集引擎…" : "正在跑过滤器阶段")
 );
 const collectorMeta = computed(() => {
+  const phase = collectorCfg.value.collector_phase || "";
+  if (phase === "enrich") {
+    const leakTotal = Number(collectorCfg.value.leak_roots_total || 0);
+    const leakDone = Number(collectorCfg.value.leak_roots_done || 0);
+    const hits = Number(collectorCfg.value.leak_hits || 0);
+    if (leakTotal > 0) return `凭据库 ${leakDone}/${leakTotal} · 命中 ${hits}`;
+    return "补充情报";
+  }
   const total = Number(collectorCfg.value.last_target_filter_total || 0);
   const done = Number(collectorCfg.value.last_target_filter_evaluated || 0);
   if (total > 0) return `过滤器 ${done}/${total}`;

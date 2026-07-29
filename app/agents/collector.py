@@ -48,9 +48,13 @@ _PREFILTER_CONCURRENCY = int(os.environ.get("COLLECTOR_PREFILTER_CONCURRENCY", "
 _SCORE_CONCURRENCY = int(os.environ.get("COLLECTOR_SCORE_CONCURRENCY", "8"))
 _TARGET_FILTER_CONCURRENCY = int(os.environ.get("TARGET_FILTER_CONCURRENCY", "6"))
 _TARGET_FILTER_HARD_TIMEOUT = float(os.environ.get("TARGET_FILTER_HARD_TIMEOUT", "10.0"))
-# 泄露凭证查询走外部 logs API，并发要小、节奏要慢，避免把对方打挂或被限流。
+# 泄露凭证查询走外部 logs API，并发要小、节奏要慢，避免把对方/本机 SQLite 打挂。
 _LEAK_CONCURRENCY = int(os.environ.get("LEAK_QUERY_CONCURRENCY", "2"))
 _LEAK_QUERY_DELAY = float(os.environ.get("LEAK_QUERY_DELAY", "0.6"))
+# 大批量入队时分批 commit，避免一次 flush 上万行把 SQLite 冲垮。
+_ENQUEUE_COMMIT_BATCH = max(50, int(os.environ.get("ENQUEUE_COMMIT_BATCH", "200")))
+# 凭据库进度推送节流（秒）：中间态只推 WS 不落 TaskEvent，避免刷爆事件表。
+_LEAK_PROGRESS_INTERVAL = float(os.environ.get("LEAK_PROGRESS_INTERVAL", "2.0"))
 # 连续 N 轮无新增资产 → 结束当前语法（不再空翻后续页）
 _EMPTY_STREAK_STOP = max(1, int(os.environ.get("FOFA_EMPTY_STREAK_STOP", "5")))
 # 连续 M 条语法都搜空 → 永久停止搜集（仍允许 intent 至少演化一轮）
@@ -360,16 +364,25 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     if queued >= low_watermark:
         return 0
 
-    async def progress(phase: str, text: str, **payload) -> None:
+    async def progress(phase: str, text: str, *, persist: bool = True, **payload) -> None:
+        """更新搜集阶段文案。
+
+        persist=True（默认）：写 TaskEvent + commit，适合阶段切换。
+        persist=False：只推 WS 实时数字，不落事件表——大批量补凭据时用，避免把库冲垮。
+        """
         cfg = dict(task.fofa_config or {})
         cfg.update(
             collector_phase=phase,
             collector_phase_text=text,
             collector_phase_payload=payload,
         )
+        # 凭据进度字段提到顶层，看板轮询也能读到（不依赖 payload 嵌套）。
+        for k in ("leak_roots_total", "leak_roots_done", "leak_hits", "leak_targets"):
+            if k in payload:
+                cfg[k] = payload[k]
         task.fofa_config = cfg
         if progress_cb:
-            await progress_cb(phase, text, payload)
+            await progress_cb(phase, text, {**payload, "_persist": persist})
 
     seen = await _existing_hosts(session, task.id)
     cluster_state = await _existing_cluster_state(session, task.id)
@@ -409,9 +422,12 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                 f"手动清单：清理后 {len(pending)} 个目标，正在补充泄露凭据",
                 candidates=len(parsed),
                 survivors=len(pending),
+                leak_targets=len(pending),
             )
-            await _enrich_leaked_creds(pending)
-            for c in pending:
+            await _enrich_leaked_creds(
+                pending, progress=progress, label=f"手动清单 · {len(pending)} 个目标"
+            )
+            for i, c in enumerate(pending, 1):
                 url = c["url"]
                 session.add(Target(
                     task_id=task.id, url=url, host=c["host"],
@@ -420,6 +436,17 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
                     auth_context=_auth_context_for(task, url),
                 ))
                 added += 1
+                # 大批量分批落库，避免一次 commit 上万行把 SQLite 冲垮。
+                if i % _ENQUEUE_COMMIT_BATCH == 0:
+                    await session.commit()
+                    await progress(
+                        "enrich",
+                        f"手动清单：补充凭据完成，正在入队 {i}/{len(pending)}",
+                        survivors=len(pending),
+                        leak_targets=len(pending),
+                        enqueued=i,
+                        persist=False,
+                    )
 
     # 2) FOFA 智能搜集
     if task.target_source in ("fofa", "both"):
@@ -474,9 +501,12 @@ async def _site_collect(
             f"单站协作：清理后 {len(work)} 个目标，正在补充泄露凭据",
             candidates=len(parsed),
             survivors=len(work),
+            leak_targets=len(work),
         )
     if work:
-        await _enrich_leaked_creds(work)
+        await _enrich_leaked_creds(
+            work, progress=progress, label=f"单站协作 · {len(work)} 个目标"
+        )
 
     added = 0
     for c in work:
@@ -940,11 +970,15 @@ async def _fofa_collect(
         f"过滤器完成 {filter_evaluated}/{len(survivors)}，正在补充泄露凭据",
         survivors=len(survivors),
         filter_evaluated=filter_evaluated,
+        leak_targets=len(survivors),
     )
 
     # 顺带查泄露凭证：按根域去重批量查（同根域多 host 共享一次查询），
     # 过滤打分后挂到 survivor 上，入库时一起写入，供 worker 当额外攻击面。
-    await _enrich_leaked_creds(survivors)
+    await _enrich_leaked_creds(
+        survivors, progress=progress,
+        label=f"FOFA 存活 · {len(survivors)} 个目标",
+    )
 
     added = 0
     skipped_low = 0
@@ -1143,7 +1177,12 @@ async def _analyze_target_filters(survivors: list[dict]) -> None:
     await asyncio.gather(*(one(c) for c in survivors))
 
 
-async def _enrich_leaked_creds(survivors: list[dict]) -> None:
+async def _enrich_leaked_creds(
+    survivors: list[dict],
+    progress: ProgressReporter | None = None,
+    *,
+    label: str = "",
+) -> None:
     """按根域去重批量查泄露凭证，过滤打分后挂到 survivor['leaked_creds']。
 
     设计：
@@ -1151,6 +1190,7 @@ async def _enrich_leaked_creds(survivors: list[dict]) -> None:
     - 同步 httpx 调用放进 COLLECTOR_IO_EXECUTOR，不阻塞事件循环。
     - 全程失败降级（leakcreds 内部已兜底），绝不阻断搜集入库。
     - 只挂正分精选凭证；查不到就不挂（worker 端按是否有凭证决定提示）。
+    - 大批量时自动降并发/加间隔，进度数字节流推送（中间态不落 TaskEvent）。
     """
     if not survivors:
         return
@@ -1167,32 +1207,87 @@ async def _enrich_leaked_creds(survivors: list[dict]) -> None:
     if not roots:
         return
 
-    # 外部 logs API：低并发 + 请求间小延迟，温柔点别打挂对方。
-    sem = asyncio.Semaphore(max(1, _LEAK_CONCURRENCY))
+    n_roots = len(roots)
+    n_targets = sum(len(m) for m in roots.values())
+    tag = (label or "补充泄露凭据").strip()
+
+    # 大批量更温柔：根域越多，并发越低、间隔越大，避免冲垮外部凭据库。
+    if n_roots >= 800:
+        concurrency, delay = 1, max(_LEAK_QUERY_DELAY, 1.5)
+    elif n_roots >= 200:
+        concurrency, delay = 1, max(_LEAK_QUERY_DELAY, 1.0)
+    elif n_roots >= 50:
+        concurrency, delay = min(2, max(1, _LEAK_CONCURRENCY)), max(_LEAK_QUERY_DELAY, 0.8)
+    else:
+        concurrency, delay = max(1, _LEAK_CONCURRENCY), max(0.0, _LEAK_QUERY_DELAY)
+    sem = asyncio.Semaphore(concurrency)
+
+    checked = 0
+    hits = 0
+    lock = asyncio.Lock()
+    last_report_at = 0.0
+    report_interval = max(0.5, _LEAK_PROGRESS_INTERVAL)
+
+    async def emit(force: bool = False, *, persist: bool = False) -> None:
+        nonlocal last_report_at
+        if not progress:
+            return
+        now = time.monotonic()
+        if not force and (now - last_report_at) < report_interval:
+            return
+        last_report_at = now
+        await progress(
+            "enrich",
+            f"{tag}：凭据库 {checked}/{n_roots}（命中 {hits}）",
+            survivors=n_targets,
+            leak_roots_total=n_roots,
+            leak_roots_done=checked,
+            leak_hits=hits,
+            leak_targets=n_targets,
+            persist=persist,
+        )
+
+    if progress:
+        await progress(
+            "enrich",
+            f"{tag}：共 {n_roots} 个根域待查凭据库",
+            survivors=n_targets,
+            leak_roots_total=n_roots,
+            leak_roots_done=0,
+            leak_hits=0,
+            leak_targets=n_targets,
+            persist=True,
+        )
+        last_report_at = time.monotonic()
 
     async def one(root: str, members: list[dict]):
+        nonlocal checked, hits
         async with sem:
+            creds: list = []
             try:
                 loop = asyncio.get_running_loop()
                 res = await loop.run_in_executor(
                     COLLECTOR_IO_EXECUTOR,
                     lambda: query_leaked_creds(root),
                 )
+                creds = (res or {}).get("creds") or []
             except Exception:
-                return
+                creds = []
             finally:
-                # 持锁期间限速：让同一并发槽的下一次查询至少间隔 _LEAK_QUERY_DELAY 秒。
-                if _LEAK_QUERY_DELAY > 0:
-                    await asyncio.sleep(_LEAK_QUERY_DELAY)
-            creds = (res or {}).get("creds") or []
-            if not creds:
-                return
-            # 同根域所有 host 共享这批凭证（worker 会自行核对 host 归属）。
-            for c in members:
-                c["leaked_creds"] = creds
+                # 持锁期间限速：让同一并发槽的下一次查询至少间隔 delay 秒。
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            async with lock:
+                checked += 1
+                if creds:
+                    hits += 1
+                    # 同根域所有 host 共享这批凭证（worker 会自行核对 host 归属）。
+                    for c in members:
+                        c["leaked_creds"] = creds
+            await emit(persist=False)
 
     await asyncio.gather(*[one(r, m) for r, m in roots.items()])
-
+    await emit(force=True, persist=True)
 
 async def _annotate_assets(assets: list[dict], llm: LLMClient | None, src_type: str) -> None:
     if is_enterprise_src(src_type):

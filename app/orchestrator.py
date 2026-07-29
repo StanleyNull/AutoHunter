@@ -684,14 +684,29 @@ class TaskRunner:
 
             # 1. 队列水位低 → 补目标
             async def collector_progress(phase: str, text: str, payload: dict) -> None:
-                await self._log(
-                    session,
-                    "collector",
-                    "collector_phase",
-                    text,
-                    phase=phase,
-                    **payload,
-                )
+                # _persist=False：补凭据过程中的实时数字，只推 WS，不写 TaskEvent，
+                # 避免上万根域进度把事件表/SQLite 冲垮；阶段起止仍走完整 _log。
+                data = dict(payload or {})
+                persist = data.pop("_persist", True)
+                if persist:
+                    await self._log(
+                        session,
+                        "collector",
+                        "collector_phase",
+                        text,
+                        phase=phase,
+                        **data,
+                    )
+                    return
+                await bus.publish(self.task_id, {
+                    "agent": "collector",
+                    "kind": "collector_phase",
+                    "level": "info",
+                    "message": text,
+                    "ts": _now_iso(),
+                    "phase": phase,
+                    **data,
+                })
 
             added = await collector.refill(
                 session,

@@ -210,6 +210,10 @@ def _public_fofa_config(task: Task) -> dict:
         "last_target_filter_total": cfg.get("last_target_filter_total", 0),
         "last_target_filter_evaluated": cfg.get("last_target_filter_evaluated", 0),
         "last_skipped_filter": cfg.get("last_skipped_filter", 0),
+        "leak_roots_total": cfg.get("leak_roots_total", 0),
+        "leak_roots_done": cfg.get("leak_roots_done", 0),
+        "leak_hits": cfg.get("leak_hits", 0),
+        "leak_targets": cfg.get("leak_targets", 0),
     }
 
 
