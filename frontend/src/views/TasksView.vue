@@ -391,11 +391,14 @@ watch(hasRunning, () => syncPoller());
       <span class="hint">调整搜索词或筛选条件</span>
     </div>
     <div v-else class="task-list">
-      <div v-for="t in pagedTasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running', retest: t.status === 'running' && t.retest_active }"
+      <div v-for="t in pagedTasks" :key="t.id" class="task-card" :class="{
+          live: t.status === 'running' && !t.retest_active,
+          retest: t.status === 'running' && t.retest_active,
+        }"
         @click="router.push(`/task/${t.id}`)">
         <div class="task-card-main">
           <div class="tc-title">
-            <span v-if="t.status === 'running'" class="pulse"></span>
+            <span v-if="t.status === 'running'" class="pulse" :class="{ warn: t.retest_active }"></span>
             <b>{{ t.name }}</b>
           </div>
           <span v-if="t.pending_user_review > 0" class="review-dot"

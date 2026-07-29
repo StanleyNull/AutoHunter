@@ -624,8 +624,17 @@ main {
   transition: border-color .15s, background-color .15s;
 }
 .task-card:hover { border-color: var(--faint); background: var(--surface-2); }
-.task-card.live { border-color: var(--ok); }
-.task-card.retest { border-color: var(--warn); }
+/* 运行中 / 重测：彩色描边必须压过 :hover，否则悬停时变回灰色像「丢了边框」 */
+.task-card.live,
+.task-card.live:hover {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--ok) 45%, transparent);
+}
+.task-card.retest,
+.task-card.retest:hover {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--warn) 45%, transparent);
+}
 .task-card b { font-size: 14.5px; font-weight: 600; }
 .task-card-main { min-width: 0; flex: 1; }
 .task-card-meta {
@@ -830,6 +839,8 @@ main {
   content: ""; position: absolute; inset: 0; border-radius: 50%;
   background: var(--ok); animation: ping 1.8s cubic-bezier(0,0,.2,1) infinite;
 }
+.pulse.warn,
+.pulse.warn::after { background: var(--warn); }
 @keyframes ping { 0% { transform: scale(1); opacity: .6; } 80%,100% { transform: scale(2.4); opacity: 0; } }
 
 /* 状态徽章：语义底色 + 文字 */
