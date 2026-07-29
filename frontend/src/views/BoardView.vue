@@ -1424,7 +1424,7 @@ function parseEventTs(ts) {
             <span class="wc-host">{{ w.host }}</span>
             <span class="wc-meta">
               <span v-if="authBadge(w)" class="wc-auth" :class="authBadgeClass(w)" :title="w.auth_label || ''">{{ authBadge(w) }}</span>
-              <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ w.score }}</span>
+              <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ Math.round(w.score * 10) / 10 }}</span>
               第 {{ w.round }} 轮 · {{ elapsed(w.started_at) }}
               <button v-if="!readonly" type="button" class="wc-del"
                 title="删除该目标（跳过本次任务的这个目标）" @click.stop="skipTarget(w)">✕</button>
