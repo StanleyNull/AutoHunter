@@ -1819,7 +1819,8 @@ class TaskRunner:
                         tr.add_done_callback(lambda f: _log_bg_task_exc(f, "persist_worker_trace"))
                     _update_live(kind, payload)
                     pt = asyncio.create_task(bus.publish(
-                        task_id, {"agent": "worker", "kind": kind, "target_id": target_id, **payload}))
+                        task_id, {"agent": "worker", "kind": kind, "target_id": target_id,
+                                  "ts": _now_iso(), **payload}))
                     pt.add_done_callback(lambda f: _log_bg_task_exc(f, "bus.publish"))
                 except Exception:
                     logger.warning("TaskRunner[%s] emit dispatch failed target=%s kind=%s",
@@ -2858,7 +2859,8 @@ class TaskRunner:
 
         def emit(kind: str, data: dict):
             asyncio.run_coroutine_threadsafe(
-                bus.publish(task_id, {"agent": "reviewer", "kind": kind, "finding_id": finding_id, **data}),
+                bus.publish(task_id, {"agent": "reviewer", "kind": kind, "finding_id": finding_id,
+                                      "ts": _now_iso(), **data}),
                 loop,
             )
 
@@ -3031,7 +3033,8 @@ class TaskRunner:
 
         def emit(kind: str, data: dict):
             asyncio.run_coroutine_threadsafe(
-                bus.publish(task_id, {"agent": "killsweep", "kind": kind, "finding_id": finding_id, **data}),
+                bus.publish(task_id, {"agent": "killsweep", "kind": kind, "finding_id": finding_id,
+                                      "ts": _now_iso(), **data}),
                 loop,
             )
 
@@ -3256,7 +3259,8 @@ class TaskRunner:
                 elif kind == "escalate_start":
                     st["action"] = "扩大危害进行中…"
             asyncio.run_coroutine_threadsafe(
-                bus.publish(task_id, {"agent": "escalation", "kind": kind, "finding_id": finding_id, **data}),
+                bus.publish(task_id, {"agent": "escalation", "kind": kind, "finding_id": finding_id,
+                                      "ts": _now_iso(), **data}),
                 loop,
             )
 

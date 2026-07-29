@@ -344,7 +344,9 @@ function pushLiveTrace(ev) {
   if (!tid || !TRACE_KINDS.has(ev.kind || "")) return;
   const map = { ...liveTraceByTarget.value };
   const list = [...(map[tid] || [])];
-  const item = { ...ev, _text: fmtEvent(ev) || ev.kind, _uid: ++_traceUid };
+  // 兜底：万一某条实时事件没带 ts，落地为「收到时刻」的固定时间，
+  // 避免 parseEventTs 回退成 new Date() 导致所有行都显示当前时间、且每次刷新一起变。
+  const item = { ...ev, ts: ev.ts || new Date().toISOString(), _text: fmtEvent(ev) || ev.kind, _uid: ++_traceUid };
   // 近端去重：同一事件的落库/实时两个副本只会挨得很近，扫最近若干条即可。
   const key = traceDedupKey(item);
   for (let i = list.length - 1, floor = Math.max(0, list.length - 60); i >= floor; i--) {
