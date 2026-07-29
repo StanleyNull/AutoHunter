@@ -604,7 +604,8 @@ function connectWs() {
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
     const text = fmtEvent(ev);
     if (!text) return;
-    events.value.unshift({ ...ev, _text: text });
+    // 同 pushLiveTrace：缺 ts 的事件落地为「收到时刻」，避免活动流也出现全体显示当前时间。
+    events.value.unshift({ ...ev, ts: ev.ts || new Date().toISOString(), _text: text });
     if (events.value.length > 200) events.value.length = 200;
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
