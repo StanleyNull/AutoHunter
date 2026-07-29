@@ -19,7 +19,7 @@
 适合：文档、设计、复测报告、思路建议等**不一定有 commit**，或想改展示名 / 角色标签。
 
 1. Fork → 编辑本文件下方「署名名单」表格，**追加一行自己的信息**（不要删别人的）
-2. 同步改 `README.md`：顶部 Contributors 表格 + 下方头像墙（各加一处）
+2. 同步改 `README.md` 顶部 Contributors：在最后一个 `<table>` 的行里追加自己的 `<td>`；满 6 个就再起一个 `<table>`（整块在 `<div align="center">` 内，未填满的一行会自动居中）
 3. 开 PR，标题建议：`docs: add @你的GitHub用户名 to contributors`
 4. 维护者 review 合并后即生效
 
@@ -38,6 +38,7 @@
 | <img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=64" width="40" height="40" alt="YiKongk" /> | [@YiKongk](https://github.com/YiKongk) | 自定义 FOFA API |
 | <img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=64" width="40" height="40" alt="1diot9" /> | [@1diot9](https://github.com/1diot9) | Contributor |
 | <img src="https://avatars.githubusercontent.com/u/310190087?v=4&s=64" width="40" height="40" alt="qianchongceng0-cyber" /> | [@qianchongceng0-cyber](https://github.com/qianchongceng0-cyber) | Contributor |
+| <img src="https://avatars.githubusercontent.com/u/277248294?v=4&s=64" width="40" height="40" alt="jacketser" /> | [@jacketser](https://github.com/jacketser) | 编辑弹窗失焦修复 |
 
 <!-- 新贡献者请在上一行表格末尾追加，保持格式一致 -->
 

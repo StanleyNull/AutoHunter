@@ -253,6 +253,8 @@ class Worker:
 
         rounds = 0
         no_tool_rounds = 0
+        # auto 兼容模式下，检测到「哑模型」(全程零工具)时只自愈切一次提示词模拟，避免反复切
+        tool_compat_selfheal_tried = False
         consecutive_failures = 0
         consecutive_blocked = 0
         consecutive_arg_errors = 0
@@ -368,17 +370,46 @@ class Worker:
 
             if not tool_calls:
                 no_tool_rounds += 1
+                # auto 自愈：全程一个工具都没调过 + 是 auto 兼容模式 → 疑似「接受 tools 但不真正
+                # 调工具」的哑模型。提前(第3轮)让 LLM 客户端把当前端点切成提示词模拟再给它机会，
+                # 而不是空转到第6轮才放弃、还要用户手动设 AUTOHUNTER_TOOL_COMPAT=prompt。
+                # getattr 防御：单测里 self.llm 可能是 mock，没有该方法。
+                if (not tool_compat_selfheal_tried
+                        and no_tool_rounds >= 3
+                        and sum(self._tool_counts.values()) == 0):
+                    switch = getattr(self.llm, "force_prompt_tools_current", None)
+                    if callable(switch) and switch():
+                        tool_compat_selfheal_tried = True
+                        no_tool_rounds = 0
+                        self._emit("tool_compat_switch", round=rounds,
+                                   detail="模型全程零工具，自动切提示词模拟工具调用重试")
+                        messages.append({"role": "user", "content": "（已切换为提示词模拟工具调用）请按工具协议继续调用工具，或 finish。"})
+                        continue
                 if no_tool_rounds >= 6:
-                    # 全程零工具调用最常见的根因是「模型接受 tools 参数但不真正支持 function
-                    # calling」（硬报错的已被 LLM 层自动切提示词模拟兜底，不会走到这里）。
-                    hint = ("（提示：该模型全程未调用任何工具，多半是它「接受 tools 参数却不真正"
-                            "支持 function calling」。可在服务端设置 AUTOHUNTER_TOOL_COMPAT=prompt "
-                            "强制启用提示词模拟工具调用，或更换支持工具调用的模型；设置页“测试连接”可确认）"
-                            if sum(self._tool_counts.values()) == 0 else "")
-                    self._auto_finish(
-                        f"模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。{hint}",
-                        "model_behavior",
-                    )
+                    # 两种情况分开说清楚，别再堆黑话：
+                    # ① 全程一个工具都没调过 → 是所选模型本身不会 function calling（哑模型）。
+                    #    注意：真·报错「不支持 tools」的已被 LLM 层自动切提示词模拟兜底，走不到这里；
+                    #    能走到这里说明模型没报错、返回正常，只是从不发起工具调用。
+                    # ② 之前调过工具、但最近连续 6 轮又不调也不 finish → 模型在原地绕圈，空转收尾。
+                    if sum(self._tool_counts.values()) == 0:
+                        if tool_compat_selfheal_tried:
+                            reason_msg = (
+                                "没挖成：当前模型不会调用工具，已自动尝试提示词模拟仍无效。"
+                                "请更换支持工具调用的模型(DeepSeek/GPT/Claude/通义/Kimi 等)。"
+                            )
+                        else:
+                            reason_msg = (
+                                "没挖成：当前模型不会调用工具(function calling)，连续 6 轮只回文字、不调工具，没法挖。"
+                                "不是目标站问题，也不是报错，是模型能力不够。"
+                                "解决：换个支持工具调用的模型(DeepSeek/GPT/Claude/通义/Kimi 等)，"
+                                "或在服务端设 AUTOHUNTER_TOOL_COMPAT=prompt 强制模拟。设置页「测试连接」可检测。"
+                            )
+                    else:
+                        reason_msg = (
+                            "自动收尾：模型连续 6 轮既不调工具也不结束(finish)，在原地绕圈，已收尾。"
+                            "可重试或换更强的模型。"
+                        )
+                    self._auto_finish(reason_msg, "model_behavior")
                     break
                 # 没有工具调用也没结束，提醒模型继续或收尾
                 messages.append({"role": "user", "content": "继续调用工具验证，或 finish。"})

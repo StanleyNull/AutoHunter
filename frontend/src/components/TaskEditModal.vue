@@ -292,8 +292,8 @@ async function save() {
 </script>
 
 <template>
-  <div v-if="open" class="task-edit-backdrop" @click.self="requestClose">
-    <form ref="modalRoot" class="task-edit-modal" @submit.prevent="save">
+<div v-if="open" class="task-edit-backdrop" @click.self="requestClose">
+  <form ref="modalRoot" class="task-edit-modal" @submit.prevent="save">
       <header>
         <div>
           <h3>编辑任务参数</h3>

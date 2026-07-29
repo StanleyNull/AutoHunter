@@ -218,9 +218,18 @@ onUnmounted(() => {
     </button>
   </nav>
 
-  <Transition @enter="onTokenModalEnter" @leave="onTokenModalLeave">
-    <div v-if="showTokenModal" class="token-modal-backdrop" @click.self="closeTokenModal">
-      <div class="token-modal" role="dialog" aria-modal="true" aria-labelledby="token-modal-title">
+<Transition @enter="onTokenModalEnter" @leave="onTokenModalLeave">
+  <div
+    v-if="showTokenModal"
+    class="token-modal-backdrop"
+    @click.self="closeTokenModal"
+  >
+    <div
+      class="token-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="token-modal-title"
+    >
       <h3 id="token-modal-title">{{ tokenModalReason === "auth" ? "输入访问令牌" : "更换访问令牌" }}</h3>
       <p class="token-modal-hint">全权限与只读令牌均可输入；手机端请在此输入，勿使用系统弹窗。</p>
       <input

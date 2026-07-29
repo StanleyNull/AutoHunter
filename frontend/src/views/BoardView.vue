@@ -387,12 +387,33 @@ function isImportantEvent(ev) {
   return false;
 }
 
+// 每条轨迹分配一个稳定唯一 id，作为渲染 key：既保证 TransitionGroup 只对真正新增
+// 的那条做进入动画，也彻底避免「重复内容 → 重复 key → Vue diff 崩坏」导致的卡顿。
+let _traceUid = 0;
+
+// 去重键：落库 ts 与实时推送 ts 常有毫秒级差异（同一事件两个副本），
+// 用「kind + 轮次 + 文案 + 秒级时间」而非精确 ts 归并，才能真正去掉重复行。
+function traceDedupKey(ev) {
+  const sec = Math.floor(parseEventTs(ev.ts).getTime() / 1000);
+  const text = ev._text || ev.message || ev.kind || "";
+  return `${ev.kind || ""}|${ev.round || ""}|${text}|${sec}`;
+}
+function evEpoch(ev) { return parseEventTs(ev.ts).getTime(); }
+
 function pushLiveTrace(ev) {
   const tid = ev.target_id;
   if (!tid || !TRACE_KINDS.has(ev.kind || "")) return;
   const map = { ...liveTraceByTarget.value };
   const list = [...(map[tid] || [])];
-  list.push({ ...ev, _text: fmtEvent(ev) || ev.kind });
+  // 兜底：万一某条实时事件没带 ts，落地为「收到时刻」的固定时间，
+  // 避免 parseEventTs 回退成 new Date() 导致所有行都显示当前时间、且每次刷新一起变。
+  const item = { ...ev, ts: ev.ts || new Date().toISOString(), _text: fmtEvent(ev) || ev.kind, _uid: ++_traceUid };
+  // 近端去重：同一事件的落库/实时两个副本只会挨得很近，扫最近若干条即可。
+  const key = traceDedupKey(item);
+  for (let i = list.length - 1, floor = Math.max(0, list.length - 60); i >= floor; i--) {
+    if (traceDedupKey(list[i]) === key) return;
+  }
+  list.push(item);
   if (list.length > 300) list.splice(0, list.length - 300);
   map[tid] = list;
   liveTraceByTarget.value = map;
@@ -445,12 +466,12 @@ async function toggleEventExpand(ev, i) {
     const seen = new Set();
     const merged = [];
     for (const e of [...(liveTraceByTarget.value[tid] || []), ...rows]) {
-      const k = `${e.ts || ""}|${e.kind}|${e.message || e._text || ""}|${e.round || ""}`;
+      const k = traceDedupKey(e);
       if (seen.has(k)) continue;
       seen.add(k);
-      merged.push(e);
+      merged.push(e._uid != null ? e : { ...e, _uid: ++_traceUid });
     }
-    merged.sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
+    merged.sort((a, b) => evEpoch(a) - evEpoch(b));
     liveTraceByTarget.value = { ...liveTraceByTarget.value, [tid]: merged };
   } catch {
     /* 展开区显示空态即可 */
@@ -528,6 +549,59 @@ function fmtEvent(ev) {
   }
 }
 
+// ── Worker 轨迹抽屉：实时头部 + 事件语义分类（美化/动效用）─────────────────
+// 头部跟随活态 worker 实时刷新（轮次/耗时/动作），worker 结束后回落到打开时的快照。
+const traceWorkerLive = computed(() => {
+  const w = traceWorker.value;
+  if (!w) return w;
+  return liveWorkers.value.find((x) => x.target_id === w.target_id) || w;
+});
+const traceIsLive = computed(() => {
+  const w = traceWorker.value;
+  return !!w && liveWorkers.value.some((x) => x.target_id === w.target_id);
+});
+// 该目标是否仍有活态 worker：用于区分「运行中暂未产出」与「已结束、明细已清理」两种空态。
+function targetIsLive(tid) {
+  return !!tid && liveWorkers.value.some((w) => w.target_id === tid);
+}
+
+// kind → 语义类别：决定时间线节点的颜色与图标，让长轨迹一眼可扫。
+const _EV_CAT = {
+  finding_submitted: "hit",
+  worker_thought: "thought",
+  worker_directive: "directive", worker_directive_queued: "directive",
+  worker_finish: "done", worker_auto_finish: "done", review_done: "done",
+  reproduce_done: "done", escalate_done: "done", killsweep_done: "done",
+  worker_cancelled: "muted", review_cancelled: "muted", escalate_cancelled: "muted",
+  escalate_skip: "muted", escalate_abandon: "muted", finding_duplicate: "muted",
+  duplicate_checked: "muted", killsweep_dedup: "muted", killsweep_invalid: "muted",
+  finding_invalid: "warn", llm_soft_retry: "warn", llm_interrupt: "warn", review_deferred: "warn",
+  llm_error: "error", llm_provider_failed: "error", tool_exception: "error",
+  tool_arg_error: "error", tool_shell_blocked: "error", review_error: "error",
+  killsweep_error: "error", escalate_error: "error",
+  worker_start: "phase", worker_resume: "phase", llm_round_start: "phase",
+  collector_phase: "phase", review_start: "phase", reproduce_start: "phase",
+  escalate_start: "phase", killsweep_start: "phase",
+  auth_status: "auth",
+};
+function evCat(ev) {
+  const k = ev?.kind || "";
+  if (_EV_CAT[k]) return _EV_CAT[k];
+  if (k.startsWith("tool_") || k.startsWith("escalate_")) return "action";
+  return "neutral";
+}
+const _CAT_ICON = {
+  hit: "◆", thought: "∘", directive: "▸", done: "✓", error: "✕",
+  warn: "!", phase: "○", auth: "◈", action: "›", muted: "·", neutral: "·",
+};
+function evIcon(cat) { return _CAT_ICON[cat] || "·"; }
+// 稳定唯一 key：优先用入库时分配的 _uid（保证唯一且跨刷新稳定），
+// 这样 TransitionGroup 只对真正新增的那条做进入动画，绝不会因重复内容撞 key。
+function evKey(ev) {
+  if (ev?._uid != null) return `u${ev._uid}`;
+  return `${ev?.ts || ""}|${ev?.kind || ""}|${ev?.round || ""}|${ev?._text || ev?.message || ""}`;
+}
+
 function authBadge(w) {
   const st = w?.auth || "";
   if (!st) return "";
@@ -594,7 +668,8 @@ function connectWs() {
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
     const text = fmtEvent(ev);
     if (!text) return;
-    events.value.unshift({ ...ev, _text: text });
+    // 同 pushLiveTrace：缺 ts 的事件落地为「收到时刻」，避免活动流也出现全体显示当前时间。
+    events.value.unshift({ ...ev, ts: ev.ts || new Date().toISOString(), _text: text });
     if (events.value.length > 200) events.value.length = 200;
     void trackRows("events", events.value);
     const k = ev.kind || "";
@@ -751,20 +826,21 @@ async function openWorkerTrace(w) {
   try {
     const res = await api.targetTrace(props.id, w.target_id, 200);
     const rows = (res.events || []).map((e) => ({ ...e, _text: fmtEvent(e) || e.message || e.kind }));
-    // 落库轨迹 + 内存实时轨迹合并去重（按 ts+kind+message）
+    // 落库轨迹 + 内存实时轨迹合并去重（秒级内容键，抹平两副本的毫秒 ts 差异）
     const seen = new Set();
     const merged = [];
     for (const e of [...rows, ...(liveTraceByTarget.value[w.target_id] || [])]) {
-      const key = `${e.ts || ""}|${e.kind}|${e.message || e._text || ""}|${e.round || ""}`;
+      const item = { ...e, _text: e._text || fmtEvent(e) || e.message || e.kind };
+      const key = traceDedupKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
-      merged.push({ ...e, _text: e._text || fmtEvent(e) || e.message || e.kind });
+      merged.push(item._uid != null ? item : { ...item, _uid: ++_traceUid });
     }
-    merged.sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
-    traceEvents.value = merged.reverse();
+    merged.sort((a, b) => evEpoch(a) - evEpoch(b));   // 稳定时间序（数值比较，不受 tz/精度影响）
+    traceEvents.value = [...merged].reverse();          // 展示为最新在上
     liveTraceByTarget.value = {
       ...liveTraceByTarget.value,
-      [w.target_id]: [...merged],
+      [w.target_id]: merged,                            // 缓存保持时间正序，供实时追加
     };
   } catch (e) {
     if (!traceEvents.value.length) toast(`加载轨迹失败：${e?.message || e}`);
@@ -1413,7 +1489,7 @@ function parseEventTs(ts) {
             <span class="wc-host">{{ w.host }}</span>
             <span class="wc-meta">
               <span v-if="authBadge(w)" class="wc-auth" :class="authBadgeClass(w)" :title="w.auth_label || ''">{{ authBadge(w) }}</span>
-              <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ w.score }}</span>
+              <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ Math.round(w.score * 10) / 10 }}</span>
               第 {{ w.round }} 轮 · {{ elapsed(w.started_at) }}
               <button v-if="!readonly" type="button" class="wc-del"
                 title="删除该目标（跳过本次任务的这个目标）" @click.stop="skipTarget(w)">✕</button>
@@ -1483,7 +1559,7 @@ function parseEventTs(ts) {
             >
               <div v-if="streamDetailLoading[ev.target_id]" class="ev-detail-row muted">加载细节…</div>
               <div v-else-if="!detailsForTarget(ev.target_id).length" class="ev-detail-row muted">
-                暂无工具/思考细节（等待 worker 产出或稍后重试）
+                {{ targetIsLive(ev.target_id) ? "暂无工具/思考细节（worker 运行中，稍等产出）" : "该 worker 已结束，工具/思考明细已归档清理（仅保留关键节点）" }}
               </div>
               <div
                 v-for="(d, di) in detailsForTarget(ev.target_id)"
@@ -1681,19 +1757,25 @@ function parseEventTs(ts) {
       @close="drawerId = null" @updated="onDrawerUpdated" @toast="toast" />
 
     <!-- Worker 执行轨迹抽屉 -->
-    <div v-if="traceOpen" class="drawer-mask" @click.self="closeWorkerTrace">
+    <div v-if="traceOpen" class="drawer-mask trace-mask">
       <aside class="drawer open worker-trace-drawer" role="dialog" aria-modal="true">
         <div class="drawer-content">
           <header class="trace-head">
-            <div>
-              <div class="eyebrow">WORKER TRACE</div>
-              <h3>{{ traceWorker?.host || "执行轨迹" }}</h3>
-              <p class="meta">
-                第 {{ traceWorker?.round || 0 }} 轮 · {{ elapsed(traceWorker?.started_at) }}
-                <template v-if="traceWorker?.action"> · {{ traceWorker.action }}</template>
+            <div class="trace-head-main">
+              <div class="eyebrow">
+                <span class="trace-live" :class="{ off: !traceIsLive }"></span>WORKER TRACE
+              </div>
+              <h3>{{ traceWorkerLive?.host || "执行轨迹" }}</h3>
+              <p class="trace-meta">
+                <span class="trace-round-pill">R{{ traceWorkerLive?.round || 0 }}</span>
+                <span class="trace-elapsed">{{ elapsed(traceWorkerLive?.started_at) }}</span>
+                <span v-if="traceWorkerLive?.action" class="trace-action">{{ traceWorkerLive.action }}</span>
+                <span class="trace-state" :class="traceIsLive ? 'live' : 'ended'">{{ traceIsLive ? "实时" : "已结束" }}</span>
               </p>
             </div>
-            <button type="button" class="trace-close" @click="closeWorkerTrace">关闭</button>
+            <button type="button" class="trace-close" @click="closeWorkerTrace" aria-label="关闭" title="关闭">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+            </button>
           </header>
 
           <div v-if="!readonly" class="trace-directive">
@@ -1708,13 +1790,19 @@ function parseEventTs(ts) {
 
           <div class="trace-list">
             <div v-if="traceLoading && !traceEvents.length" class="empty sm">加载轨迹…</div>
-            <div v-else-if="!traceEvents.length" class="empty sm">暂无轨迹（等 worker 产生工具调用后刷新）</div>
-            <div v-for="(ev, i) in traceEvents" :key="i" class="trace-row" :class="ev.kind">
-              <span class="trace-round" v-if="ev.round">R{{ ev.round }}</span>
-              <span class="trace-kind">{{ ev.kind }}</span>
-              <span class="trace-msg">{{ ev._text || ev.message || ev.kind }}</span>
-              <span class="trace-time">{{ evTime(ev) }}</span>
-            </div>
+            <div v-else-if="!traceEvents.length" class="empty sm">{{ traceIsLive ? "暂无轨迹（worker 运行中，产生工具调用后自动刷新）" : "该 worker 已结束，工具/思考明细已归档清理（仅保留关键节点）" }}</div>
+            <TransitionGroup v-else tag="div" name="trace" class="trace-timeline" appear>
+              <div v-for="ev in traceEvents" :key="evKey(ev)" class="trace-row" :class="evCat(ev)">
+                <span class="trace-node"><i class="trace-glyph">{{ evIcon(evCat(ev)) }}</i></span>
+                <div class="trace-body">
+                  <span class="trace-msg">{{ ev._text || ev.message || ev.kind }}</span>
+                  <span class="trace-kind">{{ ev.kind }}</span>
+                </div>
+                <span class="trace-time">
+                  <span v-if="ev.round" class="trace-round">R{{ ev.round }}</span>{{ evTime(ev) }}
+                </span>
+              </div>
+            </TransitionGroup>
           </div>
         </div>
       </aside>
