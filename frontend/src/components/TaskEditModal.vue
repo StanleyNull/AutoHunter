@@ -268,7 +268,7 @@ async function save() {
 </script>
 
 <template>
-  <div v-if="open" class="task-edit-backdrop" @click.self="emit('close')">
+  <div v-if="open" class="task-edit-backdrop">
     <form class="task-edit-modal" @submit.prevent="save">
       <header>
         <div>
