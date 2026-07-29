@@ -216,7 +216,7 @@ export const api = {
   updateTask: (id, data) => req("PATCH", `/api/tasks/${id}`, data),
   // 删除任务：必须带 full 令牌（作为二次身份校验，独立于当前登录令牌）。
   deleteTask: (id, token) => req("DELETE", `/api/tasks/${id}`, undefined, false, sanitizeToken(token)),
-  board: (id) => req("GET", `/api/tasks/${id}/board`),
+  board: (id, opts = {}) => req("GET", `/api/tasks/${id}/board${qs(opts)}`),
   hardTargets: (status, q, opts = {}) => req("GET", `/api/tasks/hard-targets${qs({ status, q, ...opts })}`),
   start: (id) => req("POST", `/api/tasks/${id}/start`),
   pause: (id) => req("POST", `/api/tasks/${id}/pause`),
@@ -244,6 +244,12 @@ export const api = {
   rejectArchived: (id) => req("POST", `/api/results/${id}/reject-archived`),
   discardedList: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/discarded${qs({ q, ...opts })}`),
   restoreDiscarded: (id) => req("POST", `/api/results/${id}/restore-discarded`),
+  targetTrace: (taskId, targetId, limit = 200) =>
+    req("GET", `/api/tasks/${taskId}/targets/${targetId}/trace${qs({ limit })}`),
+  injectDirective: (taskId, targetId, directive) =>
+    req("POST", `/api/tasks/${taskId}/targets/${targetId}/directive`, { directive }),
+  cancelEscalation: (taskId, findingId) =>
+    req("POST", `/api/tasks/${taskId}/escalations/${findingId}/cancel`),
   killsweeps: (id, q, opts = {}) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q, ...opts })}`),
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),

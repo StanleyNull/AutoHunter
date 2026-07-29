@@ -113,6 +113,11 @@ class UpdateTaskRequest(BaseModel):
     enable_killsweep_fofa_search: Optional[bool] = None
 
 
+class DirectiveRequest(BaseModel):
+    """向运行中 worker 注入的人工实时指令。"""
+    directive: str = Field(..., min_length=1, max_length=2000)
+
+
 class TaskStats(BaseModel):
     queued: int = 0
     scanning: int = 0

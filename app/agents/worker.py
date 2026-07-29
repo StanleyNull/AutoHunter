@@ -65,9 +65,11 @@ class Worker:
         src_type: str = "edusrc",
         fofa_key: str = "",
         fofa_base_url: str = "",
+        engine: str = "fofa",
         prompt_version: str | None = None,
         enable_fofa_lookup: bool = True,
         deepen_count: int = 0,
+        pop_directive: Optional[Callable[[], Optional[str]]] = None,
     ):
         self.target = target
         self.llm = llm or LLMClient()
@@ -80,12 +82,15 @@ class Worker:
         self.executor = ToolExecutor(
             target, cancel_event=self.cancel_event,
             enterprise=self._enterprise, fofa_key=fofa_key, fofa_base_url=fofa_base_url,
+            engine=engine,
         )
         self.findings: list[Finding] = []
         self.on_event = on_event or (lambda kind, data: None)
         self._finished: Optional[dict] = None
         # 审核打回的定向深挖任务：{directive, vuln_type, original_title, original_summary}
         self.deepen_context = deepen_context or None
+        # 人工 mid-run 指令：编排层按轮次弹出一条，注入下一轮 user 消息。
+        self.pop_directive = pop_directive
         # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
         self.target_meta = target_meta or {}
         # 同一 target 历史已提交漏洞摘要，用于 worker 提交前查重（superseded 不传入）
@@ -302,6 +307,25 @@ class Worker:
         while rounds < max_rounds:
             if self.cancel_event.is_set():
                 return self._cancelled_result(rounds)
+            # 人工实时指令：在开新一轮 LLM 前注入，优先于自主打法。
+            # 用 getattr：部分单测用 Worker.__new__ 绕过 __init__。
+            directive = ""
+            pop_directive = getattr(self, "pop_directive", None)
+            if pop_directive:
+                try:
+                    directive = (pop_directive() or "").strip()
+                except Exception:
+                    directive = ""
+            if directive:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "# 人工实时指令（优先执行）\n"
+                        f"{directive}\n\n"
+                        "请按上述指令调整本轮打法，继续调用工具验证或 finish。"
+                    ),
+                })
+                self._emit("worker_directive", round=rounds + 1, text=directive[:500])
             rounds += 1
             try:
                 self._emit("llm_round_start", round=rounds)
@@ -399,8 +423,14 @@ class Worker:
             if not tool_calls:
                 no_tool_rounds += 1
                 if no_tool_rounds >= 6:
+                    # 全程零工具调用最常见的根因是「模型接受 tools 参数但不真正支持 function
+                    # calling」（硬报错的已被 LLM 层自动切提示词模拟兜底，不会走到这里）。
+                    hint = ("（提示：该模型全程未调用任何工具，多半是它「接受 tools 参数却不真正"
+                            "支持 function calling」。可在服务端设置 AUTOHUNTER_TOOL_COMPAT=prompt "
+                            "强制启用提示词模拟工具调用，或更换支持工具调用的模型；设置页“测试连接”可确认）"
+                            if sum(self._tool_counts.values()) == 0 else "")
                     self._auto_finish(
-                        "模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。",
+                        f"模型连续 6 轮没有调用工具或 finish，本轮未得到可靠结论。{hint}",
                         "model_behavior",
                     )
                     break

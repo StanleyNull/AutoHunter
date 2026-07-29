@@ -631,6 +631,7 @@ async def invalidate_killsweep(task_id: str, killsweep_id: str,
         "killsweep_id": k.id,
         "product": k.product_name,
         "reason": reason,
+        "ts": datetime.now(timezone.utc).isoformat(),
     })
     return {"ok": True, "id": k.id, "status": k.status}
 

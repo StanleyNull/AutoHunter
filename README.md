@@ -17,7 +17,94 @@
 
 **一台机器 = 24×7 不停歇的挖洞平台。你只当「人工复审员」，醒来几分钟完成裁决。**
 
-[快速开始](#快速开始) · [功能亮点](#功能亮点) · [创建任务](#创建任务) · [配置](#必填与推荐配置) · [运维](#运维与长期运行) · [避坑](#注意事项与避坑)
+<br>
+
+### Contributors
+
+<div align="center">
+
+<table>
+  <tr>
+    <td align="center" width="100">
+      <a href="https://github.com/StanleyNull">
+        <img src="https://avatars.githubusercontent.com/u/121541453?v=4&s=128" width="72" height="72" alt="StanleyNull" /><br />
+        <sub><b>StanleyNull</b></sub>
+      </a><br /><sup>Author</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/bitter999">
+        <img src="https://avatars.githubusercontent.com/u/160144268?v=4&s=128" width="72" height="72" alt="bitter999" /><br />
+        <sub><b>bitter999</b></sub>
+      </a><br /><sup>Engines</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/Star-233">
+        <img src="https://avatars.githubusercontent.com/u/64454088?v=4&s=128" width="72" height="72" alt="Star-233" /><br />
+        <sub><b>Star-233</b></sub>
+      </a><br /><sup>Agent UX</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/2234223561">
+        <img src="https://avatars.githubusercontent.com/u/56070426?v=4&s=128" width="72" height="72" alt="2234223561" /><br />
+        <sub><b>2234223561</b></sub>
+      </a><br /><sup>Agent UX</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/SD9ard3n">
+        <img src="https://avatars.githubusercontent.com/u/121371300?v=4&s=128" width="72" height="72" alt="SD9ard3n" /><br />
+        <sub><b>SD9ard3n</b></sub>
+      </a><br /><sup>LLM Pool</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/YiKongk">
+        <img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=128" width="72" height="72" alt="YiKongk" /><br />
+        <sub><b>YiKongk</b></sub>
+      </a><br /><sup>FOFA API</sup>
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td align="center" width="100">
+      <a href="https://github.com/1diot9">
+        <img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=128" width="72" height="72" alt="1diot9" /><br />
+        <sub><b>1diot9</b></sub>
+      </a><br /><sup>Contributor</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/qianchongceng0-cyber">
+        <img src="https://avatars.githubusercontent.com/u/310190087?v=4&s=128" width="72" height="72" alt="qianchongceng0-cyber" /><br />
+        <sub><b>qianchongceng0</b></sub>
+      </a><br /><sup>Contributor</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/jacketser">
+        <img src="https://avatars.githubusercontent.com/u/277248294?v=4&s=128" width="72" height="72" alt="jacketser" /><br />
+        <sub><b>jacketser</b></sub>
+      </a><br /><sup>Modal UX</sup>
+    </td>
+  </tr>
+</table>
+
+</div>
+
+<br>
+
+<sub>
+完整名单与加入方式 → <a href="CONTRIBUTORS.md">如何成为 Contributor</a>
+（有 commit 合进 <code>main</code> 的也会出现在
+<a href="https://github.com/StanleyNull/AutoHunter/graphs/contributors">GitHub Contributors</a>）
+</sub>
+
+<br><br>
+
+---
+
+<br>
+
+[快速开始](#快速开始) · [功能亮点](#功能亮点) · [创建任务](#创建任务) · [配置](#必填与推荐配置) · [运维](#运维与长期运行) · [避坑](#注意事项与避坑) · [Contributors](CONTRIBUTORS.md)
+
 
 Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/profile/46491/>
 
@@ -48,6 +135,7 @@ Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/pr
 - [注意事项与避坑](#注意事项与避坑)
 - [技术栈](#技术栈)
 - [贡献与反馈](#贡献与反馈)
+- [如何成为 Contributor](CONTRIBUTORS.md)
 - [许可协议](#许可协议)
 
 ---
@@ -221,9 +309,11 @@ body="管理" && org="China Education and Research Network Center"
 
 | 变量 | 必填 | 说明 | 获取方式 |
 |------|:---:|------|---------|
-| `LLM_API_KEY` | ✅ **必填** | 大模型 API Key，平台核心 | [DeepSeek](https://platform.deepseek.com/) / OpenAI / 通义 / Kimi 等 |
-| `LLM_BASE_URL` | 默认 DeepSeek | OpenAI 兼容接口地址（需含 `/v1`） | 默认 `https://api.deepseek.com/v1` |
-| `LLM_MODEL` | 默认 deepseek-chat | 模型名 | 按模型商填 |
+| `LLM_API_KEY` | ✅ **必填** | 大模型 API Key，平台核心 | [DeepSeek](https://platform.deepseek.com/) / OpenAI / Claude / 通义 / Kimi 等 |
+| `LLM_BASE_URL` | 默认 DeepSeek | 模型接口地址（OpenAI 兼容一般含 `/v1`） | 默认 `https://api.deepseek.com/v1` |
+| `LLM_MODEL` | 默认 deepseek-chat | 模型名（推荐支持 tool calling；不支持也能用，见 `AUTOHUNTER_TOOL_COMPAT`） | 按厂商填写 |
+| `LLM_PROTOCOL` | 默认 `auto` | `auto` / `openai_chat` / `anthropic_messages` | 控制台「设置」也可改 |
+| `AUTOHUNTER_TOOL_COMPAT` | 默认 `auto` | 工具调用兼容：`auto` 原生优先、硬报错自动切提示词模拟；`prompt` 强制模拟（哑模型用）；`native` 仅原生 | 模型不支持 function calling 时改 `prompt` |
 | `FOFA_KEY` | ⭐ 推荐 | 资产测绘，自动搜集目标 | [FOFA 个人中心](https://fofa.info/) |
 | `FOFA_BASE_URL` | 可选 | 自定义 FOFA API 端点（私有/镜像/代理） | 默认 `https://fofa.info` |
 | `AUTOHUNTER_API_TOKEN` | ⭐ 强烈建议 | 控制台全权限令牌，**不设则任何人可访问** | `install.sh` 自动生成，或自填随机串 |
@@ -306,7 +396,7 @@ hunt.example.com {
 |---|---|
 | 后端 | Python 3.12 · FastAPI · SQLAlchemy(SQLite) · asyncio |
 | 前端 | Vue 3 · Vite |
-| 模型 | 任意 OpenAI 兼容接口（DeepSeek / OpenAI / 通义 / Kimi …） |
+| 模型 | 推荐支持 **tool calling**；协议为 OpenAI Chat Completions 或 Anthropic Messages（`LLM_PROTOCOL=auto` 可自动识别）。**不支持原生工具调用的模型也能用**：`AUTOHUNTER_TOOL_COMPAT=auto`（默认）会在端点不支持 tools 时自动切换到「提示词模拟工具调用」，哑模型可设 `prompt` 强制模拟。常见：DeepSeek / OpenAI / Claude / 通义 / Kimi 等 |
 | 工具链（容器内置） | nmap · nuclei · sqlmap · httpx · whatweb · curl/wget/jq |
 
 ---
@@ -316,6 +406,7 @@ hunt.example.com {
 - 🐛 发现 bug / 有建议 → 提 [Issue](https://github.com/StanleyNull/AutoHunter/issues)
 - ⭐ 觉得有用 → 点个 Star 支持一下
 - 🔀 欢迎 Fork 二次开发（保留署名、非商业用途）
+- 🙋 想出现在首页 Contributors → 按 [CONTRIBUTORS.md](CONTRIBUTORS.md) 自行申请（开 PR 即可）
 
 ---
 

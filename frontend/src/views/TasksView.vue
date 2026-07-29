@@ -14,6 +14,7 @@ const editOpen = ref(false);
 const editingTask = ref(null);
 const writable = computed(() => authRoleRef.value === "full");
 const router = useRouter();
+let pollTimer = null;
 
 // 搜索与排序
 const searchQuery = ref("");
@@ -113,13 +114,25 @@ function taskScopeText(t) {
   return t?.fofa_query || "手动清单";
 }
 
-async function load() {
+const hasRunning = computed(() => tasks.value.some((t) => t.status === "running"));
+
+function syncPoller() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+  // 有运行中任务时加快刷新；否则慢轮询，仍能感知远端状态变化。
+  const ms = hasRunning.value ? 5000 : 15000;
+  pollTimer = setInterval(() => load({ background: true }), ms);
+}
+
+async function load(opts = {}) {
+  const background = !!opts.background;
   if (!tasks.value.length) initialLoading.value = true;
-  else refreshing.value = true;
+  else if (!background) refreshing.value = true;
   try { tasks.value = await api.listTasks(); }
   finally {
     initialLoading.value = false;
     refreshing.value = false;
+    syncPoller();
   }
 }
 async function openEdit(task) {
@@ -276,6 +289,10 @@ onUnmounted(() => {
   taskListState.pageSize = pageSize.value;
   taskListState.hasSavedState = true;
 });
+onUnmounted(() => {
+  clearInterval(pollTimer);
+  pollTimer = null;
+});
 watch(authReadyRef, (ready) => {
   if (ready) load();
 });
@@ -283,6 +300,7 @@ watch(authReadyRef, (ready) => {
 watch([searchQuery, sortBy, filterBy, pageSize], () => { page.value = 0; });
 // 数据增删后当前页可能越界，收敛到末页
 watch(totalPages, (tp) => { if (page.value > tp - 1) page.value = tp - 1; });
+watch(hasRunning, () => syncPoller());
 </script>
 
 <template>

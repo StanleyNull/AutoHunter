@@ -2282,6 +2282,8 @@ main {
   transition: border-color .15s ease, transform .15s ease, background-color .15s ease;
 }
 .worker-card:hover { transform: translateY(-1px); border-color: var(--border); background: var(--surface); }
+.worker-card.clickable { cursor: pointer; }
+.worker-card.clickable:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .wc-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .wc-host {
   font-weight: 600; font-size: 13.5px; color: var(--ink);
@@ -2370,6 +2372,219 @@ main {
 .ag-worker { color: var(--warn); }
 .ag-reviewer { color: var(--ok); }
 .ag-killsweep { color: var(--accent-ink); }
+.ag-escalation { color: #b45309; }
+
+.ev.expandable { cursor: pointer; }
+.ev.expandable:hover { background: var(--surface); border-color: var(--border-soft); }
+.ev.expandable.open { background: var(--surface); border-color: var(--border); }
+.ev-toggle {
+  width: 12px; flex: none; font-size: 9px; color: var(--faint);
+  text-align: center; line-height: 1;
+}
+.ev-toggle.spacer { visibility: hidden; }
+.ev-details {
+  margin: 0 0 6px 22px;
+  padding: 6px 8px 8px;
+  border-left: 2px solid var(--border);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ev-detail-row {
+  display: grid;
+  grid-template-columns: 36px 92px 1fr auto;
+  gap: 8px; align-items: baseline;
+  padding: 3px 4px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px; color: var(--ink-2);
+}
+.ev-detail-row.muted { color: var(--faint); grid-template-columns: 1fr; }
+.ev-detail-round { color: var(--accent-ink); font-weight: 700; }
+.ev-detail-kind { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-detail-msg { min-width: 0; word-break: break-word; }
+.ev-detail-time { color: var(--faint); white-space: nowrap; font-size: 10.5px; }
+@media (max-width: 640px) {
+  .ev-detail-row { grid-template-columns: 32px 1fr auto; }
+  .ev-detail-kind { display: none; }
+}
+
+.col-head.sub { margin-top: 16px; margin-bottom: 8px; }
+.escalate-block { margin-top: 4px; }
+.escalate-card .wc-host::before { background: #b45309; }
+
+/* Worker 轨迹抽屉 */
+.worker-trace-drawer { width: min(580px, 96vw); }
+.worker-trace-drawer .drawer-content { padding: 0; }
+
+/* 抽屉遮罩：仅加深聚焦，不做背景模糊——blur 会在长列表滚动时触发整屏重绘，明显卡顿 */
+.trace-mask { background: oklch(0% 0 0 / 0.62); }
+
+/* ── 头部：实时状态点 + 轮次/耗时药丸 ── */
+.trace-head {
+  display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;
+  padding: 18px 20px 15px; border-bottom: 1px solid var(--border-soft);
+  background:
+    radial-gradient(120% 120% at 0% 0%, color-mix(in oklch, var(--accent) 12%, transparent), transparent 62%),
+    var(--surface);
+}
+.trace-head-main { min-width: 0; }
+.trace-head h3 {
+  margin: 7px 0 0; font-size: 17px; line-height: 1.3; color: var(--ink);
+  word-break: break-all; text-wrap: balance;
+}
+.trace-head .eyebrow {
+  display: inline-flex; align-items: center;
+  font-size: 11px; letter-spacing: .08em; color: var(--faint);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+.trace-live {
+  width: 8px; height: 8px; border-radius: 50%; margin-right: 7px;
+  background: var(--ok); flex: none;
+  animation: trace-pulse 1.8s ease-out infinite;
+}
+.trace-live.off { background: var(--faint); animation: none; }
+@keyframes trace-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 60%, transparent); }
+  70%  { box-shadow: 0 0 0 7px color-mix(in oklch, var(--ok) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 0%, transparent); }
+}
+.trace-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 0; }
+.trace-round-pill {
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; font-weight: 700;
+  color: var(--accent-ink); background: var(--accent-bg);
+  border: 1px solid color-mix(in oklch, var(--accent) 30%, transparent);
+  padding: 2px 9px; border-radius: 999px;
+}
+.trace-elapsed {
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.trace-action { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+.trace-state {
+  margin-left: auto; font-size: 11px; font-weight: 650; padding: 2px 9px; border-radius: 999px;
+}
+.trace-state.live  { color: var(--ok);    background: var(--ok-bg); }
+.trace-state.ended { color: var(--faint); background: var(--surface-2); }
+.trace-close {
+  flex: none; width: 32px; height: 32px; display: grid; place-items: center;
+  border: none; background: transparent; border-radius: 50%;
+  cursor: pointer; color: var(--muted); padding: 0;
+  transition: background .15s ease, color .15s ease;
+}
+.trace-close svg { width: 16px; height: 16px; display: block; }
+.trace-close:hover { background: var(--surface-3); color: var(--ink); }
+.trace-close:active { background: var(--surface-2); }
+.trace-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── 人工指令 ── */
+.trace-directive {
+  padding: 14px 20px; border-bottom: 1px solid var(--border-soft);
+  display: flex; flex-direction: column; gap: 8px; background: var(--surface);
+}
+.trace-directive label { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.trace-directive textarea {
+  width: 100%; resize: vertical; min-height: 72px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); color: var(--ink); padding: 10px 12px;
+  font: inherit; line-height: 1.45;
+}
+.trace-directive button.primary {
+  align-self: flex-end; background: var(--accent); color: var(--on-accent);
+  border: none; border-radius: 8px; padding: 9px 14px; cursor: pointer; font-weight: 600;
+  transition: background .15s ease, transform .12s ease;
+}
+.trace-directive button.primary:hover:not(:disabled) { background: var(--accent-ink); }
+.trace-directive button.primary:active:not(:disabled) { transform: translateY(1px); }
+.trace-directive button.primary:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── 时间线 ── */
+.trace-list { flex: 1; overflow-y: auto; padding: 12px 14px 28px; }
+.trace-timeline { position: relative; display: flex; flex-direction: column; }
+/* 连续竖轨，穿过各节点圆点背后 */
+.trace-timeline::before {
+  content: ""; position: absolute; top: 12px; bottom: 12px; left: 14px; width: 2px;
+  background: linear-gradient(180deg, var(--border), var(--border-soft) 70%, transparent);
+  border-radius: 2px; pointer-events: none;
+}
+.trace-row {
+  position: relative;
+  display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: start;
+  padding: 8px 8px 8px 0; border-radius: 10px; border: 1px solid transparent;
+  transition: background .15s ease, border-color .15s ease;
+  /* 长轨迹（可达 300 行）滚动优化：视口外的行不参与渲染/绘制，滚动不再卡顿 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 42px;
+}
+.trace-row:hover { background: var(--surface-2); border-color: var(--border-soft); }
+.trace-node { display: flex; align-items: center; justify-content: center; padding-top: 1px; }
+.trace-glyph {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 11px; font-style: normal; font-weight: 700;
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+  box-shadow: 0 0 0 3px var(--surface); z-index: 1;
+}
+.trace-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.trace-msg { color: var(--ink-2); font-size: 12px; line-height: 1.5; word-break: break-word; }
+.trace-kind {
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10px;
+  color: var(--faint); letter-spacing: .01em;
+}
+.trace-time {
+  display: inline-flex; align-items: center; gap: 6px; padding-top: 2px; white-space: nowrap;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.trace-round { color: var(--accent-ink); font-weight: 700; }
+
+/* 语义配色：节点圆点上色，重要行加极轻底色，一眼扫到关键事件 */
+.trace-row.hit .trace-glyph { color: var(--ok); border-color: color-mix(in oklch, var(--ok) 45%, var(--border)); background: var(--ok-bg); }
+.trace-row.hit { background: color-mix(in oklch, var(--ok) 7%, transparent); }
+.trace-row.hit .trace-msg { color: var(--ink); font-weight: 600; }
+.trace-row.done .trace-glyph { color: var(--ok); border-color: color-mix(in oklch, var(--ok) 40%, var(--border)); }
+.trace-row.error .trace-glyph { color: var(--danger); border-color: color-mix(in oklch, var(--danger) 48%, var(--border)); background: var(--danger-bg); }
+.trace-row.error { background: color-mix(in oklch, var(--danger) 7%, transparent); }
+.trace-row.error .trace-msg { color: var(--ink); }
+.trace-row.warn .trace-glyph { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 45%, var(--border)); background: var(--warn-bg); }
+.trace-row.directive .trace-glyph { color: var(--accent-ink); border-color: color-mix(in oklch, var(--accent) 48%, var(--border)); background: var(--accent-bg); }
+.trace-row.directive { background: color-mix(in oklch, var(--accent) 7%, transparent); }
+.trace-row.directive .trace-msg { color: var(--ink); }
+.trace-row.thought .trace-glyph { color: oklch(80% 0.10 300); border-color: color-mix(in oklch, oklch(80% 0.10 300) 40%, var(--border)); }
+.trace-row.thought .trace-msg { color: var(--muted); font-style: italic; }
+.trace-row.action .trace-glyph { color: var(--info); border-color: color-mix(in oklch, var(--info) 40%, var(--border)); }
+.trace-row.action .trace-msg { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11.5px; }
+.trace-row.phase .trace-glyph { color: var(--accent-ink); }
+.trace-row.auth .trace-glyph { color: var(--warn); }
+.trace-row.muted .trace-glyph { color: var(--faint); }
+.trace-row.muted .trace-msg { color: var(--faint); }
+
+/* ── 动效：新事件从顶部滑入 + 其余平滑位移；节点圆点弹出 ── */
+.trace-enter-from { opacity: 0; transform: translateY(-10px) scale(.98); }
+.trace-enter-active { transition: opacity .35s cubic-bezier(.16,1,.3,1), transform .35s cubic-bezier(.16,1,.3,1); }
+.trace-enter-active .trace-glyph { animation: trace-glyph-pop .42s cubic-bezier(.16,1,.3,1); }
+.trace-leave-active { transition: opacity .18s ease; }
+.trace-leave-to { opacity: 0; }
+/* 不给存量行做整列位移动画：新事件插入时其余行直接就位，避免 300 行同时过渡造成卡顿 */
+/* 打开抽屉时前若干行错峰入场；延迟只加在 enter 上，不拖慢 hover / 位移。
+   新插入行永远是第 1 个（延迟 0），保持实时手感。 */
+.trace-row.trace-enter-active:nth-child(2)   { transition-delay: 30ms; }
+.trace-row.trace-enter-active:nth-child(3)   { transition-delay: 60ms; }
+.trace-row.trace-enter-active:nth-child(4)   { transition-delay: 90ms; }
+.trace-row.trace-enter-active:nth-child(5)   { transition-delay: 120ms; }
+.trace-row.trace-enter-active:nth-child(6)   { transition-delay: 150ms; }
+.trace-row.trace-enter-active:nth-child(7)   { transition-delay: 180ms; }
+.trace-row.trace-enter-active:nth-child(8)   { transition-delay: 210ms; }
+.trace-row.trace-enter-active:nth-child(n+9) { transition-delay: 240ms; }
+@keyframes trace-glyph-pop { from { transform: scale(.5); } to { transform: scale(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-enter-active, .trace-leave-active { transition: none !important; transition-delay: 0ms !important; }
+  .trace-enter-from { opacity: 1; transform: none; }
+  .trace-enter-active .trace-glyph { animation: none; }
+  .trace-live { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .trace-list { padding: 10px 10px 24px; }
+  .trace-action { max-width: 22ch; }
+}
 
 /* ---------- 结果行 ---------- */
 .result-row {
@@ -3980,3 +4195,19 @@ main {
   font-size: 13px; cursor: pointer; background: var(--accent); color: var(--accent-ink);
 }
 .tp-ta-input button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Settings: multi-engine API keys */
+.engine-keys { margin-top: 18px; display: grid; gap: 12px; }
+.engine-keys-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.engine-key-card {
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--panel-2, rgba(0,0,0,0.02));
+}
+.engine-key-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px; gap: 8px;
+}
+.engine-key-head i { font-style: normal; font-size: 12px; opacity: 0.65; }
+.engine-key-head i.on { color: var(--ok, #16a34a); opacity: 1; }

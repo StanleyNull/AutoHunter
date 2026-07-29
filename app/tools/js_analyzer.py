@@ -40,9 +40,15 @@ _ALLOWED_FETCH_SCHEMES = ("http", "https")
 
 # 所有正则均为线性、无嵌套量词/交替回溯结构（历史事故根因 #5 已整改）。
 _URL_RE = re.compile(r"""https?://[^\s"'`<>\\)]{1,400}""", re.I)
-# 高价值路径前缀白名单：覆盖鉴权、支付、订单、版本化 API、文件、验证码等。
+# 高价值路径前缀白名单：覆盖鉴权、网关、支付、订单、版本化 API、文件、验证码等。
+# 含 gateway/bbs：智慧后勤等前端常把 Client* 管理接口挂在 /gateway/sso/bbs/... 下。
 _PATH_RE = re.compile(
-    r"""(?P<path>/(?:api|admin|manager|user|users|auth|login|logout|oauth|sso|config|parse|classes|upload|files?|download|export|import|sms|phone|mobile|captcha|password|passwd|reset|forget|common|system|front|order|orders|pay|payment|refund|withdraw|account|wallet|v\d{1,2})[A-Za-z0-9_./?=&:%-]{1,220})""",
+    r"""(?P<path>/(?:api|admin|manager|user|users|auth|login|logout|oauth|sso|config|parse|classes|upload|files?|download|export|import|sms|phone|mobile|captcha|password|passwd|reset|forget|common|system|front|order|orders|pay|payment|refund|withdraw|account|wallet|gateway|bbs|client|operator|v\d{1,2})[A-Za-z0-9_./?=&:%-]{1,220})""",
+    re.I,
+)
+# 中段高价值：/xxx/Admin/...、/xxx/ClientSysOperator 等（前缀未必在白名单）。
+_PATH_ADMINISH_RE = re.compile(
+    r"""(?P<path>/[A-Za-z0-9_./%-]{0,160}/(?:Admin|Client[A-Za-z0-9]+|SysOperator|SysUser|SysRole|SysDept)[A-Za-z0-9_./?=&:%-]{0,180})""",
     re.I,
 )
 # key: 'value' / key = "value"。key/value 均用否定字符类，线性匹配，不回溯。
@@ -79,6 +85,23 @@ _SECRET_DATA_BLOB_RE = re.compile(r"^(?:iVBOR|/9j/|R0lGOD|JVBER|data:)")
 _SECRET_MAX_BLOB_LEN = 120
 _SECRET_HINT_RE = re.compile(r"(?i)(bearer|appid|appkey|secret|token|password|upload_token)")
 _SECRET_BLOB_RE = re.compile(r"^[A-Za-z0-9_\-:+=/]{24,}$")
+# key 名命中即视为敏感键（含 AES/客户端签名常见命名）。
+_SECRET_KEY_TOKENS = (
+    "secret", "token", "password", "passwd", "appid", "app_id", "appkey", "app_key",
+    "aes", "des", "rsa", "cipher", "encrypt", "decrypt", "iv", "salt",
+    "clientid", "client_id", "signkey", "sign_key", "apikey", "api_key",
+)
+# CryptoJS AES.encrypt(plain, "KEY") / .encrypt(plain, varRef)
+_CRYPTOJS_AES_RE = re.compile(
+    r"""CryptoJS\.AES\.(?:encrypt|decrypt)\s*\(\s*[^,)]{0,240}?,\s*(?:(['"`])(?P<lit>[^'"`]{4,64})\1|(?P<ref>[A-Za-z_$][\w$]{0,40}))""",
+    re.I | re.S,
+)
+_AES_PASSPHRASE_RE = re.compile(r"""^[A-Za-z0-9!@#$%^&*_+=\-]{8,32}$""")
+_AES_KEY_NAME_SKIP = {
+    "version", "title", "name", "path", "url", "msg", "message", "label", "text",
+    "type", "status", "code", "lang", "locale", "theme", "color", "icon", "class",
+    "method", "action", "route", "base", "host", "domain", "prefix", "suffix",
+}
 _MAX_STATIC_DEOBF_BYTES = 350_000
 _MAX_STATIC_EXTRAS = 300
 
@@ -161,6 +184,7 @@ def analyze_javascript(text: str, *, base_url: str = "", source: str = "inline")
     findings.extend(_find_key_values(normalized, source))
     findings.extend(_find_urls_and_paths(normalized, base_url, source))
     findings.extend(_find_framework_signatures(normalized, base_url, source))
+    findings.extend(_find_crypto_client_auth(normalized, base_url, source))
     findings = _dedupe_findings(findings)
     chains = _build_chains(findings, base_url)
     endpoint_inventory = _endpoint_inventory(findings)
@@ -484,9 +508,9 @@ def _find_key_values(text: str, source: str) -> list[JsFinding]:
 def _find_urls_and_paths(text: str, base_url: str, source: str) -> list[JsFinding]:
     findings: list[JsFinding] = []
     seen: set[str] = set()
-    for pattern in (_URL_RE, _PATH_RE):
+    for pattern in (_PATH_RE, _PATH_ADMINISH_RE, _URL_RE):
         for m in _iter_matches(pattern, text):
-            if pattern is _PATH_RE and m.start() > 0 and text[m.start() - 1] in {":", "/"}:
+            if pattern is not _URL_RE and m.start() > 0 and text[m.start() - 1] in {":", "/"}:
                 continue
             raw = (m.groupdict().get("path") or m.group(0)).strip().rstrip(";,")
             if not raw or raw in seen:
@@ -495,6 +519,120 @@ def _find_urls_and_paths(text: str, base_url: str, source: str) -> list[JsFindin
             full = _absolute_url(raw, base_url)
             kind, title, sev, score, tags, steps = _classify_endpoint(raw)
             findings.append(JsFinding(kind, title, sev, score, raw, _context(text, m.start(), m.end()), full, source, tags, steps))
+    return findings
+
+
+def _find_crypto_client_auth(text: str, base_url: str, source: str) -> list[JsFinding]:
+    """识别客户端签名 + 请求体 AES 加密（智慧后勤等 Client* 网关常见模式）。"""
+    findings: list[JsFinding] = []
+    has_cryptojs = bool(re.search(r"CryptoJS\.AES", text, re.I))
+    has_pwddata = "PWDDATA_" in text
+    has_headjson = bool(re.search(r"HeadJson", text, re.I))
+    has_client_secret = bool(re.search(r"ClientAppSecret|AppSecret", text, re.I))
+    has_sign_swap = bool(re.search(r"(?i)swapcase\s*\(|md5\s*\([^)]{0,80}(?:Secret|secret)", text))
+
+    if has_cryptojs or has_pwddata:
+        evidence = "CryptoJS.AES" if has_cryptojs else "PWDDATA_"
+        if has_cryptojs and has_pwddata:
+            evidence = "CryptoJS.AES + PWDDATA_"
+        findings.append(JsFinding(
+            "client_body_crypto",
+            "前端请求体 AES/CryptoJS 加密特征",
+            "high",
+            88,
+            evidence,
+            _context(text, max(0, text.lower().find("cryptojs" if has_cryptojs else "pwddata_")), 120),
+            "",
+            source,
+            ["aes", "crypto", "pwddata", "unauthorized_candidate"],
+            [
+                "提取 AES 口令/密钥（含混淆变量名）并复现 encrypt/decrypt",
+                "用同一算法加密 body 调用 Client*/Admin 接口，解密响应 Model 取证敏感字段",
+            ],
+        ))
+
+    if has_headjson or (has_client_secret and has_sign_swap) or (has_client_secret and has_cryptojs):
+        findings.append(JsFinding(
+            "client_request_sign",
+            "前端客户端签名鉴权（HeadJson / AppID / AppSecret）",
+            "high",
+            90,
+            "HeadJson/ClientAppSecret" if has_headjson or has_client_secret else "client sign",
+            "",
+            "",
+            source,
+            ["appsign", "client_auth", "unauthorized_candidate"],
+            [
+                "提取 ClientAppID/ClientAppSecret，按前端算法构造 Code+Sign（常见 md5(Code+Secret).swapcase）",
+                "无 LoginToken 直打 /gateway/.../Client* 或 Admin 接口验证未授权读敏感数据",
+            ],
+        ))
+
+    for m in _iter_matches(_CRYPTOJS_AES_RE, text):
+        lit = (m.group("lit") or "").strip()
+        ref = (m.group("ref") or "").strip()
+        if lit and _AES_PASSPHRASE_RE.match(lit):
+            findings.append(JsFinding(
+                "secret",
+                "CryptoJS AES 密钥字面量",
+                "high",
+                92,
+                f"AES_KEY={_short(lit)}",
+                _context(text, m.start(), m.end()),
+                lit,
+                source,
+                ["secret", "aes", "cryptojs"],
+                ["用该密钥复现请求加密/响应解密，对接受限 Client* 接口实证危害"],
+            ))
+        elif ref:
+            # 回溯同名赋值，抓混淆变量上的硬编码口令（如 ykeesa="12345678cgg54321"）
+            assign = re.search(
+                rf"""(?:const|let|var)?\s*{re.escape(ref)}\s*[:=]\s*(['"`])([^'"`]{{4,64}})\1""",
+                text,
+                re.I,
+            )
+            if assign:
+                val = _unescape(assign.group(2)).strip()
+                if _AES_PASSPHRASE_RE.match(val):
+                    findings.append(JsFinding(
+                        "secret",
+                        f"CryptoJS AES 密钥变量 `{ref}`",
+                        "high",
+                        91,
+                        f"{ref}={_short(val)}",
+                        _context(text, assign.start(), assign.end()),
+                        val,
+                        source,
+                        ["secret", "aes", "cryptojs", ref.lower()],
+                        ["用该密钥复现加密请求并打 Client*/Admin 接口取证"],
+                    ))
+
+    # 文件已有加密特征时，把「非标准命名」的短口令也捞出来（避免只靠 key 名命中）
+    if has_cryptojs or has_pwddata or has_headjson:
+        for m in _iter_matches(_KEY_VALUE_RE, text):
+            key = m.group("key")
+            value = _unescape(m.group("value")).strip()
+            lk = key.lower()
+            if lk in _AES_KEY_NAME_SKIP or not value:
+                continue
+            if _looks_like_secret_key(lk, value):
+                continue  # 已由 _find_key_values 覆盖
+            if not _AES_PASSPHRASE_RE.match(value):
+                continue
+            if _SECRET_VALUE_EXCLUDE_RE.match(value) or _SECRET_DATA_BLOB_RE.match(value):
+                continue
+            findings.append(JsFinding(
+                "aes_key_candidate",
+                f"加密上下文下疑似 AES 口令 `{key}`",
+                "medium",
+                78,
+                f"{key}={_short(value)}",
+                _context(text, m.start(), m.end()),
+                value,
+                source,
+                ["aes", "candidate", lk],
+                ["结合 CryptoJS/PWDDATA_ 验证是否为请求体加解密口令"],
+            ))
     return findings
 
 
@@ -568,8 +706,16 @@ def _classify_endpoint(path: str) -> tuple[str, str, str, int, list[str], list[s
         return "parse_class_endpoint", "Parse class 访问候选", "high", 84, ["parse", "baas"], ["枚举 class 表，检查 _User、验证码、订单等敏感表 ACL"]
     if "upload" in p or "file" in p:
         return "upload_endpoint", "上传/文件接口候选", "high", 78, ["upload", "file"], ["检查未授权上传、上传 token、文件解析执行或对象存储 HTML 执行"]
-    if "admin" in p or "manager" in p:
+    # 客户端管理接口：常配硬编码 AppSecret + AES body，优先于普通 admin 分档
+    if "client" in p and ("admin" in p or "sys" in p or "operator" in p or "user" in p):
+        return "admin_endpoint", "客户端管理接口候选（常配硬编码签名）", "high", 86, ["admin", "client", "unauthorized_candidate"], [
+            "检查是否可用前端 ClientAppSecret/AES 伪造签名未授权调用",
+            "重点看 Select/List/Export 是否返回身份证/手机号等死规矩字段",
+        ]
+    if "admin" in p or "manager" in p or "sysoperator" in p:
         return "admin_endpoint", "后台/管理接口候选", "medium", 68, ["admin"], ["检查未授权、弱口令或普通用户垂直越权"]
+    if "/gateway/" in p or "/bbs/" in p:
+        return "api_endpoint", "网关/业务接口", "info", 40, ["api", "gateway"], ["结合前端签名/加密逻辑验证鉴权是否可伪造"]
     if "/api/" in p:
         return "api_endpoint", "API 接口", "info", 30, ["api"], []
     return "endpoint", "前端路径/接口", "info", 20, [], []
@@ -632,8 +778,40 @@ def _build_chains(findings: list[JsFinding], base_url: str) -> list[JsChain]:
             ["构造基线请求和变体请求，对比 code/token/userId 是否可控", "若是改密链，必须用新密码登录或证明状态已改变"],
         ))
 
+    # 智慧后勤等：ClientAppSecret + AES(PWDDATA_) + Admin/Client* → 未授权拉敏感库
+    cryptoish = bool(by_kind.get("client_body_crypto") or by_kind.get("client_request_sign"))
+    secretish = bool(
+        by_kind.get("secret")
+        or by_kind.get("aes_key_candidate")
+        or any("secret" in (f.tags or []) for f in findings)
+    )
+    adminish = bool(by_kind.get("admin_endpoint"))
+    if cryptoish and (secretish or adminish):
+        client_eps = [
+            f.value for f in findings
+            if f.kind in {"admin_endpoint", "api_endpoint", "endpoint"} and f.value
+            and ("client" in (f.value or "").lower() or "admin" in (f.value or "").lower() or "gateway" in (f.value or "").lower())
+        ][:4]
+        probes = [
+            "提取 ClientAppID / ClientAppSecret / AES 口令（含混淆变量）",
+            "按前端逻辑构造 HeadJson（常见 Code=yyyyMMddHHmmss，Sign=md5(Code+AppSecret).swapcase）",
+            "请求体 JSON 用 CryptoJS 兼容 AES 加密并加 PWDDATA_ 前缀后 POST",
+            "解密响应 Model，检查是否含身份证/手机号等死规矩字段；只发现密钥不算洞",
+        ]
+        for ep in client_eps:
+            probes.append(f"优先实测: {ep}")
+        chains.append(JsChain(
+            "client_signed_encrypted_api",
+            "硬编码客户端凭证 + AES 加密请求体，可伪造签名打 Admin/Client 接口",
+            "high",
+            "高危",
+            "出现 ClientAppSecret/HeadJson/PWDDATA_/CryptoJS.AES 与管理端路径组合，命中「前端密钥→伪造客户端签名→未授权拉敏感数据」链路。",
+            _evidence(findings, {"client_body_crypto", "client_request_sign", "secret", "aes_key_candidate", "admin_endpoint"}),
+            probes,
+        ))
+
     secrets = [f for f in findings if f.kind == "secret" and f.score >= 70]
-    if secrets:
+    if secrets and not any(c.kind == "client_signed_encrypted_api" for c in chains):
         chains.append(JsChain(
             "frontend_secret_followup",
             "前端硬编码高价值 secret，需要验证可用性",
@@ -641,7 +819,7 @@ def _build_chains(findings: list[JsFinding], base_url: str) -> list[JsChain]:
             "待实证",
             "发现高风险 key/secret，但按 EduSRC 口径需进一步证明能实际调用接口、伪造签名或读取受限数据。",
             [f.evidence for f in secrets[:6]],
-            ["搜索签名函数 md5/sha/hmac/sign", "用 secret 复现一次受限 API 调用，拿到真实响应证据"],
+            ["搜索签名函数 md5/sha/hmac/sign/HeadJson/PWDDATA_", "用 secret 复现一次受限 API 调用，拿到真实响应证据"],
         ))
     return chains
 
@@ -806,7 +984,10 @@ def _origin(url: str) -> str:
 
 def _looks_like_secret_key(key: str, value: str) -> bool:
     # 1) key 名本身带敏感语义：高置信，直接判正。
-    if any(x in key for x in ("secret", "token", "key", "appid", "app_id", "password", "passwd", "ak", "sk")):
+    if any(x in key for x in _SECRET_KEY_TOKENS):
+        return True
+    # 兼容旧逻辑：裸 "key" 后缀/片段（apiKey、secretKey 已由上覆盖；单独 key= 仍收）
+    if "key" in key and not any(x in key for x in ("keyboard", "keyword", "monkey")):
         return True
     # 2) value 内含敏感关键字：判正。
     if _SECRET_HINT_RE.search(value):
@@ -827,6 +1008,8 @@ def _secret_score(key: str, value: str) -> int:
         return 90
     if "secret" in key or "token" in key:
         return 82
+    if any(x in key for x in ("aes", "encrypt", "decrypt", "cipher")):
+        return 88
     if "appid" in key or "app_id" in key:
         return 70
     return 55 if len(value) < 16 else 68

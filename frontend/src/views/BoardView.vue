@@ -18,6 +18,7 @@ const tab = ref("board");          // board | review | submit | killsweep | reje
 const boardPanel = ref("workers"); // workers | stream（手机端看板切换）
 const events = ref([]);
 const liveWorkers = ref([]);       // 在跑 worker 活态
+const liveEscalations = ref([]);   // 扩大危害活态
 const siteCollab = ref(null);      // 单站协作态势（三阶段路线流水线，仅 site 任务）
 const queue = ref([]);             // 复审队列
 const queueHasMore = ref(false);
@@ -43,6 +44,15 @@ const drawerMode = ref("view");
 const toastMsg = ref("");
 const editOpen = ref(false);
 const invalidatingKillsweepId = ref(null);
+const traceOpen = ref(false);
+const traceWorker = ref(null);
+const traceEvents = ref([]);
+const traceLoading = ref(false);
+const directiveText = ref("");
+const directiveSending = ref(false);
+const cancellingEscalateId = ref(null);
+const expandedEventKeys = ref(new Set());
+const streamDetailLoading = ref({});
 const readonly = computed(() => authRoleRef.value !== "full");
 const initialLoading = ref(false);
 const refreshing = ref(false);
@@ -58,6 +68,7 @@ const DISCARDED_PAGE_SIZE = 50;
 const bulkWorking = ref(false);
 const SUBMIT_PAGE_SIZE = 120;
 const EXPORT_PAGE_SIZE = 80;
+const STREAM_DETAIL_CAP = 40;
 let ws = null, poll = null, boardPoll = null, searchTimer = null, poolPoll = null;
 let wsReconnectTimer = null, wsReconnectAttempt = 0, wsIntentionalClose = false;
  let eventRefreshTimer = null, eventRefreshPending = null;
@@ -77,6 +88,8 @@ let wsReconnectTimer = null, wsReconnectAttempt = 0, wsIntentionalClose = false;
 const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived", "discarded"]);
 // 记录哪些列表 tab 已经加载过数据：首屏只拉看板，列表按需加载；后台只刷新看过的列表。
 const loadedTabs = ref(new Set());
+// 内存中按 target 聚合的实时轨迹（WS 推送），配合落库 trace API 做回放。
+const liveTraceByTarget = ref({});
 
 // Target 面板状态
 const targetPanelOpen = ref(false);
@@ -377,9 +390,17 @@ function resetTaskState(full = true) {
   }
   events.value = [];
   liveWorkers.value = [];
+  liveEscalations.value = [];
+  liveTraceByTarget.value = {};
+  expandedEventKeys.value = new Set();
+  streamDetailLoading.value = {};
   siteCollab.value = null;
   drawerId.value = null;
   editOpen.value = false;
+  traceOpen.value = false;
+  traceWorker.value = null;
+  traceEvents.value = [];
+  directiveText.value = "";
 }
 
 async function bootstrapTask() {
@@ -403,7 +424,7 @@ async function bootstrapTask() {
   }
 }
 
-// 实时事件：只展示稍重要的事件，过滤 HTTP/Shell/思考等高频低价值噪音。
+// 实时事件：活动流只展示里程碑；tool/thought 等细节静默缓冲，点击行再展开。
 const IMPORTANT_KINDS = new Set([
   "collector_phase",
   "finding_submitted", "finding_duplicate", "finding_invalid",
@@ -418,6 +439,8 @@ const IMPORTANT_KINDS = new Set([
   "retest_start", "retest_phase2", "retest_sleep", "retest_wake", "retest_done",
   "retest_sleep_log", "retest_ip_banned", "retest_dead", "retest_recover",
   "auth_status",
+  "escalate_start", "escalate_done", "escalate_skip", "escalate_cancelled", "escalate_error", "escalate_abandon",
+  "worker_directive", "worker_directive_queued",
 ]);
 const NOISE_KINDS = new Set([
   "ping",
@@ -425,6 +448,8 @@ const NOISE_KINDS = new Set([
   "tool_js_analyze", "tool_decode", "tool_waf_advice", "tool_fofa_lookup", "tool_session_set",
   "worker_thought", "intel_reported", "js_analyzer_enabled",
   "killsweep_fofa", "killsweep_http", "killsweep_shell",
+  "escalate_http", "escalate_shell", "escalate_session",
+  "llm_round_start",
   "refill", "cluster_cooldown_skip", "skip",
 ]);
 const LOG_INFO_IMPORTANT = new Set([
@@ -432,7 +457,22 @@ const LOG_INFO_IMPORTANT = new Set([
   "review_done", "review_deferred", "review_cancelled",
   "reclaim", "recover", "workers_cancelled", "quota_stop",
   "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
+  "escalate_done", "escalate_skip", "escalate_cancelled",
   "target_needs_auth",
+]);
+const TRACE_KINDS = new Set([
+  ...NOISE_KINDS,
+  "worker_start", "worker_finish", "worker_cancelled", "worker_auto_finish",
+  "worker_thought", "worker_directive", "worker_resume",
+  "llm_round_start", "llm_error", "llm_soft_retry", "llm_interrupt",
+  "finding_submitted", "finding_duplicate", "finding_invalid",
+  "tool_exception", "auth_status", "finish_blocked",
+]);
+const DETAIL_KINDS = new Set([
+  "tool_http", "tool_shell", "tool_shell_blocked", "tool_arg_error",
+  "tool_js_analyze", "tool_decode", "tool_waf_advice", "tool_fofa_lookup", "tool_session_set",
+  "worker_thought", "worker_directive", "llm_round_start", "llm_error", "llm_soft_retry",
+  "tool_exception", "finish_blocked", "auth_status",
 ]);
 
 function isImportantEvent(ev) {
@@ -445,6 +485,101 @@ function isImportantEvent(ev) {
   if (ev.message && LOG_INFO_IMPORTANT.has(kind)) return true;
   if (ev.message && kind === "error") return true;
   return false;
+}
+
+// 每条轨迹分配一个稳定唯一 id，作为渲染 key：既保证 TransitionGroup 只对真正新增
+// 的那条做进入动画，也彻底避免「重复内容 → 重复 key → Vue diff 崩坏」导致的卡顿。
+let _traceUid = 0;
+
+// 去重键：落库 ts 与实时推送 ts 常有毫秒级差异（同一事件两个副本），
+// 用「kind + 轮次 + 文案 + 秒级时间」而非精确 ts 归并，才能真正去掉重复行。
+function traceDedupKey(ev) {
+  const sec = Math.floor(parseEventTs(ev.ts).getTime() / 1000);
+  const text = ev._text || ev.message || ev.kind || "";
+  return `${ev.kind || ""}|${ev.round || ""}|${text}|${sec}`;
+}
+function evEpoch(ev) { return parseEventTs(ev.ts).getTime(); }
+
+function pushLiveTrace(ev) {
+  const tid = ev.target_id;
+  if (!tid || !TRACE_KINDS.has(ev.kind || "")) return;
+  const map = { ...liveTraceByTarget.value };
+  const list = [...(map[tid] || [])];
+  // 兜底：万一某条实时事件没带 ts，落地为「收到时刻」的固定时间，
+  // 避免 parseEventTs 回退成 new Date() 导致所有行都显示当前时间、且每次刷新一起变。
+  const item = { ...ev, ts: ev.ts || new Date().toISOString(), _text: fmtEvent(ev) || ev.kind, _uid: ++_traceUid };
+  // 近端去重：同一事件的落库/实时两个副本只会挨得很近，扫最近若干条即可。
+  const key = traceDedupKey(item);
+  for (let i = list.length - 1, floor = Math.max(0, list.length - 60); i >= floor; i--) {
+    if (traceDedupKey(list[i]) === key) return;
+  }
+  list.push(item);
+  if (list.length > 300) list.splice(0, list.length - 300);
+  map[tid] = list;
+  liveTraceByTarget.value = map;
+  if (traceOpen.value && traceWorker.value?.target_id === tid) {
+    traceEvents.value = [...list].reverse();
+  }
+}
+
+function eventExpandKey(ev, i) {
+  return `${ev.target_id || ""}|${ev.ts || ""}|${ev.kind || ""}|${i}`;
+}
+
+function canExpandEvent(ev) {
+  return !!(ev?.target_id);
+}
+
+function isEventExpanded(key) {
+  return expandedEventKeys.value.has(key);
+}
+
+function detailsForTarget(targetId) {
+  const list = liveTraceByTarget.value[targetId] || [];
+  const details = list.filter((e) => DETAIL_KINDS.has(e.kind || ""));
+  // 最新在前，截断
+  const ordered = [...details].reverse();
+  return ordered.slice(0, STREAM_DETAIL_CAP);
+}
+
+async function toggleEventExpand(ev, i) {
+  if (!canExpandEvent(ev)) return;
+  const key = eventExpandKey(ev, i);
+  const next = new Set(expandedEventKeys.value);
+  if (next.has(key)) {
+    next.delete(key);
+    expandedEventKeys.value = next;
+    return;
+  }
+  next.add(key);
+  expandedEventKeys.value = next;
+  const tid = ev.target_id;
+  if ((liveTraceByTarget.value[tid] || []).some((e) => DETAIL_KINDS.has(e.kind || ""))) return;
+  if (streamDetailLoading.value[tid]) return;
+  streamDetailLoading.value = { ...streamDetailLoading.value, [tid]: true };
+  try {
+    const res = await api.targetTrace(props.id, tid, 120);
+    const rows = (res.events || []).map((e) => ({
+      ...e,
+      _text: fmtEvent(e) || e.message || e.kind,
+    }));
+    const seen = new Set();
+    const merged = [];
+    for (const e of [...(liveTraceByTarget.value[tid] || []), ...rows]) {
+      const k = traceDedupKey(e);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      merged.push(e._uid != null ? e : { ...e, _uid: ++_traceUid });
+    }
+    merged.sort((a, b) => evEpoch(a) - evEpoch(b));
+    liveTraceByTarget.value = { ...liveTraceByTarget.value, [tid]: merged };
+  } catch {
+    /* 展开区显示空态即可 */
+  } finally {
+    const loading = { ...streamDetailLoading.value };
+    delete loading[tid];
+    streamDetailLoading.value = loading;
+  }
 }
 
 // 把任意事件格式化为一句人话（worker 动作事件本身没有 message）
@@ -479,6 +614,27 @@ function fmtEvent(ev) {
     case "worker_resume": return `断点续挖：恢复笔记 ${d.notes_len || 0} 字 / cookie ${(d.cookies || []).length} / 头 ${(d.headers || []).length}`;
     case "llm_provider_failed": return `LLM 端点失败: ${d.model || ""} @ ${d.base_url || ""} (${d.error_kind || "failed"})`;
     case "tool_exception": return `工具异常: ${d.tool || ""} ${(d.error || "").slice(0, 80)}`;
+    case "tool_http": return `HTTP ${d.method || "GET"} ${d.url || ""}`;
+    case "tool_shell": return `$ ${(d.command || "").slice(0, 160)}`;
+    case "tool_shell_blocked": return `拦截命令: ${(d.reason || d.command || "").slice(0, 120)}`;
+    case "tool_arg_error": return `工具参数错误: ${d.tool || ""} ${(d.error || "").slice(0, 80)}`;
+    case "tool_js_analyze": return `JS 分析: ${(d.url || "").slice(0, 120)}`;
+    case "tool_decode": return `解码: ${d.mode || "auto"}`;
+    case "tool_waf_advice": return `WAF 建议: ${d.context || "generic"}`;
+    case "tool_fofa_lookup": return `FOFA: ${(d.query || "").slice(0, 100)}`;
+    case "tool_session_set": return `会话态更新`;
+    case "worker_thought": return `💭 ${(d.text || "").slice(0, 200)}`;
+    case "worker_directive": return `🎛 执行人工指令: ${(d.text || "").slice(0, 160)}`;
+    case "worker_directive_queued": return d.message || `已排队人工指令: ${(d.text || "").slice(0, 120)}`;
+    case "llm_round_start": return `第 ${d.round || "?"} 轮 LLM`;
+    case "escalate_start": return `扩大危害启动: ${d.title || ""}`;
+    case "escalate_done": return `扩大危害完成: ${d.title || ""} · ${d.severity || ""}`;
+    case "escalate_skip": return d.message || `扩大危害未显著，已放弃`;
+    case "escalate_cancelled": return d.message || `扩大危害已取消`;
+    case "escalate_error": return `扩大危害异常: ${(d.error || "").slice(0, 120)}`;
+    case "escalate_abandon": return `扩大危害放弃: ${(d.reason || "").slice(0, 120)}`;
+    case "escalate_http": return `扩大危害 HTTP ${(d.url || "").slice(0, 120)}`;
+    case "escalate_shell": return `扩大危害 $ ${(d.command || "").slice(0, 120)}`;
     case "auth_status": {
       const kinds = (d.kinds || []).join(",") || "-";
       const st = d.status || "?";
@@ -491,6 +647,59 @@ function fmtEvent(ev) {
     case "ping": return null;
     default: return ev.message || `${ev.kind || ""}`;
   }
+}
+
+// ── Worker 轨迹抽屉：实时头部 + 事件语义分类（美化/动效用）─────────────────
+// 头部跟随活态 worker 实时刷新（轮次/耗时/动作），worker 结束后回落到打开时的快照。
+const traceWorkerLive = computed(() => {
+  const w = traceWorker.value;
+  if (!w) return w;
+  return liveWorkers.value.find((x) => x.target_id === w.target_id) || w;
+});
+const traceIsLive = computed(() => {
+  const w = traceWorker.value;
+  return !!w && liveWorkers.value.some((x) => x.target_id === w.target_id);
+});
+// 该目标是否仍有活态 worker：用于区分「运行中暂未产出」与「已结束、明细已清理」两种空态。
+function targetIsLive(tid) {
+  return !!tid && liveWorkers.value.some((w) => w.target_id === tid);
+}
+
+// kind → 语义类别：决定时间线节点的颜色与图标，让长轨迹一眼可扫。
+const _EV_CAT = {
+  finding_submitted: "hit",
+  worker_thought: "thought",
+  worker_directive: "directive", worker_directive_queued: "directive",
+  worker_finish: "done", worker_auto_finish: "done", review_done: "done",
+  reproduce_done: "done", escalate_done: "done", killsweep_done: "done",
+  worker_cancelled: "muted", review_cancelled: "muted", escalate_cancelled: "muted",
+  escalate_skip: "muted", escalate_abandon: "muted", finding_duplicate: "muted",
+  duplicate_checked: "muted", killsweep_dedup: "muted", killsweep_invalid: "muted",
+  finding_invalid: "warn", llm_soft_retry: "warn", llm_interrupt: "warn", review_deferred: "warn",
+  llm_error: "error", llm_provider_failed: "error", tool_exception: "error",
+  tool_arg_error: "error", tool_shell_blocked: "error", review_error: "error",
+  killsweep_error: "error", escalate_error: "error",
+  worker_start: "phase", worker_resume: "phase", llm_round_start: "phase",
+  collector_phase: "phase", review_start: "phase", reproduce_start: "phase",
+  escalate_start: "phase", killsweep_start: "phase",
+  auth_status: "auth",
+};
+function evCat(ev) {
+  const k = ev?.kind || "";
+  if (_EV_CAT[k]) return _EV_CAT[k];
+  if (k.startsWith("tool_") || k.startsWith("escalate_")) return "action";
+  return "neutral";
+}
+const _CAT_ICON = {
+  hit: "◆", thought: "∘", directive: "▸", done: "✓", error: "✕",
+  warn: "!", phase: "○", auth: "◈", action: "›", muted: "·", neutral: "·",
+};
+function evIcon(cat) { return _CAT_ICON[cat] || "·"; }
+// 稳定唯一 key：优先用入库时分配的 _uid（保证唯一且跨刷新稳定），
+// 这样 TransitionGroup 只对真正新增的那条做进入动画，绝不会因重复内容撞 key。
+function evKey(ev) {
+  if (ev?._uid != null) return `u${ev._uid}`;
+  return `${ev?.ts || ""}|${ev?.kind || ""}|${ev?.round || ""}|${ev?._text || ev?.message || ""}`;
 }
 
 function authBadge(w) {
@@ -516,13 +725,14 @@ function phaseStateText(state) {
 async function loadBoard() {
   const id = props.id;
   const b = await api.board(id);
- if (id !== props.id) return;
-   // 浅比较：字段未变则不替换数组，避免 worker-card 全列重渲染
-   const nextWorkers = b.live_workers || [];
-   if (!workersSigEqual(nextWorkers, liveWorkers.value)) {
-     liveWorkers.value = nextWorkers;
-   }
- siteCollab.value = b.site_collab || null;
+  if (id !== props.id) return;
+  // 浅比较：字段未变则不替换数组，避免 worker-card 全列重渲染
+  const nextWorkers = b.live_workers || [];
+  if (!workersSigEqual(nextWorkers, liveWorkers.value)) {
+    liveWorkers.value = nextWorkers;
+  }
+  liveEscalations.value = b.live_escalations || [];
+  siteCollab.value = b.site_collab || null;
   retestSummary.value = b.retest_summary || null;
   if (task.value) {
     if (b.task_status) task.value.status = b.task_status;
@@ -556,17 +766,19 @@ function connectWs() {
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }   // 畸形帧不炸整个处理器
     if (ev.kind === "ping") return;
+    pushLiveTrace(ev);
     if (!isImportantEvent(ev)) return;
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
     const text = fmtEvent(ev);
-   if (!text) return;
-   events.value.unshift({ ...ev, _text: text, _uid: ++_evUid });
-   if (events.value.length > 200) events.value.pop();
+    if (!text) return;
+    // 同 pushLiveTrace：缺 ts 的事件落地为「收到时刻」，避免活动流也出现全体显示当前时间。
+    events.value.unshift({ ...ev, ts: ev.ts || new Date().toISOString(), _text: text, _uid: ++_evUid });
+    if (events.value.length > 200) events.value.length = 200;
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
         || k.includes("target_needs") || k.includes("submit")
         || k.includes("killsweep") || k.includes("worker")
-        || k.includes("retest")) {
+        || k.includes("retest") || k.includes("escalate")) {
       scheduleEventRefresh(ev);
     }
   };
@@ -981,6 +1193,82 @@ async function skipTarget(w) {
   }
 }
 
+async function openWorkerTrace(w) {
+  if (!w?.target_id) return;
+  traceWorker.value = w;
+  traceOpen.value = true;
+  directiveText.value = "";
+  const live = liveTraceByTarget.value[w.target_id] || [];
+  if (live.length) {
+    traceEvents.value = [...live].reverse();
+  } else {
+    traceEvents.value = [];
+  }
+  traceLoading.value = true;
+  try {
+    const res = await api.targetTrace(props.id, w.target_id, 200);
+    const rows = (res.events || []).map((e) => ({ ...e, _text: fmtEvent(e) || e.message || e.kind }));
+    // 落库轨迹 + 内存实时轨迹合并去重（秒级内容键，抹平两副本的毫秒 ts 差异）
+    const seen = new Set();
+    const merged = [];
+    for (const e of [...rows, ...(liveTraceByTarget.value[w.target_id] || [])]) {
+      const item = { ...e, _text: e._text || fmtEvent(e) || e.message || e.kind };
+      const key = traceDedupKey(item);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(item._uid != null ? item : { ...item, _uid: ++_traceUid });
+    }
+    merged.sort((a, b) => evEpoch(a) - evEpoch(b));   // 稳定时间序（数值比较，不受 tz/精度影响）
+    traceEvents.value = [...merged].reverse();          // 展示为最新在上
+    liveTraceByTarget.value = {
+      ...liveTraceByTarget.value,
+      [w.target_id]: merged,                            // 缓存保持时间正序，供实时追加
+    };
+  } catch (e) {
+    if (!traceEvents.value.length) toast(`加载轨迹失败：${e?.message || e}`);
+  } finally {
+    traceLoading.value = false;
+  }
+}
+
+function closeWorkerTrace() {
+  traceOpen.value = false;
+  traceWorker.value = null;
+  directiveText.value = "";
+}
+
+async function sendDirective() {
+  if (readonly.value || !traceWorker.value || directiveSending.value) return;
+  const text = directiveText.value.trim();
+  if (!text) return;
+  directiveSending.value = true;
+  try {
+    await api.injectDirective(props.id, traceWorker.value.target_id, text);
+    toast("指令已排队，下一轮 LLM 前生效");
+    directiveText.value = "";
+  } catch (e) {
+    toast(`注入失败：${e?.message || e}`);
+  } finally {
+    directiveSending.value = false;
+  }
+}
+
+async function cancelEscalation(e) {
+  if (readonly.value || cancellingEscalateId.value) return;
+  const title = shortText(e.title || e.finding_id || "扩大危害");
+  if (!window.confirm(`确认取消「${title}」的扩大危害？`)) return;
+  cancellingEscalateId.value = e.finding_id;
+  try {
+    await api.cancelEscalation(props.id, e.finding_id);
+    liveEscalations.value = liveEscalations.value.filter((x) => x.finding_id !== e.finding_id);
+    toast("已取消扩大危害");
+  } catch (err) {
+    toast(`取消失败：${err?.message || err}`);
+  } finally {
+    cancellingEscalateId.value = null;
+  }
+}
+
 async function restoreArchived(id) {
   try {
     await api.restoreArchived(id);
@@ -1247,8 +1535,8 @@ async function exportEdusrcAll() {
   }
 }
 
-const AGENT_ICON = { orchestrator: "◆", collector: "🛰", worker: "⚔", reviewer: "⚖", killsweep: "◇" };
-const AGENT_LABEL = { orchestrator: "主控", collector: "搜集", worker: "挖掘", reviewer: "审核", killsweep: "通杀" };
+const AGENT_ICON = { orchestrator: "◆", collector: "🛰", worker: "⚔", reviewer: "⚖", killsweep: "◇", escalation: "⬆" };
+const AGENT_LABEL = { orchestrator: "主控", collector: "搜集", worker: "挖掘", reviewer: "审核", killsweep: "通杀", escalation: "扩大危害" };
 
 const stats = computed(() => task.value?.stats || {});
 // Tab 徽标/指标卡计数：统一以 stats 为权威来源（stats 随 loadTask 在挂载时与每次实时事件刷新），
@@ -1804,9 +2092,14 @@ function fmtTime(iso) {
       </div>
       <!-- Worker 矩阵 -->
       <div class="board-col board-panel" :class="{ 'board-panel-hidden': boardPanel !== 'workers' }">
-        <div class="col-head"><span>Worker Matrix</span><small>挖掘中</small><i class="cnt">{{ liveWorkers.length }}</i></div>
+        <div class="col-head">
+          <span>Worker Matrix</span>
+          <small>点击卡片查看轨迹</small>
+          <i class="cnt">{{ liveWorkers.length }}</i>
+        </div>
         <div v-if="!liveWorkers.length" class="empty sm">暂无运行中的 worker</div>
-        <div v-for="w in liveWorkers" :key="w.target_id" class="worker-card">
+        <div v-for="w in liveWorkers" :key="w.target_id" class="worker-card clickable"
+          @click="openWorkerTrace(w)" title="查看执行轨迹 / 注入指令">
           <div class="wc-top">
             <span class="wc-host">{{ w.host }}</span>
             <span class="wc-meta">
@@ -1814,7 +2107,7 @@ function fmtTime(iso) {
               <span v-if="w.score > 0" class="wc-score" :title="w.score_reason">★{{ w.score }}</span>
               第 {{ w.round }} 轮 · {{ elapsed(w.started_at) }}
               <button v-if="!readonly" type="button" class="wc-del"
-                title="删除该目标（跳过本次任务的这个目标）" @click="skipTarget(w)">✕</button>
+                title="删除该目标（跳过本次任务的这个目标）" @click.stop="skipTarget(w)">✕</button>
             </span>
           </div>
           <div class="wc-action">{{ w.action }}</div>
@@ -1830,19 +2123,69 @@ function fmtTime(iso) {
             <span class="wc-bar"><i :style="{ transform: `scaleX(${Math.min(1, w.round / 60)})` }"></i></span>
           </div>
         </div>
+
+        <!-- 扩大危害活态 -->
+        <div v-if="liveEscalations.length" class="escalate-block">
+          <div class="col-head sub"><span>扩大危害</span><small>进行中</small><i class="cnt">{{ liveEscalations.length }}</i></div>
+          <div v-for="e in liveEscalations" :key="e.finding_id" class="worker-card escalate-card">
+            <div class="wc-top">
+              <span class="wc-host">{{ e.title || e.finding_id }}</span>
+              <span class="wc-meta">
+                <span v-if="e.severity" class="wc-score">{{ e.severity }}</span>
+                {{ elapsed(e.started_at) }}
+                <button v-if="!readonly" type="button" class="wc-del"
+                  title="取消扩大危害"
+                  :disabled="cancellingEscalateId === e.finding_id"
+                  @click.stop="cancelEscalation(e)">✕</button>
+              </span>
+            </div>
+            <div class="wc-action">{{ e.action || "扩大危害进行中…" }}</div>
+          </div>
+        </div>
       </div>
 
       <!-- 活动流 -->
       <div class="board-col board-panel" :class="{ 'board-panel-hidden': boardPanel !== 'stream' }">
-        <div class="col-head"><span>Activity Stream</span><small>重要事件</small></div>
+        <div class="col-head">
+          <span>Activity Stream</span>
+          <small>点击带目标的行展开细节</small>
+        </div>
         <div class="event-log">
           <div v-if="!events.length" class="empty sm">等待事件…</div>
-         <div v-for="ev in events" :key="ev._uid" :class="evClass(ev)">
-            <span class="ev-icon" :class="`ag-${ev.agent}`">{{ AGENT_ICON[ev.agent] || "•" }}</span>
-            <span class="ev-agent" :class="`ag-${ev.agent}`">{{ AGENT_LABEL[ev.agent] || ev.agent }}</span>
-            <span class="ev-msg">{{ ev._text }}</span>
-            <span class="ev-time">{{ evTime(ev) }}</span>
-          </div>
+          <template v-for="(ev, i) in events" :key="eventExpandKey(ev, i)">
+            <div
+              :class="[evClass(ev), { expandable: canExpandEvent(ev), open: isEventExpanded(eventExpandKey(ev, i)) }]"
+              @click="toggleEventExpand(ev, i)"
+            >
+              <span v-if="canExpandEvent(ev)" class="ev-toggle" aria-hidden="true">
+                {{ isEventExpanded(eventExpandKey(ev, i)) ? "▼" : "▶" }}
+              </span>
+              <span v-else class="ev-toggle spacer" aria-hidden="true"></span>
+              <span class="ev-icon" :class="`ag-${ev.agent}`">{{ AGENT_ICON[ev.agent] || "•" }}</span>
+              <span class="ev-agent" :class="`ag-${ev.agent}`">{{ AGENT_LABEL[ev.agent] || ev.agent }}</span>
+              <span class="ev-msg">{{ ev._text }}</span>
+              <span class="ev-time">{{ evTime(ev) }}</span>
+            </div>
+            <div
+              v-if="canExpandEvent(ev) && isEventExpanded(eventExpandKey(ev, i))"
+              class="ev-details"
+            >
+              <div v-if="streamDetailLoading[ev.target_id]" class="ev-detail-row muted">加载细节…</div>
+              <div v-else-if="!detailsForTarget(ev.target_id).length" class="ev-detail-row muted">
+                {{ targetIsLive(ev.target_id) ? "暂无工具/思考细节（worker 运行中，稍等产出）" : "该 worker 已结束，工具/思考明细已归档清理（仅保留关键节点）" }}
+              </div>
+              <div
+                v-for="(d, di) in detailsForTarget(ev.target_id)"
+                :key="di"
+                class="ev-detail-row"
+              >
+                <span class="ev-detail-round" v-if="d.round">R{{ d.round }}</span>
+                <span class="ev-detail-kind">{{ d.kind }}</span>
+                <span class="ev-detail-msg">{{ d._text || d.message || d.kind }}</span>
+                <span class="ev-detail-time">{{ evTime(d) }}</span>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -2363,6 +2706,58 @@ function fmtTime(iso) {
           </template>
         </template>
       </div>
+    </div>
+
+    <!-- Worker 执行轨迹抽屉 -->
+    <div v-if="traceOpen" class="drawer-mask trace-mask">
+      <aside class="drawer open worker-trace-drawer" role="dialog" aria-modal="true">
+        <div class="drawer-content">
+          <header class="trace-head">
+            <div class="trace-head-main">
+              <div class="eyebrow">
+                <span class="trace-live" :class="{ off: !traceIsLive }"></span>WORKER TRACE
+              </div>
+              <h3>{{ traceWorkerLive?.host || "执行轨迹" }}</h3>
+              <p class="trace-meta">
+                <span class="trace-round-pill">R{{ traceWorkerLive?.round || 0 }}</span>
+                <span class="trace-elapsed">{{ elapsed(traceWorkerLive?.started_at) }}</span>
+                <span v-if="traceWorkerLive?.action" class="trace-action">{{ traceWorkerLive.action }}</span>
+                <span class="trace-state" :class="traceIsLive ? 'live' : 'ended'">{{ traceIsLive ? "实时" : "已结束" }}</span>
+              </p>
+            </div>
+            <button type="button" class="trace-close" @click="closeWorkerTrace" aria-label="关闭" title="关闭">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+            </button>
+          </header>
+
+          <div v-if="!readonly" class="trace-directive">
+            <label>人工实时指令（下一轮 LLM 前注入）</label>
+            <textarea v-model="directiveText" rows="3"
+              placeholder="例如：优先验证 /api/user/list 的越权；不要再扫目录，直接打 IDOR"></textarea>
+            <button type="button" class="primary" :disabled="directiveSending || !directiveText.trim()"
+              @click="sendDirective">
+              {{ directiveSending ? "发送中…" : "注入指令" }}
+            </button>
+          </div>
+
+          <div class="trace-list">
+            <div v-if="traceLoading && !traceEvents.length" class="empty sm">加载轨迹…</div>
+            <div v-else-if="!traceEvents.length" class="empty sm">{{ traceIsLive ? "暂无轨迹（worker 运行中，产生工具调用后自动刷新）" : "该 worker 已结束，工具/思考明细已归档清理（仅保留关键节点）" }}</div>
+            <TransitionGroup v-else tag="div" name="trace" class="trace-timeline" appear>
+              <div v-for="ev in traceEvents" :key="evKey(ev)" class="trace-row" :class="evCat(ev)">
+                <span class="trace-node"><i class="trace-glyph">{{ evIcon(evCat(ev)) }}</i></span>
+                <div class="trace-body">
+                  <span class="trace-msg">{{ ev._text || ev.message || ev.kind }}</span>
+                  <span class="trace-kind">{{ ev.kind }}</span>
+                </div>
+                <span class="trace-time">
+                  <span v-if="ev.round" class="trace-round">R{{ ev.round }}</span>{{ evTime(ev) }}
+                </span>
+              </div>
+            </TransitionGroup>
+          </div>
+        </div>
+      </aside>
     </div>
 
     <div v-if="toastMsg" class="toast">{{ toastMsg }}</div>

@@ -150,8 +150,7 @@ const form = reactive({
   max_pages: 20,
   page_size: 100,
   default_intent_mode: "",
-  default_engine: "",
-  concurrency: 3,
+  default_engine: "",  concurrency: 3,
   skip_score_threshold: -10,
   worker_prompt_version: "legacy",
   proxy_ssh_servers: "",
@@ -166,7 +165,6 @@ const availableEngines = ref([]);
 
 // 模型计价配置：[{model, input, output, cache_hit}]
 const pricingEntries = ref([]);
-
 function toast(m) {
   toastMsg.value = m;
   setTimeout(() => (toastMsg.value = ""), 2600);
@@ -378,8 +376,16 @@ function resultText(item) {
   if (item.model) parts.push(item.model);
   if (item.latency_ms) parts.push(`${item.latency_ms}ms`);
   if (item.ok && item.reply) parts.push(`reply: ${item.reply}`);
+  if (item.ok && item.tool_calling) {
+    const tc = {
+      yes: "工具调用 ✓",
+      no: "工具调用 ✗ 不支持原生 function calling（系统会自动用提示词模拟兜底；如仍异常可设 AUTOHUNTER_TOOL_COMPAT=prompt）",
+      unknown: "工具调用 ? 未检测到（若挖洞全程不调用工具，可设 AUTOHUNTER_TOOL_COMPAT=prompt 强制模拟）",
+    };
+    parts.push(tc[item.tool_calling] || "");
+  }
   if (!item.ok && item.error) parts.push(item.error);
-  return parts.join(" · ");
+  return parts.filter(Boolean).join(" · ");
 }
 
 function applyLlmHealthResults(results = []) {
@@ -557,8 +563,7 @@ async function load() {
     form.max_pages = s.fofa?.max_pages ?? 20;
     form.page_size = s.fofa?.page_size ?? 100;
     form.default_intent_mode = s.fofa?.default_intent_mode || "";
-    form.default_engine = s.defaults?.engine || "";
-    form.concurrency = s.defaults?.concurrency ?? 3;
+    form.default_engine = s.defaults?.engine || "";    form.concurrency = s.defaults?.concurrency ?? 3;
     form.skip_score_threshold = s.defaults?.skip_score_threshold ?? -10;
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
     form.proxy_ssh_servers = s.proxy?.ssh_servers || "";
@@ -656,6 +661,7 @@ async function save({ silent = false } = {}) {
         page_size: Number(form.page_size),
         default_intent_mode: form.default_intent_mode,
       },
+      engines: {},
       defaults: {
         concurrency: Number(form.concurrency),
         skip_score_threshold: Number(form.skip_score_threshold),
@@ -824,7 +830,7 @@ onUnmounted(() => {
     <header class="page-head">
       <h2>系统配置</h2>
       <p class="page-sub">
-        全局默认 LLM / 搜索引擎 / 调度参数。改动后约 1 秒自动保存；新建任务留空时会使用此处配置，任务内填写可单独覆盖。
+        全局默认 LLM / 资产测绘引擎 / 调度参数。改动后约 1 秒自动保存；新建任务留空时会使用此处配置，任务内填写可单独覆盖。
         <span v-if="meta.updated_at" class="settings-updated">上次保存 {{ meta.updated_at?.slice(0, 19).replace("T", " ") }}</span>
       </p>
     </header>
@@ -871,8 +877,7 @@ onUnmounted(() => {
             <span>{{ eng.display_name }}</span>
             <b>{{ form.default_engine === eng.name ? "默认" : "" }}</b>
           </div>
-          <i :class="{ on: engineForm[eng.name]?.key_set }">{{ engineForm[eng.name]?.key_set ? "key set" : "no key" }}</i>
-        </div>
+          <i :class="{ on: engineForm[eng.name]?.key_set }">{{ engineForm[eng.name]?.key_set ? "key set" : "no key" }}</i>        </div>
         <dl class="settings-facts">
           <div>
             <dt>任务默认并发</dt>
@@ -1066,8 +1071,8 @@ onUnmounted(() => {
 
         <fieldset class="settings-block">
           <legend>
-            <span>搜索引擎</span>
-            <small>Collector 使用的测绘引擎 API 密钥</small>
+            <span>资产测绘</span>
+            <small>多引擎搜集默认；创建任务可选引擎，Key 在此统一配置</small>
           </legend>
           <div v-for="eng in availableEngines" :key="eng.name" class="engine-config-item">
             <div class="engine-config-head">
@@ -1079,9 +1084,9 @@ onUnmounted(() => {
                 <input v-model="engineForm[eng.name].key" type="password"
                   :placeholder="engineForm[eng.name]?.key_set ? '已配置，留空不修改' : `${eng.display_name} Key`" />
               </label>
-              <label class="full">API 端点
+              <label class="full">API 端点（可选）
                 <input v-model="engineForm[eng.name].base_url"
-                  :placeholder="`留空使用默认地址`" />
+                  :placeholder="eng.name === 'fofa' ? 'https://fofa.info' : '留空用官方默认'" />
               </label>
             </div>
             <div class="settings-test">
@@ -1095,15 +1100,8 @@ onUnmounted(() => {
               </span>
             </div>
           </div>
-        </fieldset>
-
-        <fieldset class="settings-block">
-          <legend>
-            <span>Collector 默认参数</span>
-            <small>资产搜集的分页与默认引擎</small>
-          </legend>
-          <div class="settings-grid">
-            <label>默认搜索引擎
+          <div class="settings-grid" style="margin-top: 14px">
+            <label class="full">默认搜索引擎
               <select v-model="form.default_engine">
                 <option value="">自动（FOFA）</option>
                 <option v-for="eng in availableEngines" :key="eng.name" :value="eng.name">
@@ -1111,17 +1109,18 @@ onUnmounted(() => {
                 </option>
               </select>
             </label>
+            <p class="field-hint full">新建任务「搜索引擎」留空时使用此项。任务里仍可临时换引擎。</p>
             <label>默认最大页数 <input v-model="form.max_pages" type="number" min="1" /></label>
             <label>每页条数 <input v-model="form.page_size" type="number" min="1" /></label>
             <label class="full">默认搜集方式
               <select v-model="form.default_intent_mode">
                 <option value="">自动判断</option>
-                <option value="syntax">查询语法（FOFA 或引擎原生均可）</option>
+                <option value="syntax">查询语法（FOFA 语法或当前引擎原生均可）</option>
                 <option value="intent">自然语言意图</option>
               </select>
             </label>
+            <p class="field-hint full">分页与搜集方式对当前选用的测绘引擎生效，不限于 FOFA。</p>
           </div>
-          <p class="field-hint full">新建任务时默认使用的搜索引擎和分页参数，可在任务高级配置中单独覆盖。</p>
         </fieldset>
 
         <fieldset class="settings-block">
