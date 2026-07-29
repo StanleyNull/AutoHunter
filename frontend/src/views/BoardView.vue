@@ -1609,7 +1609,7 @@ function parseEventTs(ts) {
       @close="drawerId = null" @updated="onDrawerUpdated" @toast="toast" />
 
     <!-- Worker 执行轨迹抽屉 -->
-    <div v-if="traceOpen" class="drawer-mask" @click.self="closeWorkerTrace">
+    <div v-if="traceOpen" class="drawer-mask">
       <aside class="drawer open worker-trace-drawer" role="dialog" aria-modal="true">
         <div class="drawer-content">
           <header class="trace-head">
