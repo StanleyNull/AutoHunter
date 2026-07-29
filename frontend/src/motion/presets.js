@@ -73,9 +73,10 @@ export function highlightChanged(elements, motion) {
     translateY: [-6, 0],
     boxShadow: [
       "0 0 0 0 rgba(85,220,255,0)",
-      "0 0 0 1px rgba(85,220,255,.8)",
+      "0 0 0 1px rgba(102,222,255,.95), 0 0 30px rgba(85,220,255,.52)",
       "0 0 0 0 rgba(85,220,255,0)",
     ],
+    scale: [0.992, 1.008, 1],
     duration: motionTokens.emphasis,
     easing: motionTokens.easing,
   });

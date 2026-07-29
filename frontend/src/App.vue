@@ -110,7 +110,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="orbital-atmosphere" aria-hidden="true"><i></i><i></i><i></i></div>
+  <div class="orbital-atmosphere cyber-atmosphere" aria-hidden="true"><i></i><i></i><i></i></div>
 
   <header class="topbar">
     <div class="topbar-row">
@@ -122,6 +122,10 @@ onUnmounted(() => {
         </span>
       </div>
       <div class="topbar-tools">
+        <span class="system-live" aria-label="系统实时在线">
+          <i class="system-live-dot" aria-hidden="true"></i>
+          实时在线
+        </span>
         <span v-if="authReadyRef && authRoleRef === 'none'" class="readonly-badge unauth-badge">未认证</span>
         <span v-else-if="authRoleRef === 'readonly'" class="readonly-badge">只读</span>
         <span v-else-if="authRoleRef === 'observer'" class="readonly-badge">观摩</span>

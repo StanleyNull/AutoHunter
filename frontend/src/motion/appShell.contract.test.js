@@ -17,3 +17,11 @@ describe("应用壳路由动效契约", () => {
     expect(appSource).toContain("revealPage(root, motion);");
   });
 });
+
+describe("cyber command shell", () => {
+  it("renders the cyber atmosphere and live system state", () => {
+    expect(appSource).toContain('class="orbital-atmosphere cyber-atmosphere"');
+    expect(appSource).toContain('class="system-live"');
+    expect(appSource).toContain('class="system-live-dot"');
+  });
+});

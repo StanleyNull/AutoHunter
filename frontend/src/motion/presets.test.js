@@ -1,5 +1,5 @@
 ﻿import { describe, expect, it, vi } from "vitest";
-import { revealPage, waitForMotion } from "./presets.js";
+import { highlightChanged, revealPage, waitForMotion } from "./presets.js";
 import { motionTokens } from "./tokens.js";
 
 describe("waitForMotion", () => {
@@ -27,4 +27,22 @@ it("halves and caps page staggering on compact viewports", () => {
   const [, parameters] = motion.run.mock.calls[0];
   expect(parameters.delay(elements[12], 12, elements)).toBe((motionTokens.itemDelay / 2) * 8);
   globalThis.window = originalWindow;
+});
+
+describe("highlightChanged", () => {
+  it("adds cyber emphasis before clearing the changed marker", async () => {
+    const classList = { add: vi.fn(), remove: vi.fn() };
+    const element = { getClientRects: () => [{}], classList };
+    const animation = { finished: Promise.resolve() };
+    const motion = { run: vi.fn(() => animation) };
+
+    highlightChanged([element], motion);
+
+    expect(classList.add).toHaveBeenCalledWith("motion-changed");
+    expect(motion.run.mock.calls[0][1].scale).toEqual([0.992, 1.008, 1]);
+
+    await animation.finished;
+    await Promise.resolve();
+    expect(classList.remove).toHaveBeenCalledWith("motion-changed");
+  });
 });

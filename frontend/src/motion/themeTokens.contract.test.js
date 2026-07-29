@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+﻿import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -24,5 +24,11 @@ describe("orbital glass theme tokens", () => {
     ]) {
       expect(darkTheme).toContain(token);
     }
+  });
+  it("uses high-contrast cyber command tokens in the default dark theme", () => {
+    expect(darkTheme).toContain("--orbital-void: oklch(12% 0.035 258)");
+    expect(darkTheme).toContain("--orbital-border: oklch(78% 0.16 225 / 0.42)");
+    expect(darkTheme).toContain("--orbital-glow: oklch(76% 0.2 225 / 0.24)");
+    expect(darkTheme).toContain("--orbital-grid: oklch(72% 0.13 230 / 0.1)");
   });
 });
