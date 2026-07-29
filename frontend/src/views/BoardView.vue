@@ -497,6 +497,10 @@ const traceIsLive = computed(() => {
   const w = traceWorker.value;
   return !!w && liveWorkers.value.some((x) => x.target_id === w.target_id);
 });
+// 该目标是否仍有活态 worker：用于区分「运行中暂未产出」与「已结束、明细已清理」两种空态。
+function targetIsLive(tid) {
+  return !!tid && liveWorkers.value.some((w) => w.target_id === tid);
+}
 
 // kind → 语义类别：决定时间线节点的颜色与图标，让长轨迹一眼可扫。
 const _EV_CAT = {
@@ -1485,7 +1489,7 @@ function parseEventTs(ts) {
             >
               <div v-if="streamDetailLoading[ev.target_id]" class="ev-detail-row muted">加载细节…</div>
               <div v-else-if="!detailsForTarget(ev.target_id).length" class="ev-detail-row muted">
-                暂无工具/思考细节（等待 worker 产出或稍后重试）
+                {{ targetIsLive(ev.target_id) ? "暂无工具/思考细节（worker 运行中，稍等产出）" : "该 worker 已结束，工具/思考明细已归档清理（仅保留关键节点）" }}
               </div>
               <div
                 v-for="(d, di) in detailsForTarget(ev.target_id)"
@@ -1694,7 +1698,9 @@ function parseEventTs(ts) {
                 <span class="trace-state" :class="traceIsLive ? 'live' : 'ended'">{{ traceIsLive ? "实时" : "已结束" }}</span>
               </p>
             </div>
-            <button type="button" class="trace-close" @click="closeWorkerTrace" aria-label="关闭">×</button>
+            <button type="button" class="trace-close" @click="closeWorkerTrace" aria-label="关闭" title="关闭">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+            </button>
           </header>
 
           <div v-if="!readonly" class="trace-directive">
@@ -1709,7 +1715,7 @@ function parseEventTs(ts) {
 
           <div class="trace-list">
             <div v-if="traceLoading && !traceEvents.length" class="empty sm">加载轨迹…</div>
-            <div v-else-if="!traceEvents.length" class="empty sm">暂无轨迹（等 worker 产生工具调用后刷新）</div>
+            <div v-else-if="!traceEvents.length" class="empty sm">{{ traceIsLive ? "暂无轨迹（worker 运行中，产生工具调用后自动刷新）" : "该 worker 已结束，工具/思考明细已归档清理（仅保留关键节点）" }}</div>
             <TransitionGroup v-else tag="div" name="trace" class="trace-timeline" appear>
               <div v-for="ev in traceEvents" :key="evKey(ev)" class="trace-row" :class="evCat(ev)">
                 <span class="trace-node"><i class="trace-glyph">{{ evIcon(evCat(ev)) }}</i></span>

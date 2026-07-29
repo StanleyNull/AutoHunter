@@ -1985,13 +1985,15 @@ main {
 .trace-state.live  { color: var(--ok);    background: var(--ok-bg); }
 .trace-state.ended { color: var(--faint); background: var(--surface-2); }
 .trace-close {
-  flex: none; width: 30px; height: 30px; display: grid; place-items: center;
-  border: 1px solid var(--border); background: var(--surface-2);
-  border-radius: 8px; cursor: pointer; color: var(--ink-2);
-  font-size: 19px; line-height: 1;
-  transition: background .15s ease, color .15s ease, border-color .15s ease;
+  flex: none; width: 32px; height: 32px; display: grid; place-items: center;
+  border: none; background: transparent; border-radius: 50%;
+  cursor: pointer; color: var(--muted); padding: 0;
+  transition: background .15s ease, color .15s ease;
 }
-.trace-close:hover { background: var(--surface-3); color: var(--ink); border-color: var(--faint); }
+.trace-close svg { width: 16px; height: 16px; display: block; }
+.trace-close:hover { background: var(--surface-3); color: var(--ink); }
+.trace-close:active { background: var(--surface-2); }
+.trace-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── 人工指令 ── */
 .trace-directive {
