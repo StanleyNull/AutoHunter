@@ -823,7 +823,7 @@ async function submitCredentials(tid) {
   }
 }
 
-async function skipTarget(tid) {
+async function skipPendingCredTarget(tid) {
   if (credWorking.value) return;
   if (!window.confirm("确认跳过此目标？跳过后将不再自动测试此目标。")) return;
   credWorking.value = true;
@@ -2101,7 +2101,8 @@ function fmtTime(iso) {
         <h3>重置失败目标</h3>
         <p>仅重置因以下原因变为「硬骨头」的目标，重新入队探活：<br/>
         • 派发前探活失败（死链/连接超时/无响应）<br/>
-        • Worker 连续网络超时/工具失败后系统自动收敛</p>
+        • Worker 连续网络超时/工具失败后系统自动收敛<br/>
+        • 自动重测确认不可达（本机与代理均不通 / 多轮休眠仍不可达，可能只是维护）</p>
         <p>已发现的漏洞将作为去重屏障保留。请在任务空闲或停止后操作。</p>
         <div class="modal-actions">
           <button @click="showResetFailedConfirm = false">取消</button>
@@ -2307,7 +2308,7 @@ function fmtTime(iso) {
                   <button class="primary" @click="submitCredentials(targetDetailData.target.id)" :disabled="credWorking">
                     {{ credWorking ? "提交中..." : "提交凭证并复测" }}
                   </button>
-                  <button @click="skipTarget(targetDetailData.target.id)" :disabled="credWorking">跳过此目标</button>
+                  <button @click="skipPendingCredTarget(targetDetailData.target.id)" :disabled="credWorking">跳过此目标</button>
                 </div>
               </div>
             </div>

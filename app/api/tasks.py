@@ -1368,20 +1368,26 @@ async def reset_task_progress(task_id: str, request: Request,
     }
 
 
-# ===== 重置失败目标（探活失败 / 系统自动收敛）=====
+# ===== 重置失败目标（探活失败 / 系统自动收敛 / 重测确认不可达）=====
+# 注意：「重测确认 / 重测3轮仍不可达 / 重测休眠耗尽」故意不在
+# orchestrator._RETEST_DEAD_PATTERNS 中（避免自动重测死循环），
+# 但手动重置应纳入——站点可能在维护，有再测价值。
 _FAILED_DEAD_PATTERNS = (
     "探活失败", "死链", "连接超时", "系统自动收敛", "连续",
+    "重测确认", "重测3轮仍不可达", "重测休眠耗尽",
 )
 
 
 @router.post("/{task_id}/reset-failed")
 async def reset_failed_targets(task_id: str, request: Request,
                                session: AsyncSession = Depends(get_session)):
-    """重置失败目标：仅重置 dead 状态中因探活失败或系统自动收敛的目标。
+    """重置失败目标：重置 dead 状态中因探活失败、系统自动收敛或重测确认不可达的目标。
 
     匹配 dead_reason 包含以下关键词的目标：
     - 探活失败 / 死链 / 连接超时（派发前探活不通）
     - 系统自动收敛 / 连续...（Worker 连续网络超时/工具失败后自动收敛）
+    - 重测确认 / 重测3轮仍不可达 / 重测休眠耗尽（自动重测最终判不可达；
+      不触发自动重测，但手动重置可再入队——维护期结束后有再测价值）
 
     要求任务处于 stopped/idle/paused 状态，避免与自动重测流程冲突。
     保留 findings 作为 dedup 屏障。
@@ -1423,7 +1429,7 @@ async def reset_failed_targets(task_id: str, request: Request,
         tgt.ip_ban_confirmed = False
         tgt.deepen_context = None
         tgt.priority_score = (tgt.priority_score or 0) + 50.0
-        tgt.priority_reason = "[失败重置] 探活失败/系统收敛目标，重新入队探活"
+        tgt.priority_reason = "[失败重置] 探活失败/系统收敛/重测不可达目标，重新入队探活"
         reset_count += 1
 
     if reset_count:
@@ -1434,7 +1440,7 @@ async def reset_failed_targets(task_id: str, request: Request,
         session.add(TaskEvent(
             task_id=task_id, agent="orchestrator", kind="task_reset_failed",
             level="info",
-            message=f"重置 {reset_count} 个失败目标入队（探活失败/系统自动收敛），"
+            message=f"重置 {reset_count} 个失败目标入队（探活失败/系统自动收敛/重测不可达），"
                     f"跳过 {skipped_deepcapped} 个已达深挖上限的目标",
             payload={"reset_targets": reset_count, "skipped_deepcapped": skipped_deepcapped},
         ))

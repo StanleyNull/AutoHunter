@@ -1164,6 +1164,7 @@ main {
 .pricing-del:hover {
   color: var(--danger);
   border-color: var(--danger);
+}
 .field-hint.warn-hint { color: var(--warn); }
 .auth-bindings {
   margin: 8px 0 12px;

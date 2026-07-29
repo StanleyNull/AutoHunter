@@ -810,7 +810,10 @@ class TaskRunner:
         )).scalar() or 0
 
     # ===== 失败目标自动重测生命周期 =====
-    # 匹配失败 dead_reason 的关键词（与 reset-failed API 保持一致）
+    # 匹配失败 dead_reason 的关键词。
+    # 注意：手动「重置失败目标」API（tasks._FAILED_DEAD_PATTERNS）额外包含
+    # 「重测确认 / 重测3轮仍不可达 / 重测休眠耗尽」，以便用户手动再测维护期站点；
+    # 此处故意不包含这些词，否则自动重测刚标 dead 的目标会被立刻再选中形成死循环。
     _RETEST_DEAD_PATTERNS = ("探活失败", "死链", "连接超时", "系统自动收敛", "连续")
     # 有代理模式递增休眠时长（小时）
     _RETEST_SLEEP_HOURS = [4, 8, 24]
@@ -1065,7 +1068,8 @@ class TaskRunner:
                 tgt.heartbeat_at = None
                 # 注意：dead_reason 不得命中 _RETEST_DEAD_PATTERNS（如「探活失败」），
                 # 否则重测刚标 dead 的目标会被下一轮 retest_start 再次选中，形成死循环。
-                # 用「重测确认不可达」语义，不匹配重测模式词，避免反复重测。
+                # 用「重测确认不可达」语义，不匹配自动重测模式词。
+                # 手动「重置失败目标」会匹配「重测确认」并允许用户再入队。
                 tgt.dead_reason = "重测确认：本机与所有代理服务器均不可达，服务已下线"
                 await self._log(
                     session, "orchestrator", "retest_dead",
