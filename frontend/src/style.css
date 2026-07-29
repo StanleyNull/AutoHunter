@@ -45,6 +45,13 @@
   --shadow:    0 1px 2px oklch(0% 0 0 / 0.4), 0 4px 16px oklch(0% 0 0 / 0.28);
   --shadow-lg: 0 8px 40px oklch(0% 0 0 / 0.5);
   --line: oklch(72% 0.12 235 / 0.08);
+  --orbital-void: oklch(16% 0.022 255);
+  --orbital-glass: oklch(24% 0.024 255 / 0.72);
+  --orbital-glass-strong: oklch(28% 0.028 255 / 0.9);
+  --orbital-border: oklch(72% 0.1 235 / 0.24);
+  --orbital-highlight: oklch(80% 0.1 235 / 0.2);
+  --orbital-grid: oklch(72% 0.08 240 / 0.055);
+  --orbital-glow: oklch(72% 0.14 240 / 0.12);
   --radius: 10px;
   --radius-sm: 7px;
 
@@ -88,6 +95,13 @@
   --shadow:    0 1px 2px oklch(0% 0 0 / 0.06), 0 4px 16px oklch(0% 0 0 / 0.08);
   --shadow-lg: 0 8px 40px oklch(0% 0 0 / 0.14);
   --line: oklch(54% 0.14 250 / 0.08);
+  --orbital-void: oklch(94% 0.02 255);
+  --orbital-glass: oklch(100% 0.012 255 / 0.72);
+  --orbital-glass-strong: oklch(99% 0.016 255 / 0.9);
+  --orbital-border: oklch(56% 0.09 235 / 0.2);
+  --orbital-highlight: oklch(72% 0.1 235 / 0.25);
+  --orbital-grid: oklch(52% 0.08 240 / 0.055);
+  --orbital-glow: oklch(58% 0.14 240 / 0.1);
 }
 
 * { box-sizing: border-box; }
@@ -123,6 +137,64 @@ body::before {
 }
 
 ::selection { background: var(--accent-bg); }
+
+#app {
+  position: relative;
+  isolation: isolate;
+  min-height: 100svh;
+  overflow-x: clip;
+}
+
+.orbital-atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 18% 16%, var(--orbital-glow), transparent 22rem),
+    radial-gradient(circle at 84% 10%, var(--orbital-glow), transparent 26rem);
+}
+.orbital-atmosphere i {
+  position: absolute;
+  display: block;
+  border: 1px solid var(--orbital-border);
+  border-radius: 50%;
+  box-shadow: inset 0 0 48px var(--orbital-glow), 0 0 36px var(--orbital-glow);
+  transform-origin: center;
+  animation: orbital-drift 24s linear infinite;
+}
+.orbital-atmosphere i:nth-child(1) { width: 52rem; height: 52rem; top: -29rem; right: -20rem; }
+.orbital-atmosphere i:nth-child(2) { width: 36rem; height: 36rem; bottom: -24rem; left: -12rem; animation-duration: 32s; animation-direction: reverse; }
+.orbital-atmosphere i:nth-child(3) { width: 18rem; height: 18rem; top: 38%; left: 42%; opacity: .5; animation-duration: 20s; }
+@keyframes orbital-drift { to { transform: rotate(360deg); } }
+
+.glass-panel {
+  background: var(--orbital-glass);
+  border: 1px solid var(--orbital-border);
+  box-shadow: 0 18px 48px oklch(0% 0 0 / 0.18), inset 0 1px 0 var(--orbital-highlight);
+  backdrop-filter: blur(18px) saturate(125%);
+}
+
+[data-motion-enter] { will-change: transform, opacity; }
+.motion-changed {
+  position: relative;
+  border-color: color-mix(in oklch, var(--accent) 56%, var(--border)) !important;
+}
+.motion-changed::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(100deg, transparent 24%, var(--orbital-highlight), transparent 76%);
+  animation: motion-scan 560ms cubic-bezier(.22, 1, .36, 1) both;
+}
+@keyframes motion-scan {
+  from { opacity: 0; transform: translateX(-22%); }
+  42% { opacity: 1; }
+  to { opacity: 0; transform: translateX(22%); }
+}
 
 /* 标准滚动条：克制，不重造控件 */
 ::-webkit-scrollbar { width: 11px; height: 11px; }
@@ -285,7 +357,7 @@ nav { display: flex; gap: 2px; }
   background: oklch(0% 0 0 / 0.55);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
-  animation: token-backdrop-in 0.18s ease;
+  animation: none;
 }
 .token-modal {
   width: min(420px, 100%);
@@ -294,7 +366,7 @@ nav { display: flex; gap: 2px; }
   border-radius: var(--radius);
   padding: 22px 22px 18px;
   box-shadow: var(--shadow-lg);
-  animation: token-modal-in 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .token-modal-backdrop, .token-modal { animation: none; }
@@ -344,10 +416,13 @@ nav { display: flex; gap: 2px; }
 .mobile-only-nav { display: none; }
 .desktop-only-nav { display: flex; }
 
-main {
+main,
+.app-main {
   max-width: 1360px; margin: 0 auto;
   padding: 30px 34px calc(42px + env(safe-area-inset-bottom, 0px));
 }
+.app-main { position: relative; z-index: 1; min-width: 0; }
+[data-motion-page] { min-width: 0; }
 .view { animation: fade .2s ease; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 .page-head { margin-bottom: 20px; }
@@ -2149,11 +2224,11 @@ main {
 .ks-invalid:hover { background: var(--danger); color: var(--on-accent); }
 
 /* ---------- 抽屉：实底面板，遮罩轻暗（非毛玻璃） ---------- */
-.drawer-mask { position: fixed; inset: 0; background: oklch(0% 0 0 / 0.5); z-index: var(--z-backdrop); animation: fade .15s ease; }
+.drawer-mask { position: fixed; inset: 0; background: oklch(0% 0 0 / 0.5); z-index: var(--z-backdrop); animation: none; }
 .drawer {
   position: fixed; top: 0; right: 0; height: 100%; width: min(900px, 94vw); overflow: hidden;
   background: var(--surface); border-left: 1px solid var(--border); z-index: var(--z-drawer);
-  transform: translateX(100%); transition: transform .24s cubic-bezier(.22,1,.36,1);
+  transform: translateX(100%); transition: none;
   box-shadow: var(--shadow-lg); visibility: hidden;
 }
 .drawer.open { transform: translateX(0); visibility: visible; }
@@ -2887,7 +2962,7 @@ main {
     border-radius: 18px 18px 0 0;
     padding: 20px 16px calc(16px + env(safe-area-inset-bottom, 0px));
     border-bottom: none;
-    animation: sheet-up .24s cubic-bezier(.22, 1, .36, 1);
+    animation: none;
   }
   @keyframes sheet-up {
     from { transform: translateY(100%); }
@@ -2964,6 +3039,7 @@ main {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
   .token-modal { animation: none; }
+  .orbital-atmosphere, .motion-scan, .motion-changed::after { animation: none !important; }
 }
 
 /* ============ 顶部入口按钮组 + 情报库入口 ============ */

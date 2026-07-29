@@ -19,3 +19,6 @@ node_modules/
 *.db-wal
 *.db-shm
 *.db-journal
+
+# 本地头脑风暴视觉稿与会话数据
+.superpowers/

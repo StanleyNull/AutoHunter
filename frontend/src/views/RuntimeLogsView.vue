@@ -1,12 +1,16 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { api } from "../api.js";
 import { fmtLocalTime } from "../format.js";
+import { createChangeTracker } from "../motion/changeTracker.js";
+import { revealItems } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const stats = ref({ total: 0, errors: 0, warns: 0, by_agent: {} });
 const rows = ref([]);
 const initialLoading = ref(true);
 const refreshing = ref(false);
+const hasLoaded = ref(false);
 const level = ref("all");
 const agent = ref("all");
 const searchDraft = ref("");
@@ -16,6 +20,33 @@ const page = ref(0);
 const pageSize = 100;
 const hasMore = ref(false);
 let searchTimer = null;
+const pageRoot = ref(null);
+const motion = useMotion();
+const tracker = createChangeTracker({
+  getId: (row) => String(row?.id ?? `${row?.task_id || ""}|${row?.ts || ""}|${row?.kind || ""}|${row?.message || ""}`),
+  getSignature: (row) => `${row.level}|${row.message}|${row.ts}`,
+});
+let motionSeeded = false;
+
+function resetRowMotion() {
+  tracker.reset();
+  motionSeeded = false;
+}
+
+async function trackRows() {
+  if (!motionSeeded) {
+    tracker.seed(rows.value);
+    motionSeeded = true;
+    return;
+  }
+
+  const changedIds = tracker.diff(rows.value);
+  if (!changedIds.size) return;
+  await nextTick();
+  const changedElements = [...(pageRoot.value?.querySelectorAll('[data-motion-area="runtime-logs"][data-motion-id]') || [])]
+    .filter((element) => changedIds.has(element.dataset.motionId));
+  revealItems(changedElements, motion);
+}
 
 const agentOptions = computed(() => {
   const names = Object.keys(stats.value.by_agent || {}).sort();
@@ -27,7 +58,7 @@ async function loadStats() {
 }
 
 async function loadList() {
-  if (!rows.value.length) initialLoading.value = true;
+  if (!hasLoaded.value) initialLoading.value = true;
   else refreshing.value = true;
   try {
     const res = await api.runtimeLogs(level.value, agent.value, searchText.value, {
@@ -35,15 +66,18 @@ async function loadList() {
       offset: page.value * pageSize,
     });
     rows.value = Array.isArray(res) ? res : (res.items || []);
+    await trackRows();
     total.value = Array.isArray(res) ? rows.value.length : (res.total || 0);
     hasMore.value = !Array.isArray(res) && !!res.has_more;
   } finally {
     initialLoading.value = false;
     refreshing.value = false;
+    hasLoaded.value = true;
   }
 }
 
-async function reload() {
+async function reload({ resetMotion = false } = {}) {
+  if (resetMotion) resetRowMotion();
   page.value = 0;
   await Promise.all([loadStats(), loadList()]);
 }
@@ -51,12 +85,14 @@ async function reload() {
 function nextPage() {
   if (!hasMore.value || refreshing.value) return;
   page.value += 1;
+  resetRowMotion();
   loadList();
 }
 
 function prevPage() {
   if (page.value <= 0 || refreshing.value) return;
   page.value -= 1;
+  resetRowMotion();
   loadList();
 }
 
@@ -73,12 +109,13 @@ function payloadText(payload) {
   catch { return String(payload || ""); }
 }
 
-watch([level, agent], reload);
+watch([level, agent], () => reload({ resetMotion: true }));
 watch(searchDraft, (v) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     searchText.value = v.trim();
     page.value = 0;
+    resetRowMotion();
     loadList();
   }, 180);
 });
@@ -87,10 +124,10 @@ onMounted(reload);
 </script>
 
 <template>
-  <section class="view runtime-logs-view" :class="{ 'is-refreshing': refreshing }">
+  <section ref="pageRoot" class="view runtime-logs-view" data-motion-page :class="{ 'is-refreshing': refreshing }">
     <div v-if="refreshing && !initialLoading" class="view-progress" aria-hidden="true"><i></i></div>
 
-    <header class="page-head split">
+    <header class="page-head split" data-motion-enter>
       <div>
         <h2>全局运行异常 <span class="intel-chip">RUNTIME</span></h2>
         <p class="page-sub">集中查看跨任务 LLM / reviewer / worker / orchestrator 异常与安全收敛事件。</p>
@@ -98,30 +135,30 @@ onMounted(reload);
       <router-link class="head-action" to="/">返回任务</router-link>
     </header>
 
-    <div class="intel-dash">
-      <div class="dash-card hero">
+    <div class="intel-dash" data-motion-enter>
+      <div class="dash-card hero" data-motion-enter>
         <span class="dash-k">异常事件</span>
         <b class="dash-v">{{ stats.total }}</b>
         <span class="dash-sub">Error {{ stats.errors }} · Warn {{ stats.warns }}</span>
       </div>
-      <div class="dash-card danger">
+      <div class="dash-card danger" data-motion-enter>
         <span class="dash-icon">!</span>
         <b class="dash-v">{{ stats.errors }}</b>
         <span class="dash-k">错误</span>
       </div>
-      <div class="dash-card warn">
+      <div class="dash-card warn" data-motion-enter>
         <span class="dash-icon">⚠</span>
         <b class="dash-v">{{ stats.warns }}</b>
         <span class="dash-k">警告</span>
       </div>
-      <div class="dash-card info">
+      <div class="dash-card info" data-motion-enter>
         <span class="dash-icon">∑</span>
         <b class="dash-v">{{ Object.keys(stats.by_agent || {}).length }}</b>
         <span class="dash-k">Agent 来源</span>
       </div>
     </div>
 
-    <div class="intel-toolbar">
+    <div class="intel-toolbar" data-motion-enter>
       <div class="kind-tabs">
         <button v-for="l in ['all','error','warn','info']" :key="l" type="button"
                 class="kind-tab" :class="{ on: level === l }" @click="level = l">
@@ -146,7 +183,9 @@ onMounted(reload);
       <span class="hint">当前筛选条件下没有运行异常事件</span>
     </div>
     <div v-else class="intel-grid runtime-grid">
-      <article v-for="row in rows" :key="row.id" class="intel-row runtime-row" :class="row.level">
+      <article v-for="row in rows" :key="row.id" class="intel-row runtime-row" :class="row.level"
+               data-motion-enter data-motion-area="runtime-logs"
+               :data-motion-id="row.id || `${row.task_id || ''}|${row.ts || ''}|${row.kind || ''}|${row.message || ''}`">
         <span class="ir-kind" :class="row.level">
           <i>{{ row.level === 'error' ? '!' : row.level === 'warn' ? '⚠' : '·' }}</i>{{ row.level || 'info' }}
         </span>

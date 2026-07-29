@@ -1,16 +1,21 @@
 <script setup>
-import { ref, computed, watch } from "vue";
+import { ref, computed, nextTick, watch } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, canWrite, isReadonly } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { CONF, buildEdusrcToolReport, buildReportMd, effectiveSeverity } from "../report.js";
 import { fmtLocalTime } from "../format.js";
+import { enterOverlay, leaveOverlay, waitForMotion } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const props = defineProps({ findingId: String, mode: String, srcType: String }); // mode: view | review | submit | rejected | archived
 const emit = defineEmits(["close", "updated", "toast"]);
 
 const f = ref(null);
+const drawerRoot = ref(null);
+const closing = ref(false);
+const motion = useMotion();
 const editing = ref(false);
 const edit = ref({});
 const userSeverity = ref("");
@@ -24,9 +29,22 @@ const DEFAULT_ASSISTANT_WELCOME = "我可以回答这份报告的证据、危害
 const SEVS = ["严重", "高危", "中危", "低危"];
 const isEnterprise = computed(() => props.srcType === "enterprise");
 
+async function requestClose() {
+  if (!props.findingId || closing.value) return;
+  closing.value = true;
+  await waitForMotion(leaveOverlay(drawerRoot.value, motion, "right"));
+  closing.value = false;
+  emit("close");
+}
+
 watch(() => props.findingId, async (id) => {
   if (!id) { f.value = null; return; }
-  f.value = await api.finding(id);
+  closing.value = false;
+  await nextTick();
+  enterOverlay(drawerRoot.value, motion, "right");
+  const finding = await api.finding(id);
+  if (props.findingId !== id) return;
+  f.value = finding;
   const rv = f.value.review || {};
   const e = rv.user_edits || {};
   edit.value = {
@@ -97,7 +115,7 @@ async function decide(status) {
       ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? "，已断开通杀递归" : ""}`
       : "已驳回");
     emit("updated");
-    emit("close");
+    requestClose();
   } catch (e) {
     emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
   }
@@ -110,7 +128,7 @@ async function submitDeepen() {
     const r = await api.deepen(f.value.id, d);
     emit("toast", r.message || "已打回深挖，目标重新入队");
     emit("updated");
-    emit("close");
+    requestClose();
   } catch (e) {
     emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
   }
@@ -121,7 +139,7 @@ async function markSubmitted() {
     await api.userReview(f.value.id, { submitted: true });
     emit("toast", "已标记为已提交");
     emit("updated");
-    emit("close");
+    requestClose();
   } catch (e) {
     emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
   }
@@ -132,7 +150,7 @@ async function restore() {
     await api.userReview(f.value.id, { user_status: "pending" });
     emit("toast", "已恢复到复审队列");
     emit("updated");
-    emit("close");
+    requestClose();
   } catch (e) {
     emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
   }
@@ -145,7 +163,7 @@ async function restoreArchived() {
     await api.restoreArchived(f.value.id);
     emit("toast", "已恢复到复审队列");
     emit("updated");
-    emit("close");
+    requestClose();
   } catch (e) {
     emit("toast", String(e.message || e).replace(/^\d+\s*/, ""));
   }
@@ -237,7 +255,7 @@ async function askAssistant(preset = "") {
 </script>
 
 <template>
-  <div class="drawer" :class="{ open: !!findingId }">
+  <div ref="drawerRoot" class="drawer" :class="{ open: !!findingId }">
     <div v-if="f" class="drawer-content">
       <div class="md-toolbar">
         <button class="copy" @click="copyMd">复制 Markdown</button>
@@ -245,7 +263,7 @@ async function askAssistant(preset = "") {
         <button v-if="mode === 'review' && !readonly" @click="editing = !editing">{{ editing ? "预览" : "编辑内容" }}</button>
         <span class="sev-pill" :class="effSev">{{ effSev }}</span>
         <span class="grow"></span>
-        <button class="close" @click="emit('close')">×</button>
+        <button class="close" @click="requestClose">×</button>
       </div>
 
       <!-- 编辑模式 -->
@@ -406,5 +424,5 @@ async function askAssistant(preset = "") {
       </div>
     </div>
   </div>
-  <div v-if="findingId" class="drawer-mask" @click="emit('close')"></div>
+  <div v-if="findingId" class="drawer-mask" @click="requestClose"></div>
 </template>

@@ -1,11 +1,15 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { api, canWrite } from "../api.js";
+import { createChangeTracker } from "../motion/changeTracker.js";
+import { highlightChanged } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const stats = ref({ total: 0, by_kind: {}, verified: 0, reused: 0 });
 const rows = ref([]);
 const initialLoading = ref(true);
 const refreshing = ref(false);
+const hasLoaded = ref(false);
 const kind = ref("all");
 const confidence = ref("all");
 const searchDraft = ref("");
@@ -15,6 +19,33 @@ const curatorLoading = ref(false);
 const curatorApplying = ref(false);
 let searchTimer = null;
 const writable = computed(() => canWrite());
+const pageRoot = ref(null);
+const motion = useMotion();
+const tracker = createChangeTracker({
+  getId: (row) => String(row?.id ?? ""),
+  getSignature: (row) => `${row.kind}|${row.source_host}|${row.hit_count}|${row.last_seen}|${row.confidence}|${row.summary}`,
+});
+let motionSeeded = false;
+
+function resetRowMotion() {
+  tracker.reset();
+  motionSeeded = false;
+}
+
+async function trackRows() {
+  if (!motionSeeded) {
+    tracker.seed(rows.value);
+    motionSeeded = true;
+    return;
+  }
+
+  const changedIds = tracker.diff(rows.value);
+  if (!changedIds.size) return;
+  await nextTick();
+  const changedElements = [...(pageRoot.value?.querySelectorAll('[data-motion-area="intel"][data-motion-id]') || [])]
+    .filter((element) => changedIds.has(element.dataset.motionId));
+  highlightChanged(changedElements, motion);
+}
 
 const KIND_META = {
   cred: { label: "凭证", icon: "🔑", hue: "danger" },
@@ -36,13 +67,15 @@ async function loadStats() {
 }
 
 async function loadList() {
-  if (!rows.value.length) initialLoading.value = true;
+  if (!hasLoaded.value) initialLoading.value = true;
   else refreshing.value = true;
   try {
     rows.value = await api.intelList(kind.value, confidence.value, searchText.value, 800);
+    await trackRows();
   } finally {
     initialLoading.value = false;
     refreshing.value = false;
+    hasLoaded.value = true;
   }
 }
 
@@ -124,11 +157,15 @@ async function applyCurator() {
   }
 }
 
-watch([kind, confidence], reload);
+watch([kind, confidence], () => {
+  resetRowMotion();
+  reload();
+});
 watch(searchDraft, (v) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     searchText.value = v.trim();
+    resetRowMotion();
     loadList();
   }, 180);
 });
@@ -137,10 +174,10 @@ onMounted(reload);
 </script>
 
 <template>
-  <section class="view intel-view" :class="{ 'is-refreshing': refreshing }">
+  <section ref="pageRoot" class="view intel-view" data-motion-page :class="{ 'is-refreshing': refreshing }">
     <div v-if="refreshing && !initialLoading" class="view-progress" aria-hidden="true"><i></i></div>
 
-    <header class="page-head split">
+    <header class="page-head split" data-motion-enter>
       <div>
         <h2>全局情报库 <span class="intel-chip">INTEL</span></h2>
         <p class="page-sub">跨任务沉淀的可复用作战情报——凭证 / 打法 / 端点 / 画像，由 worker 自动回写并复用。</p>
@@ -149,14 +186,14 @@ onMounted(reload);
     </header>
 
     <!-- 高级总览仪表 -->
-    <div class="intel-dash">
-      <div class="dash-card hero">
+    <div class="intel-dash" data-motion-enter>
+      <div class="dash-card hero" data-motion-enter>
         <span class="dash-k">情报总量</span>
         <b class="dash-v">{{ stats.total }}</b>
         <span class="dash-sub">已验证 {{ stats.verified }} · 被复用 {{ stats.reused }}</span>
       </div>
       <div v-for="k in ['cred','fingerprint','endpoint','profile']" :key="k"
-           class="dash-card" :class="KIND_META[k].hue"
+           class="dash-card" :class="KIND_META[k].hue" data-motion-enter
            :data-active="kind === k"
            @click="kind = (kind === k ? 'all' : k)">
         <span class="dash-icon">{{ KIND_META[k].icon }}</span>
@@ -166,7 +203,7 @@ onMounted(reload);
     </div>
 
     <!-- 工具条 -->
-    <div class="intel-toolbar">
+    <div class="intel-toolbar" data-motion-enter>
       <div class="kind-tabs">
         <button v-for="t in KIND_TABS" :key="t.id" type="button"
                 class="kind-tab" :class="{ on: kind === t.id }" @click="kind = t.id">
@@ -213,7 +250,8 @@ onMounted(reload);
       <span class="hint">worker 出洞 / 撞库成功后会自动沉淀，越挖越聪明</span>
     </div>
     <div v-else class="intel-grid">
-      <article v-for="row in rows" :key="row.id" class="intel-row" :class="KIND_META[row.kind]?.hue">
+      <article v-for="row in rows" :key="row.id" class="intel-row" :class="KIND_META[row.kind]?.hue"
+               data-motion-enter data-motion-area="intel" :data-motion-id="row.id">
         <span class="ir-kind" :class="KIND_META[row.kind]?.hue">
           <i>{{ KIND_META[row.kind]?.icon }}</i>{{ KIND_META[row.kind]?.label || row.kind }}
         </span>

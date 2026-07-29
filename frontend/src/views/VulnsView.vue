@@ -1,14 +1,18 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
 import { fmtLocalTime } from "../format.js";
+import { createChangeTracker } from "../motion/changeTracker.js";
+import { highlightChanged } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const router = useRouter();
 const stats = ref({ total: 0, submitted: 0, ready: 0, by_severity: {} });
 const rows = ref([]);
 const initialLoading = ref(true);
 const refreshing = ref(false);
+const hasLoaded = ref(false);
 const submitted = ref("all");
 const severity = ref("");
 const searchDraft = ref("");
@@ -18,6 +22,33 @@ const page = ref(0);
 const pageSize = 100;
 const hasMore = ref(false);
 let searchTimer = null;
+const pageRoot = ref(null);
+const motion = useMotion();
+const tracker = createChangeTracker({
+  getId: (row) => String(row?.id ?? ""),
+  getSignature: (row) => `${row.effective_severity}|${row.submitted}|${row.updated_at}|${row.user_reviewed_at}`,
+});
+let motionSeeded = false;
+
+function resetRowMotion() {
+  tracker.reset();
+  motionSeeded = false;
+}
+
+async function trackRows() {
+  if (!motionSeeded) {
+    tracker.seed(rows.value);
+    motionSeeded = true;
+    return;
+  }
+
+  const changedIds = tracker.diff(rows.value);
+  if (!changedIds.size) return;
+  await nextTick();
+  const changedElements = [...(pageRoot.value?.querySelectorAll('[data-motion-area="vulns"][data-motion-id]') || [])]
+    .filter((element) => changedIds.has(element.dataset.motionId));
+  highlightChanged(changedElements, motion);
+}
 
 const SUBMIT_TABS = [
   { id: "all", label: "全部" },
@@ -40,7 +71,7 @@ async function loadStats() {
 }
 
 async function loadList() {
-  if (!rows.value.length) initialLoading.value = true;
+  if (!hasLoaded.value) initialLoading.value = true;
   else refreshing.value = true;
   try {
     const res = await api.vulns(submitted.value, severity.value, searchText.value, {
@@ -48,15 +79,18 @@ async function loadList() {
       offset: page.value * pageSize,
     });
     rows.value = Array.isArray(res) ? res : (res.items || []);
+    await trackRows();
     total.value = Array.isArray(res) ? rows.value.length : (res.total || 0);
     hasMore.value = !Array.isArray(res) && !!res.has_more;
   } finally {
     initialLoading.value = false;
     refreshing.value = false;
+    hasLoaded.value = true;
   }
 }
 
-async function reload() {
+async function reload({ resetMotion = false } = {}) {
+  if (resetMotion) resetRowMotion();
   page.value = 0;
   await Promise.all([loadStats(), loadList()]);
 }
@@ -64,12 +98,14 @@ async function reload() {
 function nextPage() {
   if (!hasMore.value || refreshing.value) return;
   page.value += 1;
+  resetRowMotion();
   loadList();
 }
 
 function prevPage() {
   if (page.value <= 0 || refreshing.value) return;
   page.value -= 1;
+  resetRowMotion();
   loadList();
 }
 
@@ -81,12 +117,13 @@ function openVuln(row) {
   router.push(`/task/${row.task_id}`);
 }
 
-watch([submitted, severity], reload);
+watch([submitted, severity], () => reload({ resetMotion: true }));
 watch(searchDraft, (v) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     searchText.value = v.trim();
     page.value = 0;
+    resetRowMotion();
     loadList();
   }, 180);
 });
@@ -95,10 +132,10 @@ onMounted(reload);
 </script>
 
 <template>
-  <section class="view intel-view" :class="{ 'is-refreshing': refreshing }">
+  <section ref="pageRoot" class="view intel-view" data-motion-page :class="{ 'is-refreshing': refreshing }">
     <div v-if="refreshing && !initialLoading" class="view-progress" aria-hidden="true"><i></i></div>
 
-    <header class="page-head split">
+    <header class="page-head split" data-motion-enter>
       <div>
         <h2>全局漏洞库 <span class="intel-chip">VULN</span></h2>
         <p class="page-sub">跨任务汇总通过人工审核的漏洞——含已提交 SRC 与待提交两类，用于统一归档与复盘。</p>
@@ -106,30 +143,30 @@ onMounted(reload);
       <router-link class="head-action" to="/">返回任务</router-link>
     </header>
 
-    <div class="intel-dash">
-      <div class="dash-card hero">
+    <div class="intel-dash" data-motion-enter>
+      <div class="dash-card hero" data-motion-enter>
         <span class="dash-k">过审漏洞</span>
         <b class="dash-v">{{ stats.total }}</b>
         <span class="dash-sub">已提交 {{ stats.submitted }} · 待提交 {{ stats.ready }}</span>
       </div>
-      <div class="dash-card ok">
+      <div class="dash-card ok" data-motion-enter>
         <span class="dash-icon">✓</span>
         <b class="dash-v">{{ stats.submitted }}</b>
         <span class="dash-k">已提交</span>
       </div>
-      <div class="dash-card warn">
+      <div class="dash-card warn" data-motion-enter>
         <span class="dash-icon">◷</span>
         <b class="dash-v">{{ stats.ready }}</b>
         <span class="dash-k">待提交</span>
       </div>
-      <div class="dash-card info">
+      <div class="dash-card info" data-motion-enter>
         <span class="dash-icon">∑</span>
         <b class="dash-v">{{ severityOptions.length }}</b>
         <span class="dash-k">等级分布</span>
       </div>
     </div>
 
-    <div class="intel-toolbar">
+    <div class="intel-toolbar" data-motion-enter>
       <div class="kind-tabs">
         <button v-for="t in SUBMIT_TABS" :key="t.id" type="button"
                 class="kind-tab" :class="{ on: submitted === t.id }" @click="submitted = t.id">
@@ -156,6 +193,7 @@ onMounted(reload);
     </div>
     <div v-else class="intel-grid">
       <article v-for="row in rows" :key="row.id" class="intel-row" :class="sevMeta(row.effective_severity).hue"
+               data-motion-enter data-motion-area="vulns" :data-motion-id="row.id"
                role="button" tabindex="0" @click="openVuln(row)" @keyup.enter="openVuln(row)">
         <span class="ir-kind" :class="sevMeta(row.effective_severity).hue">
           <i>⚑</i>{{ sevMeta(row.effective_severity).label }}

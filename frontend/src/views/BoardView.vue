@@ -1,13 +1,18 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { nextTick, ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
 import { fmtLocalTime } from "../format.js";
 import ReportDrawer from "../components/ReportDrawer.vue";
 import TaskEditModal from "../components/TaskEditModal.vue";
+import { createChangeTracker } from "../motion/changeTracker.js";
+import { useMotion } from "../motion/useMotion.js";
+import { highlightChanged } from "../motion/presets.js";
 
 const props = defineProps({ id: String });
+const boardRoot = ref(null);
+const motion = useMotion();
 const task = ref(null);
 const tab = ref("board");          // board | review | submit | killsweep | rejected | archived
 const boardPanel = ref("workers"); // workers | stream（手机端看板切换）
@@ -60,6 +65,50 @@ const loadedTabs = ref(new Set());
 // 内存中按 target 聚合的实时轨迹（WS 推送），配合落库 trace API 做回放。
 const liveTraceByTarget = ref({});
 
+const stableMotionId = (row) => String(row?.id ?? row?.target_id ?? row?.finding_id ?? "");
+const eventMotionId = (event) => String(event?.id ?? `${event?.target_id || ""}|${event?.ts || ""}|${event?.kind || ""}`);
+const trackedAreas = {
+  workers: createTrackedArea((row) => `${row.action}|${row.round}|${row.findings}|${row.auth}|${row.score}`),
+  escalations: createTrackedArea((row) => `${row.action}|${row.severity}|${row.status}|${row.updated_at}`),
+  events: createTrackedArea((row) => `${row.level}|${row.kind}|${row._text || row.message}|${row.ts}`, eventMotionId),
+  review: createTrackedArea((row) => `${effectiveSeverity(row)}|${row.review?.status}|${row.review?.submitted}|${row.updated_at}`),
+  submit: createTrackedArea((row) => `${effectiveSeverity(row)}|${row.review?.status}|${row.review?.submitted}|${row.updated_at}`),
+  killsweeps: createTrackedArea((row) => `${row.confidence}|${row.status}|${row.invalidated}|${row.updated_at}|${row.affected_count}`),
+  rejected: createTrackedArea((row) => `${effectiveSeverity(row)}|${row.review?.status}|${row.updated_at}`),
+  archived: createTrackedArea((row) => `${effectiveSeverity(row)}|${row.archive_reason}|${row.review?.status}|${row.updated_at}`),
+};
+
+function createTrackedArea(getSignature, getId = stableMotionId) {
+  return {
+    seeded: false,
+    tracker: createChangeTracker({ getId, getSignature }),
+  };
+}
+
+async function trackRows(area, rows) {
+  const state = trackedAreas[area];
+  if (!state) return;
+  if (!state.seeded) {
+    state.tracker.seed(rows);
+    state.seeded = true;
+    return;
+  }
+
+  const changedIds = state.tracker.diff(rows);
+  if (!changedIds.size) return;
+  await nextTick();
+  const changedElements = [...(boardRoot.value?.querySelectorAll(`[data-motion-area="${area}"][data-motion-id]`) || [])]
+    .filter((element) => changedIds.has(element.dataset.motionId));
+  highlightChanged(changedElements, motion);
+}
+
+function resetTrackedAreas() {
+  Object.values(trackedAreas).forEach((state) => {
+    state.tracker.reset();
+    state.seeded = false;
+  });
+}
+
 function toast(m) { toastMsg.value = m; setTimeout(() => (toastMsg.value = ""), 2200); }
 
 function onAuthOrTokenChange() {
@@ -87,7 +136,10 @@ async function loadTask() {
 async function loadQueue() {
   const id = props.id;
   const rows = await api.reviewQueue(id);
-  if (id === props.id) queue.value = rows.map(withSearchCache);
+  if (id === props.id) {
+    queue.value = rows.map(withSearchCache);
+    await trackRows("review", queue.value);
+  }
 }
 async function loadSubmit(opts = {}) {
   const id = props.id;
@@ -105,6 +157,7 @@ async function loadSubmit(opts = {}) {
     if (id !== props.id) return;
     submitItems.value = reset ? next : [...submitItems.value, ...next];
     submitHasMore.value = !Array.isArray(res) && !!res.has_more;
+    await trackRows("submit", submitItems.value);
   } finally {
     submitLoading.value = false;
   }
@@ -112,12 +165,18 @@ async function loadSubmit(opts = {}) {
 async function loadKillsweeps() {
   const id = props.id;
   const rows = await api.killsweeps(id);
-  if (id === props.id) killsweepItems.value = rows.map(withSearchCache);
+  if (id === props.id) {
+    killsweepItems.value = rows.map(withSearchCache);
+    await trackRows("killsweeps", killsweepItems.value);
+  }
 }
 async function loadRejected() {
   const id = props.id;
   const rows = await api.rejectedList(id);
-  if (id === props.id) rejectedItems.value = rows.map(withSearchCache);
+  if (id === props.id) {
+    rejectedItems.value = rows.map(withSearchCache);
+    await trackRows("rejected", rejectedItems.value);
+  }
 }
 async function loadArchived(opts = {}) {
   const id = props.id;
@@ -134,6 +193,7 @@ async function loadArchived(opts = {}) {
     if (id !== props.id) return;
     archivedItems.value = reset ? next : [...archivedItems.value, ...next];
     archivedHasMore.value = !Array.isArray(res) && !!res.has_more;
+    await trackRows("archived", archivedItems.value);
   } finally {
     archivedLoading.value = false;
   }
@@ -218,6 +278,7 @@ function closeWs(intentional = false) {
 }
 
 function resetTaskState(full = true) {
+  resetTrackedAreas();
   if (full) {
     task.value = null;
     queue.value = [];
@@ -494,6 +555,8 @@ async function loadBoard() {
   liveWorkers.value = b.live_workers || [];
   liveEscalations.value = b.live_escalations || [];
   siteCollab.value = b.site_collab || null;
+  await trackRows("workers", liveWorkers.value);
+  await trackRows("escalations", liveEscalations.value);
   if (task.value) {
     if (b.task_status) task.value.status = b.task_status;
     if (b.stats) task.value.stats = b.stats;
@@ -507,6 +570,7 @@ async function loadBoard() {
       .map((e) => ({ ...e, _text: fmtEvent(e) }))
       .filter((e) => e._text);
   }
+  await trackRows("events", events.value);
 }
 
 function connectWs() {
@@ -532,6 +596,7 @@ function connectWs() {
     if (!text) return;
     events.value.unshift({ ...ev, _text: text });
     if (events.value.length > 200) events.value.length = 200;
+    void trackRows("events", events.value);
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
         || k.includes("submit") || k.includes("killsweep") || k.includes("worker")
@@ -1125,7 +1190,7 @@ function parseEventTs(ts) {
 </script>
 
 <template>
-  <section class="view board-view" :class="{ 'is-refreshing': refreshing, 'is-skeleton-loading': initialLoading && !task }">
+  <section ref="boardRoot" class="view board-view" :class="{ 'is-refreshing': refreshing, 'is-skeleton-loading': initialLoading && !task }">
     <div v-if="refreshing && !initialLoading" class="view-progress" aria-hidden="true"><i></i></div>
 
     <template v-if="initialLoading && !task">
@@ -1342,8 +1407,8 @@ function parseEventTs(ts) {
           <i class="cnt">{{ liveWorkers.length }}</i>
         </div>
         <div v-if="!liveWorkers.length" class="empty sm">暂无运行中的 worker</div>
-        <div v-for="w in liveWorkers" :key="w.target_id" class="worker-card clickable"
-          @click="openWorkerTrace(w)" title="查看执行轨迹 / 注入指令">
+        <div v-for="w in liveWorkers" :key="w.target_id" class="worker-card clickable" data-motion-enter
+          data-motion-area="workers" :data-motion-id="w.target_id" @click="openWorkerTrace(w)" title="查看执行轨迹 / 注入指令">
           <div class="wc-top">
             <span class="wc-host">{{ w.host }}</span>
             <span class="wc-meta">
@@ -1371,7 +1436,8 @@ function parseEventTs(ts) {
         <!-- 扩大危害活态 -->
         <div v-if="liveEscalations.length" class="escalate-block">
           <div class="col-head sub"><span>扩大危害</span><small>进行中</small><i class="cnt">{{ liveEscalations.length }}</i></div>
-          <div v-for="e in liveEscalations" :key="e.finding_id" class="worker-card escalate-card">
+          <div v-for="e in liveEscalations" :key="e.finding_id" class="worker-card escalate-card" data-motion-enter
+            data-motion-area="escalations" :data-motion-id="e.finding_id">
             <div class="wc-top">
               <span class="wc-host">{{ e.title || e.finding_id }}</span>
               <span class="wc-meta">
@@ -1399,6 +1465,7 @@ function parseEventTs(ts) {
           <template v-for="(ev, i) in events" :key="eventExpandKey(ev, i)">
             <div
               :class="[evClass(ev), { expandable: canExpandEvent(ev), open: isEventExpanded(eventExpandKey(ev, i)) }]"
+              data-motion-enter data-motion-area="events" :data-motion-id="eventMotionId(ev)"
               @click="toggleEventExpand(ev, i)"
             >
               <span v-if="canExpandEvent(ev)" class="ev-toggle" aria-hidden="true">
@@ -1439,7 +1506,8 @@ function parseEventTs(ts) {
       <div class="list-head"><span>复审队列</span><small>AI 采纳后等待人工裁决</small></div>
       <div v-if="!queue.length" class="empty">没有待复审的漏洞（AI 采纳后会进这里）</div>
       <div v-else-if="!filteredQueue.length" class="empty">没有匹配当前关键词的复审漏洞</div>
-      <div v-for="f in filteredQueue" :key="f.id" class="result-row" @click="openReview(f.id)">
+      <div v-for="f in filteredQueue" :key="f.id" class="result-row" data-motion-enter
+        data-motion-area="review" :data-motion-id="f.id" @click="openReview(f.id)">
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
@@ -1464,7 +1532,8 @@ function parseEventTs(ts) {
       </div>
       <div v-if="!submitItems.length" class="empty">还没有通过复审的漏洞</div>
       <div v-else-if="!filteredSubmit.length" class="empty">没有匹配当前关键词的待提交漏洞</div>
-      <div v-for="f in filteredSubmit" :key="f.id" class="result-row" :class="{ submitted: f.review?.submitted }" @click="openSubmit(f.id)">
+      <div v-for="f in filteredSubmit" :key="f.id" class="result-row" data-motion-enter
+        data-motion-area="submit" :data-motion-id="f.id" :class="{ submitted: f.review?.submitted }" @click="openSubmit(f.id)">
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
           <div class="rr-title">{{ f.title }} <span v-if="f.review?.submitted" class="tag-done">已提交</span></div>
@@ -1483,7 +1552,8 @@ function parseEventTs(ts) {
       <div class="list-head"><span>通杀列</span><small>人工通过后触发，验证 1 个同款站点</small></div>
       <div v-if="!killsweepItems.length" class="empty">还没有通杀候选（人工复审通过后，通杀 Hunter 会自动分析同款系统）</div>
       <div v-else-if="!filteredKillsweeps.length" class="empty">没有匹配当前关键词的通杀记录</div>
-      <div v-for="k in filteredKillsweeps" :key="k.id" class="killsweep-card" :class="{ open: isKillsweepOpen(k.id) }">
+      <div v-for="k in filteredKillsweeps" :key="k.id" class="killsweep-card" data-motion-enter
+        data-motion-area="killsweeps" :data-motion-id="k.id" :class="{ open: isKillsweepOpen(k.id) }">
         <button class="ks-summary" type="button" :aria-expanded="isKillsweepOpen(k.id)" @click="toggleKillsweep(k.id)">
           <span class="ks-chevron">{{ isKillsweepOpen(k.id) ? "⌄" : "›" }}</span>
           <span class="ks-main">
@@ -1561,7 +1631,8 @@ function parseEventTs(ts) {
       <div class="list-head"><span>已驳回</span><small>沉淀不收口径，可恢复或继续深挖</small></div>
       <div v-if="!rejectedItems.length" class="empty">还没有被驳回的漏洞（复审点「不通过」会进这里，可回看与恢复）</div>
       <div v-else-if="!filteredRejected.length" class="empty">没有匹配当前关键词的驳回漏洞</div>
-      <div v-for="f in filteredRejected" :key="f.id" class="result-row rejected" @click="openRejected(f.id)">
+      <div v-for="f in filteredRejected" :key="f.id" class="result-row rejected" data-motion-enter
+        data-motion-area="rejected" :data-motion-id="f.id" @click="openRejected(f.id)">
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
           <div class="rr-title">{{ f.title }}</div>
@@ -1584,7 +1655,8 @@ function parseEventTs(ts) {
         暂无 AI 未采纳的漏洞（AI 审核判「非漏洞」或「深挖未升级」的洞会沉淀到这里，防止误杀）
       </div>
       <div v-else-if="!filteredArchived.length" class="empty">没有匹配当前关键词的未采纳漏洞</div>
-      <div v-for="f in filteredArchived" :key="f.id" class="result-row archived" @click="openArchived(f.id)">
+      <div v-for="f in filteredArchived" :key="f.id" class="result-row archived" data-motion-enter
+        data-motion-area="archived" :data-motion-id="f.id" @click="openArchived(f.id)">
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
           <div class="rr-title">

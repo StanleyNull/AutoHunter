@@ -1,9 +1,11 @@
 <script setup>
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
 import { useAuthBindings, emptyBinding } from "../composables/useAuthBindings.js";
 import LlmModelPicker from "./LlmModelPicker.vue";
 import LlmPoolEditor from "./LlmPoolEditor.vue";
+import { enterOverlay, leaveOverlay, waitForMotion } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const props = defineProps({
   open: Boolean,
@@ -18,6 +20,9 @@ const taskProviders = ref([]);
 const poolEditor = ref(null);
 // inherit | single | pool
 const modelMode = ref("inherit");
+const modalRoot = ref(null);
+const closing = ref(false);
+const motion = useMotion();
 
 async function loadModels() {
   if (!props.task?.id || modelMode.value !== "single") return;
@@ -177,11 +182,30 @@ function fill(task) {
 }
 
 watch(() => props.task, fill, { immediate: true });
-watch(() => props.open, (open) => {
-  if (open) {
-    fill(props.task);
-    if (modelMode.value === "single") loadModels();
-  }
+async function requestClose() {
+  if (closing.value) return;
+  closing.value = true;
+  await waitForMotion(leaveOverlay(modalRoot.value, motion, "center"));
+  closing.value = false;
+  emit("close");
+}
+
+async function closeAfterSave(updated) {
+  if (closing.value) return;
+  closing.value = true;
+  await waitForMotion(leaveOverlay(modalRoot.value, motion, "center"));
+  closing.value = false;
+  emit("saved", updated);
+}
+
+watch(() => props.open, async (open) => {
+  if (!open) return;
+
+  closing.value = false;
+  fill(props.task);
+  if (modelMode.value === "single") loadModels();
+  await nextTick();
+  enterOverlay(modalRoot.value, motion, "center");
 });
 watch(modelMode, (mode) => {
   if (mode === "single" && props.open) loadModels();
@@ -260,7 +284,7 @@ async function save() {
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   });
-  emit("saved", updated);
+  await closeAfterSave(updated);
   } finally {
     saving.value = false;
   }
@@ -268,14 +292,14 @@ async function save() {
 </script>
 
 <template>
-  <div v-if="open" class="task-edit-backdrop" @click.self="emit('close')">
-    <form class="task-edit-modal" @submit.prevent="save">
+  <div v-if="open" class="task-edit-backdrop" @click.self="requestClose">
+    <form ref="modalRoot" class="task-edit-modal" @submit.prevent="save">
       <header>
         <div>
           <h3>编辑任务参数</h3>
           <p>运行中的任务会在下一轮调度读取新参数；密钥留空则保留原值。</p>
         </div>
-        <button type="button" class="icon-btn" @click="emit('close')">×</button>
+        <button type="button" class="icon-btn" @click="requestClose">×</button>
       </header>
 
       <div class="settings-grid">
@@ -428,7 +452,7 @@ async function save() {
       </label>
 
       <footer>
-        <button type="button" @click="emit('close')">取消</button>
+        <button type="button" @click="requestClose">取消</button>
         <button type="submit" class="primary" :disabled="saving">{{ saving ? "保存中…" : "保存参数" }}</button>
       </footer>
     </form>

@@ -2,7 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
+import { revealPage } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
+const pageRoot = ref(null);
+const motion = useMotion();
 const loading = ref(true);
 const saving = ref(false);
 const testingLlm = ref(false);
@@ -698,6 +702,8 @@ const autoSaveLabel = computed(() => {
 
 onMounted(async () => {
   await load();
+  await nextTick();
+  revealPage(pageRoot.value, motion);
   refreshProviderHealth().catch(() => {});
   healthPoll = setInterval(() => refreshProviderHealth().catch(() => {}), 10000);
   // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
@@ -711,8 +717,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="view settings-view">
-    <header class="page-head">
+  <section ref="pageRoot" class="view settings-view" data-motion-page>
+    <header class="page-head" data-motion-enter>
       <h2>系统配置</h2>
       <p class="page-sub">
         全局默认 LLM / 资产测绘引擎 / 调度参数。改动后约 1 秒自动保存；新建任务留空时会使用此处配置，任务内填写可单独覆盖。
@@ -743,7 +749,7 @@ onUnmounted(() => {
       </div>
     </div>
     <div v-else class="settings-layout">
-      <aside class="settings-summary" aria-label="当前系统配置摘要">
+      <aside class="settings-summary" data-motion-enter aria-label="当前系统配置摘要">
         <div class="settings-summary-head">
           <span>ACTIVE PROFILE</span>
           <b>全局默认</b>
@@ -780,7 +786,7 @@ onUnmounted(() => {
       </aside>
 
       <form class="form settings-form" @submit.prevent="save">
-        <fieldset class="settings-block">
+        <fieldset class="settings-block" data-motion-enter>
           <legend>
             <span>AI / LLM</span>
             <small>Worker、Reviewer、报告助手共用的默认模型通道</small>
@@ -947,7 +953,7 @@ onUnmounted(() => {
           </div>
         </fieldset>
 
-        <fieldset class="settings-block">
+        <fieldset class="settings-block" data-motion-enter>
           <legend>
             <span>资产测绘</span>
             <small>多引擎搜集默认；创建任务可选引擎，Key 在此统一配置</small>
@@ -997,7 +1003,7 @@ onUnmounted(() => {
           </div>
         </fieldset>
 
-        <fieldset class="settings-block">
+        <fieldset class="settings-block" data-motion-enter>
           <legend>
             <span>调度默认</span>
             <small>新任务创建时的保守默认值</small>
@@ -1011,7 +1017,7 @@ onUnmounted(() => {
           </div>
         </fieldset>
 
-        <div class="settings-actions">
+        <div class="settings-actions" data-motion-enter>
           <button type="submit" class="primary" :disabled="saving">
             {{ saving ? "保存中…" : "立即保存" }}
           </button>
@@ -1022,7 +1028,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 一键更新（仅原版未注册 update 路由时隐藏；发布版即使非 git 也保留入口） -->
-    <section v-if="updateState.supported" class="settings-block update-section">
+    <section v-if="updateState.supported" class="settings-block update-section" data-motion-enter>
       <legend>
         <span>版本更新</span>
         <small>检查 GitHub 最新代码；git 部署可一键热更，镜像部署给出手动指引</small>

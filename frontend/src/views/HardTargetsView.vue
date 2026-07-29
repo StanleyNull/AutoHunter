@@ -1,12 +1,16 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
+import { createChangeTracker } from "../motion/changeTracker.js";
+import { highlightChanged } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const router = useRouter();
 const rows = ref([]);
 const initialLoading = ref(true);
 const refreshing = ref(false);
+const hasLoaded = ref(false);
 const status = ref("all");
 const searchDraft = ref("");
 const searchText = ref("");
@@ -15,6 +19,33 @@ const page = ref(0);
 const pageSize = 100;
 const hasMore = ref(false);
 let searchTimer = null;
+const pageRoot = ref(null);
+const motion = useMotion();
+const tracker = createChangeTracker({
+  getId: (row) => String(row?.id ?? ""),
+  getSignature: (row) => `${row.status}|${row.hit_count}|${row.updated_at}|${row.retry_count}|${row.priority_score}`,
+});
+let motionSeeded = false;
+
+function resetRowMotion() {
+  tracker.reset();
+  motionSeeded = false;
+}
+
+async function trackRows() {
+  if (!motionSeeded) {
+    tracker.seed(rows.value);
+    motionSeeded = true;
+    return;
+  }
+
+  const changedIds = tracker.diff(rows.value);
+  if (!changedIds.size) return;
+  await nextTick();
+  const changedElements = [...(pageRoot.value?.querySelectorAll('[data-motion-area="hard-targets"][data-motion-id]') || [])]
+    .filter((element) => changedIds.has(element.dataset.motionId));
+  highlightChanged(changedElements, motion);
+}
 
 const STATUS_LABEL = {
   dead: "硬骨头",
@@ -22,7 +53,7 @@ const STATUS_LABEL = {
 };
 
 async function load() {
-  if (!rows.value.length) initialLoading.value = true;
+  if (!hasLoaded.value) initialLoading.value = true;
   else refreshing.value = true;
   try {
     const res = await api.hardTargets(status.value, searchText.value, {
@@ -30,28 +61,33 @@ async function load() {
       offset: page.value * pageSize,
     });
     rows.value = Array.isArray(res) ? res : (res.items || []);
+    await trackRows();
     total.value = Array.isArray(res) ? rows.value.length : (res.total || 0);
     hasMore.value = !Array.isArray(res) && !!res.has_more;
   } finally {
     initialLoading.value = false;
     refreshing.value = false;
+    hasLoaded.value = true;
   }
 }
 
 function resetAndLoad() {
   page.value = 0;
+  resetRowMotion();
   load();
 }
 
 function nextPage() {
   if (!hasMore.value || refreshing.value) return;
   page.value += 1;
+  resetRowMotion();
   load();
 }
 
 function prevPage() {
   if (page.value <= 0 || refreshing.value) return;
   page.value -= 1;
+  resetRowMotion();
   load();
 }
 
@@ -86,9 +122,9 @@ onMounted(load);
 </script>
 
 <template>
-  <section class="view hard-view" :class="{ 'is-refreshing': refreshing }">
+  <section ref="pageRoot" class="view hard-view" data-motion-page :class="{ 'is-refreshing': refreshing }">
     <div v-if="refreshing && !initialLoading" class="view-progress" aria-hidden="true"><i></i></div>
-    <header class="page-head split">
+    <header class="page-head split" data-motion-enter>
       <div>
         <h2>全局硬骨头库</h2>
         <p class="page-sub">跨任务聚合 dead / skipped 目标，用于回捞、复盘和判断收敛质量。</p>
@@ -96,7 +132,7 @@ onMounted(load);
       <router-link class="head-action" to="/">返回任务</router-link>
     </header>
 
-    <div class="hard-toolbar">
+    <div class="hard-toolbar" data-motion-enter>
       <div class="search-box">
         <span>⌕</span>
         <input v-model="searchDraft" placeholder="搜索任务 / 单位 / URL / 原因 / org" />
@@ -109,7 +145,7 @@ onMounted(load);
       <button @click="load" :disabled="refreshing">{{ refreshing ? "刷新中…" : "刷新" }}</button>
     </div>
 
-    <div class="hard-stats">
+    <div class="hard-stats" data-motion-enter>
       <span><b>{{ counts.all }}</b>总命中</span>
       <span><b>{{ rows.length }}</b>本页</span>
       <span><b>{{ page + 1 }}</b>页码</span>
@@ -120,7 +156,8 @@ onMounted(load);
     </div>
     <div v-else-if="!rows.length" class="empty">暂无硬骨头记录</div>
     <div v-else class="hard-list">
-      <button v-for="row in rows" :key="row.id" class="hard-row" type="button" @click="openTask(row)">
+      <button v-for="row in rows" :key="row.id" class="hard-row" type="button"
+              data-motion-enter data-motion-area="hard-targets" :data-motion-id="row.id" @click="openTask(row)">
         <span class="hard-status" :class="row.status">{{ STATUS_LABEL[row.status] || row.status }}</span>
         <span class="hard-main">
           <b>{{ row.host || row.url }}</b>

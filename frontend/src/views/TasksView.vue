@@ -1,10 +1,21 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { nextTick, ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyToken } from "../api.js";
 import TaskEditModal from "../components/TaskEditModal.vue";
+import { createChangeTracker } from "../motion/changeTracker.js";
+import { useMotion } from "../motion/useMotion.js";
+import { highlightChanged } from "../motion/presets.js";
 
 const tasks = ref([]);
+const taskRoot = ref(null);
+const motion = useMotion();
+const taskTracker = createChangeTracker({
+  getId: (task) => task.id,
+  getSignature: (task) => `${task.status}|${task.updated_at}|${task.pending_user_review}`,
+});
+const changedTaskIds = ref(new Set());
+let taskTrackerSeeded = false;
 const initialLoading = ref(true);
 const refreshing = ref(false);
 const editOpen = ref(false);
@@ -52,8 +63,23 @@ async function load(opts = {}) {
   const background = !!opts.background;
   if (!tasks.value.length) initialLoading.value = true;
   else if (!background) refreshing.value = true;
-  try { tasks.value = await api.listTasks(); }
-  finally {
+  try {
+    const nextTasks = await api.listTasks();
+    if (!taskTrackerSeeded) {
+      tasks.value = nextTasks;
+      taskTracker.seed(nextTasks);
+      taskTrackerSeeded = true;
+    } else {
+      changedTaskIds.value = taskTracker.diff(nextTasks);
+      tasks.value = nextTasks;
+      if (changedTaskIds.value.size) {
+        await nextTick();
+        const changedCards = [...(taskRoot.value?.querySelectorAll("[data-motion-id]") || [])]
+          .filter((element) => changedTaskIds.value.has(element.dataset.motionId));
+        highlightChanged(changedCards, motion);
+      }
+    }
+  } finally {
     initialLoading.value = false;
     refreshing.value = false;
     syncPoller();
@@ -139,7 +165,7 @@ watch(hasRunning, () => syncPoller());
 </script>
 
 <template>
-  <section class="view tasks-view" :class="{ 'is-refreshing': refreshing }">
+  <section ref="taskRoot" class="view tasks-view" :class="{ 'is-refreshing': refreshing }">
     <div v-if="refreshing && !initialLoading" class="view-progress" aria-hidden="true"><i></i></div>
     <header class="page-head">
       <div>
@@ -186,7 +212,8 @@ watch(hasRunning, () => syncPoller());
       <span class="hint">点顶栏「新建」创建第一个挖掘任务</span>
     </div>
     <div v-else class="task-list">
-      <div v-for="t in tasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running' }"
+      <div v-for="t in tasks" :key="t.id" class="task-card" data-motion-enter
+        :data-motion-id="t.id" :class="{ live: t.status === 'running' }"
         @click="router.push(`/task/${t.id}`)">
         <div class="task-card-main">
           <div class="tc-title">

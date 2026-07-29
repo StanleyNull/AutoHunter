@@ -1,12 +1,16 @@
 <script setup>
-import { computed, reactive, ref, watch, onMounted } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
 import { useAuthBindings } from "../composables/useAuthBindings.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
 import LlmPoolEditor from "../components/LlmPoolEditor.vue";
+import { revealPage } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const router = useRouter();
+const pageRoot = ref(null);
+const motion = useMotion();
 const adv = ref(false);
 const form = reactive({
   name: "",
@@ -213,16 +217,18 @@ onMounted(async () => {
     inherited.intent_mode = form.intent_mode;
     inherited.concurrency = Number(form.concurrency);
   } catch {}
+  await nextTick();
+  revealPage(pageRoot.value, motion);
 });
 </script>
 
 <template>
-  <section class="view">
-    <header class="page-head">
+  <section ref="pageRoot" class="view" data-motion-page>
+    <header class="page-head" data-motion-enter>
       <h2>新建挖掘任务</h2>
       <p class="page-sub">配置目标来源与模型，创建后自动进入指挥台</p>
     </header>
-    <form class="form" @submit.prevent="submit">
+    <form class="form" data-motion-enter @submit.prevent="submit">
       <label>任务名称 <input v-model="form.name" required :placeholder="form.src_type === 'enterprise' ? '企业SRC批量挖掘-2026' : 'edu批量挖掘-2026'" /></label>
       <label>任务模式
         <select v-model="form.src_type">

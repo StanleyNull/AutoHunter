@@ -1,5 +1,7 @@
 <script setup>
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { highlightChanged } from "../motion/presets.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const props = defineProps({
   modelValue: { type: String, default: "" },
@@ -14,6 +16,8 @@ const props = defineProps({
 });
 
 const emit = defineEmits(["update:modelValue", "refresh"]);
+const pickerRoot = ref(null);
+const motion = useMotion();
 
 const useCustom = ref(false);
 
@@ -33,13 +37,15 @@ watch(
   { immediate: true },
 );
 
-function setValue(v) {
+async function setValue(v) {
   emit("update:modelValue", v);
+  await nextTick();
+  highlightChanged([pickerRoot.value], motion);
 }
 </script>
 
 <template>
-  <div class="model-picker-wrap">
+  <div ref="pickerRoot" class="model-picker-wrap" :data-motion-id="modelValue || 'model-picker'" data-motion-enter>
     <div class="model-picker">
       <select
         v-if="list.length && !useCustom"

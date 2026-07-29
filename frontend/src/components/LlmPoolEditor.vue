@@ -1,7 +1,10 @@
 <script setup>
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { api } from "../api.js";
 import LlmModelPicker from "./LlmModelPicker.vue";
+import { revealItems, waitForMotion } from "../motion/presets.js";
+import { motionTokens } from "../motion/tokens.js";
+import { useMotion } from "../motion/useMotion.js";
 
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },
@@ -22,6 +25,8 @@ const props = defineProps({
 const emit = defineEmits(["update:modelValue"]);
 
 const selected = ref(0);
+const poolRoot = ref(null);
+const motion = useMotion();
 const toastMsg = ref("");
 let _uidSeq = 1;
 function nextUid() {
@@ -103,8 +108,9 @@ function replaceAll(mutator) {
 }
 
 function addProvider() {
+  let addedId = "";
   replaceAll((rows) => {
-    rows.push(normalizeRow({
+    const provider = normalizeRow({
       name: `llm-${rows.length + 1}`,
       base_url: props.defaults.base_url || "https://api.deepseek.com/v1",
       model: props.defaults.model || "deepseek-chat",
@@ -112,16 +118,31 @@ function addProvider() {
       temperature: props.defaults.temperature ?? 0.3,
       weight: 1,
       enabled: true,
-    }, rows.length));
+    }, rows.length);
+    addedId = provider._uid;
+    rows.push(provider);
     selected.value = rows.length - 1;
+  });
+  nextTick(() => {
+    const row = poolRoot.value?.querySelector(`[data-motion-id="${addedId}"]`);
+    revealItems(row ? [row] : [], motion);
   });
 }
 
-function removeProvider(idx) {
+async function removeProvider(idx) {
   const provider = providers.value[idx];
   if (!provider) return;
-  const label = provider.name || provider.model || `端点 #${idx + 1}`;
-  if (!confirm(`确认删除模型端点「${label}」？`)) return;
+  const label = provider.name || provider.model || `\u7aef\u70b9 #${idx + 1}`;
+  if (!confirm(`\u786e\u8ba4\u5220\u9664\u6a21\u578b\u7aef\u70b9\u300c${label}\u300d\uff1f`)) return;
+
+  const row = poolRoot.value?.querySelector(`[data-motion-id="${provider._uid}"]`);
+  await waitForMotion(motion.run(row ? [row] : [], {
+    opacity: [1, 0],
+    translateY: [0, -8],
+    duration: motionTokens.quick,
+    easing: motionTokens.easing,
+  }));
+
   replaceAll((rows) => {
     rows.splice(idx, 1);
     if (!rows.length) selected.value = -1;
@@ -133,10 +154,33 @@ function removeProvider(idx) {
 function moveProvider(idx, delta) {
   const next = idx + delta;
   if (next < 0 || next >= providers.value.length) return;
+
+  const moved = providers.value[idx];
+  const displaced = providers.value[next];
+  const before = new Map([moved, displaced].map((provider) => [
+    provider._uid,
+    poolRoot.value?.querySelector(`[data-motion-id="${provider._uid}"]`)?.getBoundingClientRect().top,
+  ]));
+
   replaceAll((rows) => {
     const [row] = rows.splice(idx, 1);
     rows.splice(next, 0, row);
     selected.value = next;
+  });
+
+  nextTick(() => {
+    [moved, displaced].forEach((provider) => {
+      const row = poolRoot.value?.querySelector(`[data-motion-id="${provider._uid}"]`);
+      const previousTop = before.get(provider._uid);
+      if (!row || previousTop == null) return;
+      const offset = previousTop - row.getBoundingClientRect().top;
+      if (!offset) return;
+      motion.run([row], {
+        translateY: [offset, 0],
+        duration: motionTokens.standard,
+        easing: motionTokens.easing,
+      });
+    });
   });
 }
 
@@ -254,7 +298,7 @@ defineExpose({ exportProviders, addProvider });
 </script>
 
 <template>
-  <div class="llm-pool-pane" :class="{ disabled }">
+  <div ref="poolRoot" class="llm-pool-pane" :class="{ disabled }">
     <div class="llm-pool-toolbar">
       <div>
         <b>端点列表</b>
@@ -272,6 +316,8 @@ defineExpose({ exportProviders, addProvider });
       <button
         v-for="(provider, idx) in providers"
         :key="provider._uid || idx"
+        :data-motion-id="provider._uid || `provider-${idx}`"
+        data-motion-enter
         type="button"
         role="option"
         :aria-selected="selected === idx"
