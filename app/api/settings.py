@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dto import SettingsUpdateRequest
 from app.config import LLMConfig
 from app.db.session import get_session
-from app.llm.client import _resolve_user_agent
+from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 from app.settings_service import (
     _clean_llm_providers,
@@ -206,7 +206,8 @@ async def _probe_tool_calling(url: str, headers: dict, model: str, protocol: str
     else:
         payload = {
             "model": model,
-            "temperature": 0,
+            # Kimi Code 端点（k3 思考模型）只接受 temperature=1
+            "temperature": 1 if _is_kimi_coding_endpoint(url) else 0,
             "max_tokens": 64,
             "messages": [
                 {"role": "system", "content": "You must use the provided tool to answer."},
@@ -286,7 +287,8 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
     payload = {
         "model": provider.model,
         "messages": [{"role": "user", "content": "Reply with exactly: ok"}],
-        "temperature": 0,
+        # Kimi Code 端点（k3 思考模型）只接受 temperature=1
+        "temperature": 1 if _is_kimi_coding_endpoint(provider.base_url) else 0,
         "max_tokens": 8,
     }
     if protocol == "anthropic_messages":
