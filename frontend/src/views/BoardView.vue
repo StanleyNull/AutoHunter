@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
@@ -38,6 +38,7 @@ const directiveSending = ref(false);
 const cancellingEscalateId = ref(null);
 const expandedEventKeys = ref(new Set());
 const streamDetailLoading = ref({});
+const eventLogRef = ref(null);
 const readonly = computed(() => authRoleRef.value !== "full");
 const initialLoading = ref(false);
 const refreshing = ref(false);
@@ -374,11 +375,27 @@ function normalizeTimedEvent(ev, existingByKey = null) {
   }
   return {
     ...withText,
+    // Activity Stream 自己也需要稳定 uid。不能用 v-for 下标做 key：
+    // 新事件插到顶部会让下标整体变化，展开状态会被误关。
+    _uid: withText._uid ?? existingByKey?.get(streamEventStableKey(withText))?._uid ?? ++_traceUid,
     // 缺失/非法 ts 只在进入列表时固化一次。后续轮询复用 _displayTs，
     // 避免错误事件每次渲染都回退到当前时间，看起来像时间一直在增加。
     ts: raw || displayTs,
     _displayTs: displayTs,
   };
+}
+
+function prependStreamEvent(item) {
+  const el = eventLogRef.value;
+  const shouldPreserveScroll = !!el && el.scrollTop > 4;
+  const beforeHeight = el?.scrollHeight || 0;
+  events.value.unshift(item);
+  if (events.value.length > 200) events.value.length = 200;
+  if (!shouldPreserveScroll) return;
+  nextTick(() => {
+    if (!eventLogRef.value) return;
+    eventLogRef.value.scrollTop += eventLogRef.value.scrollHeight - beforeHeight;
+  });
 }
 
 function pushLiveTrace(ev) {
@@ -403,8 +420,9 @@ function pushLiveTrace(ev) {
   }
 }
 
-function eventExpandKey(ev, i) {
-  return `${ev.target_id || ""}|${ev.ts || ""}|${ev.kind || ""}|${i}`;
+function eventExpandKey(ev) {
+  if (ev?._uid != null) return `u${ev._uid}`;
+  return streamEventStableKey(ev);
 }
 
 function canExpandEvent(ev) {
@@ -648,8 +666,7 @@ function connectWs() {
     const text = fmtEvent(ev);
     if (!text) return;
     const item = normalizeTimedEvent({ ...ev, _text: text });
-    events.value.unshift(item);
-    if (events.value.length > 200) events.value.length = 200;
+    prependStreamEvent(item);
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
         || k.includes("submit") || k.includes("killsweep") || k.includes("worker")
@@ -1516,7 +1533,7 @@ function parseEventTs(ts) {
           <span>Activity Stream</span>
           <small>点击带目标的行展开细节</small>
         </div>
-        <div class="event-log">
+        <div ref="eventLogRef" class="event-log">
           <div v-if="!events.length" class="empty sm">等待事件…</div>
           <template v-for="(ev, i) in events" :key="eventExpandKey(ev, i)">
             <div
