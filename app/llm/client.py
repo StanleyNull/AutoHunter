@@ -64,6 +64,15 @@ def _api_root(base_url: str) -> str:
             return base[: -len(suffix)].rstrip("/")
     return base
 
+
+def _is_kimi_coding_endpoint(base_url: str) -> bool:
+    """Kimi Code 专用端点（https://api.kimi.com/coding/v1，k3 等思考模型）。
+
+    该端点只接受 temperature=1，传其它值会 HTTP 400
+    "invalid temperature: only 1 is allowed for this model"。
+    """
+    return "api.kimi.com/coding" in str(base_url or "").lower()
+
 # 浏览器 UA（伪装成 Chrome，绕过 Cloudflare/WAF 对 SDK UA 的封禁）
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1192,6 +1201,8 @@ class LLMClient:
             "temperature": self.config.temperature if temperature is None else temperature,
             "max_tokens": int(max_tokens or os.environ.get("LLM_MAX_TOKENS", "4096")),
         }
+        if _is_kimi_coding_endpoint(self.config.base_url):
+            kwargs["temperature"] = 1  # 该端点只接受 temperature=1
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
