@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
@@ -38,6 +38,7 @@ const directiveSending = ref(false);
 const cancellingEscalateId = ref(null);
 const expandedEventKeys = ref(new Set());
 const streamDetailLoading = ref({});
+const eventLogRef = ref(null);
 const readonly = computed(() => authRoleRef.value !== "full");
 const initialLoading = ref(false);
 const refreshing = ref(false);
@@ -333,11 +334,69 @@ let _traceUid = 0;
 // 去重键：落库 ts 与实时推送 ts 常有毫秒级差异（同一事件两个副本），
 // 用「kind + 轮次 + 文案 + 秒级时间」而非精确 ts 归并，才能真正去掉重复行。
 function traceDedupKey(ev) {
-  const sec = Math.floor(parseEventTs(ev.ts).getTime() / 1000);
+  const parsed = parseEventTs(ev._displayTs || ev.ts);
+  const sec = parsed ? Math.floor(parsed.getTime() / 1000) : 0;
   const text = ev._text || ev.message || ev.kind || "";
   return `${ev.kind || ""}|${ev.round || ""}|${text}|${sec}`;
 }
-function evEpoch(ev) { return parseEventTs(ev.ts).getTime(); }
+function evEpoch(ev) {
+  const parsed = parseEventTs(ev._displayTs || ev.ts);
+  return parsed ? parsed.getTime() : 0;
+}
+
+function eventRawTs(ev) {
+  return ev?.ts || ev?.created_at || ev?.createdAt || ev?.timestamp || ev?.time || "";
+}
+
+function streamEventStableKey(ev) {
+  const text = ev?._text || ev?.message || ev?.kind || "";
+  return [
+    ev?.agent || "",
+    ev?.kind || "",
+    ev?.level || "",
+    ev?.target_id || "",
+    ev?.round || "",
+    text,
+    ev?.error || "",
+  ].join("|");
+}
+
+function normalizeTimedEvent(ev, existingByKey = null) {
+  const text = ev._text || fmtEvent(ev) || ev.message || ev.kind;
+  if (!text) return null;
+  const withText = { ...ev, _text: text };
+  const raw = eventRawTs(withText);
+  let displayTs = "";
+  if (parseEventTs(raw)) {
+    displayTs = raw;
+  } else {
+    const previous = existingByKey?.get(streamEventStableKey(withText));
+    displayTs = previous?._displayTs || previous?.ts || new Date().toISOString();
+  }
+  return {
+    ...withText,
+    // Activity Stream 自己也需要稳定 uid。不能用 v-for 下标做 key：
+    // 新事件插到顶部会让下标整体变化，展开状态会被误关。
+    _uid: withText._uid ?? existingByKey?.get(streamEventStableKey(withText))?._uid ?? ++_traceUid,
+    // 缺失/非法 ts 只在进入列表时固化一次。后续轮询复用 _displayTs，
+    // 避免错误事件每次渲染都回退到当前时间，看起来像时间一直在增加。
+    ts: raw || displayTs,
+    _displayTs: displayTs,
+  };
+}
+
+function prependStreamEvent(item) {
+  const el = eventLogRef.value;
+  const shouldPreserveScroll = !!el && el.scrollTop > 4;
+  const beforeHeight = el?.scrollHeight || 0;
+  events.value.unshift(item);
+  if (events.value.length > 200) events.value.length = 200;
+  if (!shouldPreserveScroll) return;
+  nextTick(() => {
+    if (!eventLogRef.value) return;
+    eventLogRef.value.scrollTop += eventLogRef.value.scrollHeight - beforeHeight;
+  });
+}
 
 function pushLiveTrace(ev) {
   const tid = ev.target_id;
@@ -345,7 +404,7 @@ function pushLiveTrace(ev) {
   const map = { ...liveTraceByTarget.value };
   const list = [...(map[tid] || [])];
   // 兜底：万一某条实时事件没带 ts，落地为「收到时刻」的固定时间，
-  // 避免 parseEventTs 回退成 new Date() 导致所有行都显示当前时间、且每次刷新一起变。
+  // 避免缺失时间导致所有行都显示当前时间、且每次刷新一起变。
   const item = { ...ev, ts: ev.ts || new Date().toISOString(), _text: fmtEvent(ev) || ev.kind, _uid: ++_traceUid };
   // 近端去重：同一事件的落库/实时两个副本只会挨得很近，扫最近若干条即可。
   const key = traceDedupKey(item);
@@ -361,8 +420,9 @@ function pushLiveTrace(ev) {
   }
 }
 
-function eventExpandKey(ev, i) {
-  return `${ev.target_id || ""}|${ev.ts || ""}|${ev.kind || ""}|${i}`;
+function eventExpandKey(ev) {
+  if (ev?._uid != null) return `u${ev._uid}`;
+  return streamEventStableKey(ev);
 }
 
 function canExpandEvent(ev) {
@@ -576,10 +636,11 @@ async function loadBoard() {
     if (b.llm_usage) task.value.llm_usage = b.llm_usage;
   }
   if (!events.value.length && b.events?.length) {
+    const existingByKey = new Map(events.value.map((e) => [streamEventStableKey(e), e]));
     events.value = b.events
       .filter(isImportantEvent)
-      .map((e) => ({ ...e, _text: fmtEvent(e) }))
-      .filter((e) => e._text);
+      .map((e) => normalizeTimedEvent(e, existingByKey))
+      .filter(Boolean);
   }
 }
 
@@ -604,9 +665,8 @@ function connectWs() {
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
     const text = fmtEvent(ev);
     if (!text) return;
-    // 同 pushLiveTrace：缺 ts 的事件落地为「收到时刻」，避免活动流也出现全体显示当前时间。
-    events.value.unshift({ ...ev, ts: ev.ts || new Date().toISOString(), _text: text });
-    if (events.value.length > 200) events.value.length = 200;
+    const item = normalizeTimedEvent({ ...ev, _text: text });
+    prependStreamEvent(item);
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
         || k.includes("submit") || k.includes("killsweep") || k.includes("worker")
@@ -1188,15 +1248,18 @@ function onDrawerUpdated() {
   refreshFromEvent({ kind: "review_updated" });
 }
 function evTime(ev) {
-  const d = parseEventTs(ev.ts);
+  const d = parseEventTs(ev._displayTs || ev.ts);
+  if (!d) return "-";
   return d.toLocaleTimeString("zh-CN", { hour12: false });
 }
 function parseEventTs(ts) {
-  if (!ts) return new Date();
+  if (!ts) return null;
   // 后端时间统一是 UTC。带时区标识（Z/+/-）直接解析；
   // 万一是无时区的 naive 串（如 2026-06-27T02:29:00），按 UTC 补 Z，避免被当本地时区差 8 小时。
   const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(ts);
-  return new Date(hasTz ? ts : `${ts}Z`);
+  const d = new Date(hasTz ? ts : `${ts}Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
 }
 </script>
 
@@ -1470,7 +1533,7 @@ function parseEventTs(ts) {
           <span>Activity Stream</span>
           <small>点击带目标的行展开细节</small>
         </div>
-        <div class="event-log">
+        <div ref="eventLogRef" class="event-log">
           <div v-if="!events.length" class="empty sm">等待事件…</div>
           <template v-for="(ev, i) in events" :key="eventExpandKey(ev, i)">
             <div
