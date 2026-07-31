@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 
 import httpx
@@ -53,11 +54,14 @@ class QuakeEngine(SearchEngine):
             raise ValueError("缺少 Quake API Key")
         base = (base_url or self.get_default_base_url()).rstrip("/")
         url = f"{base}/api/v3/search/quake_service"
-        headers = {"X-QuakeToken": api_key, "Content-Type": "application/json"}
+        headers = {"X-QuakeToken": api_key, "Content-Type": "application/json; charset=utf-8"}
         payload = {"query": query, "start": (page - 1) * page_size, "size": page_size}
+        # 手动 UTF-8 编码请求体：查询语法常含中文，直接用 httpx json= 在部分环境会走到
+        # ascii 编码路径而抛 'ascii' codec can't encode，改为显式 bytes 彻底规避。
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(url, json=payload, headers=headers)
+                resp = await client.post(url, content=body, headers=headers)
                 data = resp.json()
         except Exception as e:
             raise ValueError(f"Quake 请求失败: {e}") from e
