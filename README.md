@@ -82,7 +82,7 @@
       <a href="https://github.com/jacketser">
         <img src="https://avatars.githubusercontent.com/u/277248294?v=4&s=128" width="72" height="72" alt="jacketser" /><br />
         <sub><b>jacketser</b></sub>
-      </a><br /><sup>Modal UX</sup>
+      </a><br /><sup>Activity Stream</sup>
     </td>
     <td align="center" width="100">
       <a href="https://github.com/DmcforSpc">
