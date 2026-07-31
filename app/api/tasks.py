@@ -45,13 +45,23 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 _STREAM_NOISE_KINDS = frozenset({"refill", "cluster_cooldown_skip", "skip", "ping"})
 _STREAM_IMPORTANT_KINDS = frozenset({
     "collector_phase",
+    # worker 生命周期里程碑：与前端 BoardView 的 IMPORTANT_KINDS 对齐。这些是清理后仍
+    # 保留的摘要事件（见 maintenance.cleanup.TRACE_SUMMARY_KINDS），刷新走 board 历史
+    # 回放时必须返回，否则「开始挖掘/收尾/发现漏洞」等记录会在刷新后凭空消失。
+    "worker_start", "worker_finish", "worker_cancelled", "worker_auto_finish",
+    "finding_submitted", "finding_duplicate", "finding_invalid",
     "target_done", "target_requeued", "timeout", "auto_deepen", "salvage",
     "coverage_reported", "site_followups_spawned",
-    "review_done", "review_deferred", "review_cancelled",
+    "review_start", "review_done", "review_error", "review_deferred", "review_cancelled",
+    "reproduce_start", "reproduce_done",
+    "killsweep_start", "killsweep_done", "killsweep_dedup", "killsweep_error",
+    "killsweep_invalid", "killsweep_cancelled",
     "reclaim", "recover", "workers_cancelled", "quota_stop",
-    "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
+    "llm_error", "llm_soft_retry", "llm_interrupt", "worker_resume", "llm_provider_failed",
+    "tool_exception",
     "auth_status",
-    "escalate_done", "escalate_skip", "escalate_cancelled", "escalate_start",
+    "escalate_start", "escalate_done", "escalate_skip", "escalate_cancelled",
+    "escalate_error", "escalate_abandon",
     "worker_directive_queued", "worker_directive",
 })
 # Verbose / Worker Trace：细粒度事件（默认活动流不回放，verbose 或 trace API 才返回）。
