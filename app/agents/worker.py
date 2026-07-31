@@ -317,7 +317,7 @@ class Worker:
                         round=rounds,
                         attempt=consecutive_llm_failures,
                         max_attempts=_WORKER_LLM_SOFT_RETRIES,
-                        kind=failure_kind or "unknown",
+                        failure_kind=failure_kind or "unknown",
                         wait_seconds=wait_s,
                         error=str(e)[:240],
                     )

@@ -687,9 +687,7 @@ class TaskRunner:
             fc0 = dict(task.fofa_config or {})
             phase0 = str(fc0.get("collector_phase") or "")
             text0 = str(fc0.get("collector_phase_text") or "")
-            if phase0 in ("enrich", "dispatch") and (
-                "正在入队" in text0 or "补充泄露凭据" in text0 or "补充凭据" in text0
-            ):
+            if phase0 in ("enrich", "dispatch") and "正在入队" in text0:
                 queued0 = await self._count(session, "queued")
                 if queued0 >= LOW_WATERMARK:
                     fc0["collector_phase"] = "idle"
