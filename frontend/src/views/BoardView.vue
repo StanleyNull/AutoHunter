@@ -1080,15 +1080,19 @@ const resolvedTargets = computed(() =>
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
 );
 const collectorCfg = computed(() => task.value?.fofa_config || {});
-// 搜集阶段判定：搜集器还在跑（有 phase 且未到 dispatch）就视为搜集中，
-// 即使已有部分目标入队。这样搜集+处置并行期主进度条保持不确定动画，
-// 不会因 totalTargets 分批增长而导致 resolved/total 进度倒退。
-// 手动/单站模式无搜集器 phase，首批目标入队后即切到确定性进度。
+// 搜集阶段判定：只有「活跃搜集阶段」(fofa_search/prefilter/scoring/target_filter/enrich)
+// 才算搜集中——主进度条走不确定动画 + collectorPct。终态/待命阶段一律不算搜集，
+// 即便 24×7 自动补队列让搜集器常驻待命也一样：
+//   dispatch=派发完成，idle=队列充足待命/手动清单入队完成，
+//   exhausted=FOFA 已翻尽，fofa_error=搜集出错。
+// 这些阶段必须切到「处置进度」(resolved/total)，否则 collectorPct 会兜底成无意义的 25%，
+// 让手动清单等入队完成后永久停在「25% 搜集进度」。
+const COLLECT_DONE_PHASES = new Set(["dispatch", "idle", "exhausted", "fofa_error"]);
 const isCollecting = computed(() => {
   if (task.value?.status !== "running") return false;
   const phase = collectorCfg.value.collector_phase;
-  if (phase && phase !== "dispatch") return true;    // 搜集器在跑
-  if (!phase && totalTargets.value === 0) return true; // 初始化（还没收到 phase）
+  if (phase) return !COLLECT_DONE_PHASES.has(phase); // 仅活跃搜集阶段算搜集中
+  if (totalTargets.value === 0) return true;          // 无 phase 且尚无目标 = 初始化中
   return false;
 });
 const collectorPct = computed(() => {
@@ -1107,8 +1111,8 @@ const progressPct = computed(() => {
   return totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0;
 });
 const collectorVisible = computed(() => {
-  // 过滤/入队完成后（phase=dispatch）自动隐藏，不再占位。
-  if (collectorCfg.value.collector_phase === "dispatch") return false;
+  // 搜集终态/待命（dispatch/idle/exhausted/fofa_error）自动隐藏，不占位、不显示无意义的 25% 条。
+  if (COLLECT_DONE_PHASES.has(collectorCfg.value.collector_phase)) return false;
   // 搜集阶段即使没收到 collector_phase 事件也立即显示，
   // 消除"启动后空窗期体感空闲"的问题。
   if (isCollecting.value) return true;
