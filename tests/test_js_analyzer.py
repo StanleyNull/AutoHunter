@@ -131,8 +131,8 @@ class JsAnalyzerTest(unittest.TestCase):
         endpoints = {e["url"] for e in result["endpoint_inventory"]}
         self.assertIn("https://example.edu.cn/api/admin/export", endpoints)
 
-    def test_client_signed_encrypted_api_chain_hnnu_style(self):
-        """复现智慧后勤类洞：硬编码 AppSecret/AES + HeadJson/PWDDATA_ + Client* 接口。"""
+    def test_client_signed_encrypted_api_chain(self):
+        """复现客户端签名网关洞：硬编码 AppSecret/AES + 前端签名 + Client* 接口。"""
         text = r"""
         layui.define(function(){
           var config = {
@@ -158,7 +158,7 @@ class JsAnalyzerTest(unittest.TestCase):
           post("/gateway/sso/bbs/Admin/SysOperator/ClientSysOperator", {Opt:"Select", iPageSize:3});
         });
         """
-        result = analyze_javascript(text, base_url="https://houqin.hnnu.edu.cn", source="hnnu-fixture")
+        result = analyze_javascript(text, base_url="https://logistics.example.edu.cn", source="client-gateway-fixture")
         kinds = {f["kind"] for f in result["findings"]}
         self.assertIn("client_body_crypto", kinds)
         self.assertIn("client_request_sign", kinds)

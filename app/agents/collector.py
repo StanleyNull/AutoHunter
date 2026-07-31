@@ -160,11 +160,11 @@ def _with_enterprise_scope_filter(query: str, domains: list[str]) -> str:
 def _extract_scope_anchors(raw: str) -> dict[str, list[str]]:
     """从用户原始 FOFA 语法里提取「资产归属锚点」：具体域名 + cert.subject.org。
 
-    专治单目标任务(如 `ecut.edu.cn && cert.subject.org="东华理工大学"`)被 LLM
-    逐轮演化时把这些锚点丢掉、换成宽泛的 `body="东华理工大学"`，导致范围从一所
+    专治单目标任务(如 `example.edu.cn && cert.subject.org="某高校"`)被 LLM
+    逐轮演化时把这些锚点丢掉、换成宽泛的 `body="某高校"`，导致范围从一所
     学校扩散到全国教育网（body 里凡是提到这几个字的友链/新闻/名录站全被圈进来）。
 
-    返回 {"domains": [...根域...], "cert_orgs": ['东华理工大学', ...]}。
+    返回 {"domains": [...根域...], "cert_orgs": ['某高校', ...]}。
     只提取「精确锚点」——纯 org=/body= 这类宽泛条件不算锚点，不参与硬约束。
     """
     import re

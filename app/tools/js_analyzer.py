@@ -41,7 +41,7 @@ _ALLOWED_FETCH_SCHEMES = ("http", "https")
 # 所有正则均为线性、无嵌套量词/交替回溯结构（历史事故根因 #5 已整改）。
 _URL_RE = re.compile(r"""https?://[^\s"'`<>\\)]{1,400}""", re.I)
 # 高价值路径前缀白名单：覆盖鉴权、网关、支付、订单、版本化 API、文件、验证码等。
-# 含 gateway/bbs：智慧后勤等前端常把 Client* 管理接口挂在 /gateway/sso/bbs/... 下。
+# 含 gateway/bbs/client：部分前端把 Client*/管理接口挂在 /gateway/.../bbs/ 等路径下。
 _PATH_RE = re.compile(
     r"""(?P<path>/(?:api|admin|manager|user|users|auth|login|logout|oauth|sso|config|parse|classes|upload|files?|download|export|import|sms|phone|mobile|captcha|password|passwd|reset|forget|common|system|front|order|orders|pay|payment|refund|withdraw|account|wallet|gateway|bbs|client|operator|v\d{1,2})[A-Za-z0-9_./?=&:%-]{1,220})""",
     re.I,
@@ -523,7 +523,7 @@ def _find_urls_and_paths(text: str, base_url: str, source: str) -> list[JsFindin
 
 
 def _find_crypto_client_auth(text: str, base_url: str, source: str) -> list[JsFinding]:
-    """识别客户端签名 + 请求体 AES 加密（智慧后勤等 Client* 网关常见模式）。"""
+    """识别客户端签名 + 请求体 AES 加密（Client* 网关常见模式）。"""
     findings: list[JsFinding] = []
     has_cryptojs = bool(re.search(r"CryptoJS\.AES", text, re.I))
     has_pwddata = "PWDDATA_" in text
@@ -778,7 +778,7 @@ def _build_chains(findings: list[JsFinding], base_url: str) -> list[JsChain]:
             ["构造基线请求和变体请求，对比 code/token/userId 是否可控", "若是改密链，必须用新密码登录或证明状态已改变"],
         ))
 
-    # 智慧后勤等：ClientAppSecret + AES(PWDDATA_) + Admin/Client* → 未授权拉敏感库
+    # 客户端签名网关：ClientAppSecret + 前端 AES 加密 + Admin/Client* → 未授权拉敏感库
     cryptoish = bool(by_kind.get("client_body_crypto") or by_kind.get("client_request_sign"))
     secretish = bool(
         by_kind.get("secret")
@@ -793,10 +793,10 @@ def _build_chains(findings: list[JsFinding], base_url: str) -> list[JsChain]:
             and ("client" in (f.value or "").lower() or "admin" in (f.value or "").lower() or "gateway" in (f.value or "").lower())
         ][:4]
         probes = [
-            "提取 ClientAppID / ClientAppSecret / AES 口令（含混淆变量）",
-            "按前端逻辑构造 HeadJson（常见 Code=yyyyMMddHHmmss，Sign=md5(Code+AppSecret).swapcase）",
-            "请求体 JSON 用 CryptoJS 兼容 AES 加密并加 PWDDATA_ 前缀后 POST",
-            "解密响应 Model，检查是否含身份证/手机号等死规矩字段；只发现密钥不算洞",
+            "提取 AppID / AppSecret / AES 口令（含混淆变量）",
+            "按前端逻辑构造签名头（常见 Code=时间戳，Sign=md5(Code+AppSecret) 变体）",
+            "请求体 JSON 用 CryptoJS 兼容 AES 加密后按前端约定 POST",
+            "解密响应，检查是否含身份证/手机号等死规矩字段；只发现密钥不算洞",
         ]
         for ep in client_eps:
             probes.append(f"优先实测: {ep}")

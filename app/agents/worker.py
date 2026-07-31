@@ -195,7 +195,7 @@ class Worker:
         if not creds:
             return ""
         lines = [
-            "# 泄露凭证情报（来自全网 stealer 日志库，搜集阶段已过滤打分）",
+            "# 泄露凭证情报（搜集阶段已过滤打分）",
             "以下账密按可用概率排序；它们只是深挖入场券，不是漏洞本身。",
         ]
         for c in creds[:12]:

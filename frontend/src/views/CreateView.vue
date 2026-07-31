@@ -57,7 +57,7 @@ const engineLabel = computed(() => {
 const manualTargetsPlaceholder = computed(() =>
   isSiteMode.value
     ? "https://target.example.com/\nhttps://target.example.com/admin 后台"
-    : "www.example.edu.cn\nhttps://a.eduyun.cn/path?x=1\nhttps://b.eduyun.cn/ 港澳台\n(211.153.76.118)"
+    : "www.example.edu.cn\nhttps://a.example.edu.cn/path?x=1\nhttps://b.example.edu.cn/ 港澳台\n(203.0.113.10)"
 );
 // 凭据区只对「用户自己指定目标」有意义：手动 / 两者 / 单站。纯 FOFA 自动搜不展示。
 const showAuthBindings = computed(() => !isFofaMode.value);
