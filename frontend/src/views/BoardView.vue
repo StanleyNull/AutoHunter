@@ -80,10 +80,10 @@ function workersSigEqual(a, b) {
   const la = a?.length ?? 0, lb = b?.length ?? 0;
   if (la !== lb) return false;
   if (la === 0) return true;
-   const sig = (w) => `${w.target_id}|${w.round ?? 0}|${w.findings ?? 0}|${w.score ?? 0}|${w.action ?? ""}|${w.started_at ?? ""}`;
-   for (let i = 0; i < la; i++) if (sig(a[i]) !== sig(b[i])) return false;
-   return true;
- }
+  const sig = (w) => `${w.target_id}|${w.round ?? 0}|${w.findings ?? 0}|${w.score ?? 0}|${w.action ?? ""}|${w.started_at ?? ""}`;
+  for (let i = 0; i < la; i++) if (sig(a[i]) !== sig(b[i])) return false;
+  return true;
+}
 const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived", "discarded"]);
 // 记录哪些列表 tab 已经加载过数据：首屏只拉看板，列表按需加载；后台只刷新看过的列表。
 const loadedTabs = ref(new Set());
