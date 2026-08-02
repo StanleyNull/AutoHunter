@@ -64,6 +64,15 @@ def _api_root(base_url: str) -> str:
             return base[: -len(suffix)].rstrip("/")
     return base
 
+
+def _is_kimi_coding_endpoint(base_url: str) -> bool:
+    """Kimi Code 专用端点（https://api.kimi.com/coding/v1，k3 等思考模型）。
+
+    该端点只接受 temperature=1，传其它值会 HTTP 400
+    "invalid temperature: only 1 is allowed for this model"。
+    """
+    return "api.kimi.com/coding" in str(base_url or "").lower()
+
 # 浏览器 UA（伪装成 Chrome，绕过 Cloudflare/WAF 对 SDK UA 的封禁）
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -805,6 +814,26 @@ class LLMClient:
     def _prompt_tools_enabled(self) -> bool:
         return self._tool_compat == "prompt" or self._current_provider_ref() in self._prompt_tools_providers
 
+    def force_prompt_tools_current(self) -> bool:
+        """把当前活动端点标记为「提示词模拟工具调用」并对后续调用生效。
+
+        供上层(如 worker)在检测到「模型接受 tools 参数但全程一个工具都不调」的哑模型
+        时主动自愈：不必等用户手动设 AUTOHUNTER_TOOL_COMPAT=prompt。
+        仅 auto 模式生效（native=用户明确只要原生，不擅自切；prompt=本就全程模拟）。
+        返回是否真的发生了切换（已在模拟或非 auto 则 False，便于调用方判断要不要重试）。
+        """
+        if self._tool_compat != "auto":
+            return False
+        ref = self._current_provider_ref()
+        if ref in self._prompt_tools_providers:
+            return False
+        self._prompt_tools_providers.add(ref)
+        logger.warning(
+            "LLM 端点疑似不支持工具调用(全程零工具)，自愈切换为提示词模拟 (model=%s)",
+            self.config.model,
+        )
+        return True
+
     def _provider_order(self) -> list[LLMConfig]:
         if len(self.providers) <= 1:
             return list(self.providers)
@@ -1202,6 +1231,8 @@ class LLMClient:
         }
         if not omit_max_tokens:
             kwargs["max_tokens"] = int(max_tokens or os.environ.get("LLM_MAX_TOKENS", "4096"))
+        if _is_kimi_coding_endpoint(self.config.base_url):
+            kwargs["temperature"] = 1  # 该端点只接受 temperature=1
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice

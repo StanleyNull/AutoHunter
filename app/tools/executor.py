@@ -1003,8 +1003,8 @@ class ToolExecutor:
         if "client_signed_encrypted_api" in kinds:
             return (
                 base
-                + " 已命中「客户端签名+AES 加密请求体」链路：立刻提取 ClientAppID/ClientAppSecret/AES 口令，"
-                "按前端算法构造 HeadJson + PWDDATA_ 加密 body，POST Admin/Client* 接口并解密 Model 取证；"
+                + " 已命中「客户端签名+AES 加密请求体」链路：立刻提取 AppID/AppSecret/AES 口令，"
+                "按前端算法构造签名头并加密请求体，POST Admin/Client* 接口并解密响应取证；"
                 "只发现密钥不算洞。"
             )
         if "frontend_secret_followup" in kinds:
