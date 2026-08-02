@@ -4759,3 +4759,1108 @@ main {
     width: 100%;
   }
 }
+
+
+/* Navigation feature island expansion. */
+.topbar {
+  position: fixed !important;
+  top: 14px !important;
+  right: clamp(14px, 3vw, 54px) !important;
+  left: auto !important;
+  width: auto !important;
+  min-height: 0 !important;
+  height: auto !important;
+  padding: 0 !important;
+  display: block !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  pointer-events: none;
+}
+
+.topbar-row {
+  width: auto !important;
+  justify-content: flex-end;
+}
+
+.topbar-island {
+  max-width: min(calc(100vw - 28px), 980px);
+  min-height: 48px;
+  pointer-events: auto;
+}
+
+.topbar-island .nav-status {
+  color: var(--ink);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #9ca3af;
+  box-shadow: 0 0 0 3px rgba(156, 163, 175, 0.14);
+}
+
+.status-dot.on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-bg), 0 0 18px color-mix(in oklch, var(--ok) 38%, transparent);
+}
+
+.nav-notice {
+  overflow: visible;
+}
+
+.notice-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.quick-create-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.quick-create-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: calc(var(--z-sticky) + 5);
+  width: 210px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.075);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.13);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  backdrop-filter: saturate(180%) blur(24px);
+}
+
+.quick-create-menu button {
+  width: 100%;
+  min-height: 38px;
+  justify-content: flex-start;
+  padding: 0 12px;
+  border-radius: 12px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.quick-create-menu button:hover {
+  transform: none;
+  background: rgba(0, 113, 227, 0.08);
+  color: var(--accent-ink);
+  box-shadow: none;
+}
+
+.global-search-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-drawer) + 20);
+  display: grid;
+  place-items: start center;
+  padding: clamp(72px, 12vh, 118px) 18px 18px;
+  background: rgba(245, 245, 247, 0.40);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+}
+
+.global-search-panel {
+  width: min(720px, 100%);
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.075);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.90);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.16);
+}
+
+.global-search-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.global-search-input {
+  width: 100%;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 16px;
+}
+
+.global-search-input:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.global-search-close {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.global-search-body {
+  max-height: min(58vh, 520px);
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: none;
+}
+
+.global-search-body::-webkit-scrollbar {
+  display: none;
+}
+
+.global-search-empty {
+  margin: 0;
+  padding: 28px 18px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.global-search-result {
+  width: 100%;
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  grid-template-areas:
+    "type title"
+    "type meta";
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 3px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.global-search-result:hover {
+  transform: none;
+  background: rgba(0, 113, 227, 0.08);
+  box-shadow: none;
+}
+
+.global-search-result span {
+  grid-area: type;
+  justify-self: start;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.global-search-result b {
+  grid-area: title;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-search-result small {
+  grid-area: meta;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-theme="dark"] .notice-badge {
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+:root[data-theme="dark"] .quick-create-menu,
+:root[data-theme="dark"] .global-search-panel {
+  border-color: var(--border-soft);
+  background: rgba(23, 24, 28, 0.90);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.52);
+}
+
+:root[data-theme="dark"] .global-search-backdrop {
+  background: rgba(11, 12, 15, 0.44);
+}
+
+:root[data-theme="dark"] .global-search-result span {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@media (max-width: 980px) {
+  .topbar {
+    top: 10px !important;
+    right: 10px !important;
+    left: 10px !important;
+  }
+
+  .topbar-island {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .topbar-island .nav-status span:not(.status-dot),
+  .topbar-island .tool-label {
+    display: none;
+  }
+
+  .topbar-island .nav-status {
+    width: 36px;
+    padding: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    display: none !important;
+  }
+}
+
+
+/* Dark mode and custom background final pass. */
+html.custom-bg-on {
+  background-image:
+    linear-gradient(180deg, rgba(245, 245, 247, 0.72), rgba(245, 245, 247, 0.86)),
+    var(--custom-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+html.custom-bg-on body,
+html.custom-bg-on main,
+html.custom-bg-on .app-credit {
+  background: transparent !important;
+}
+
+html.custom-bg-on .page-head,
+html.custom-bg-on .tasks-view .page-head,
+html.custom-bg-on .mission-hero {
+  background:
+    radial-gradient(circle at 50% -15%, rgba(0, 113, 227, 0.12), transparent 36rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(245, 245, 247, 0.78)) !important;
+  -webkit-backdrop-filter: saturate(170%) blur(18px);
+  backdrop-filter: saturate(170%) blur(18px);
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  background: #0b0c0f;
+}
+
+html[data-theme="dark"].custom-bg-on {
+  background-image:
+    linear-gradient(180deg, rgba(11, 12, 15, 0.72), rgba(11, 12, 15, 0.88)),
+    var(--custom-bg-image);
+}
+
+html[data-theme="dark"] body,
+html[data-theme="dark"] main,
+html[data-theme="dark"] .app-credit {
+  color: var(--ink) !important;
+  background-color: var(--bg) !important;
+  background-image: none !important;
+}
+
+html[data-theme="dark"].custom-bg-on body,
+html[data-theme="dark"].custom-bg-on main,
+html[data-theme="dark"].custom-bg-on .app-credit {
+  background-color: transparent !important;
+}
+
+html[data-theme="dark"] .page-head,
+html[data-theme="dark"] .tasks-view .page-head,
+html[data-theme="dark"] .mission-hero {
+  background:
+    radial-gradient(circle at 50% -15%, rgba(41, 151, 255, 0.18), transparent 36rem),
+    linear-gradient(180deg, #16171c 0%, #0b0c0f 100%) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .page-head,
+html[data-theme="dark"].custom-bg-on .tasks-view .page-head,
+html[data-theme="dark"].custom-bg-on .mission-hero {
+  background:
+    radial-gradient(circle at 50% -15%, rgba(41, 151, 255, 0.20), transparent 36rem),
+    linear-gradient(180deg, rgba(22, 23, 28, 0.86), rgba(11, 12, 15, 0.78)) !important;
+}
+
+html[data-theme="dark"] .task-card,
+html[data-theme="dark"] .metric-card,
+html[data-theme="dark"] .dash-card,
+html[data-theme="dark"] .board-panel,
+html[data-theme="dark"] .list-panel,
+html[data-theme="dark"] .settings-summary,
+html[data-theme="dark"] .settings-block,
+html[data-theme="dark"] .form,
+html[data-theme="dark"] .form details,
+html[data-theme="dark"] .report-brief,
+html[data-theme="dark"] .markdown-body,
+html[data-theme="dark"] .report-assistant,
+html[data-theme="dark"] .task-edit-modal,
+html[data-theme="dark"] .modal-card,
+html[data-theme="dark"] .token-modal,
+html[data-theme="dark"] .drawer,
+html[data-theme="dark"] .empty,
+html[data-theme="dark"] .intel-row,
+html[data-theme="dark"] .curator-card {
+  color: var(--ink) !important;
+  border-color: var(--border-soft) !important;
+  background: rgba(23, 24, 28, 0.88) !important;
+}
+
+html[data-theme="dark"] .topbar-island,
+html[data-theme="dark"] .quick-create-menu,
+html[data-theme="dark"] .global-search-panel,
+html[data-theme="dark"] .bg-modal {
+  color: var(--ink) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  background: rgba(23, 24, 28, 0.86) !important;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48) !important;
+}
+
+html[data-theme="dark"] button,
+html[data-theme="dark"] .head-action,
+html[data-theme="dark"] .mini-action,
+html[data-theme="dark"] .navbtn {
+  color: var(--ink);
+  background-color: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+
+html[data-theme="dark"] button:hover,
+html[data-theme="dark"] .head-action:hover,
+html[data-theme="dark"] .mini-action:hover,
+html[data-theme="dark"] .navbtn:hover {
+  color: #fff;
+  background-color: rgba(255, 255, 255, 0.13);
+}
+
+html[data-theme="dark"] input,
+html[data-theme="dark"] select,
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] .search-box,
+html[data-theme="dark"] .global-search-input,
+html[data-theme="dark"] .bg-modal-input {
+  color: var(--ink) !important;
+  border-color: var(--border-soft) !important;
+  background-color: rgba(255, 255, 255, 0.07) !important;
+  box-shadow: none !important;
+}
+
+html[data-theme="dark"] .global-search-input {
+  background-color: transparent !important;
+}
+
+html[data-theme="dark"] .page-head h2,
+html[data-theme="dark"] .mission-main h2,
+html[data-theme="dark"] h1,
+html[data-theme="dark"] h2,
+html[data-theme="dark"] h3,
+html[data-theme="dark"] .tc-title b,
+html[data-theme="dark"] .task-query,
+html[data-theme="dark"] .metric-card b,
+html[data-theme="dark"] .dash-v,
+html[data-theme="dark"] .ir-primary {
+  color: var(--ink) !important;
+}
+
+html[data-theme="dark"] .page-sub,
+html[data-theme="dark"] .task-card .meta,
+html[data-theme="dark"] .task-time,
+html[data-theme="dark"] .task-card-meta,
+html[data-theme="dark"] .field-hint,
+html[data-theme="dark"] .token-modal-hint,
+html[data-theme="dark"] .dash-k,
+html[data-theme="dark"] .dash-sub,
+html[data-theme="dark"] .ir-secondary,
+html[data-theme="dark"] .ir-key,
+html[data-theme="dark"] .ir-src,
+html[data-theme="dark"] .global-search-empty,
+html[data-theme="dark"] .global-search-result small {
+  color: var(--muted) !important;
+}
+
+.bg-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-drawer) + 22);
+  display: grid;
+  place-items: start center;
+  padding: clamp(76px, 13vh, 124px) 18px 18px;
+  background: rgba(245, 245, 247, 0.42);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+}
+
+.bg-modal {
+  width: min(540px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(0, 0, 0, 0.075);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.16);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  backdrop-filter: saturate(180%) blur(24px);
+}
+
+.bg-modal header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.bg-modal h3 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.bg-modal p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.bg-field {
+  display: grid;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.bg-modal-input {
+  width: 100%;
+}
+
+.bg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bg-upload {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.bg-upload input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+html[data-theme="dark"] .bg-modal-backdrop {
+  background: rgba(11, 12, 15, 0.48);
+}
+
+@media (max-width: 720px) {
+  .bg-modal-backdrop {
+    padding: 18px;
+    place-items: center;
+  }
+
+  .bg-actions,
+  .bg-actions button,
+  .bg-upload {
+    width: 100%;
+  }
+}
+
+
+/* Page layer consistency pass. */
+body,
+main,
+.view,
+.tasks-view {
+  background-color: transparent !important;
+}
+
+.tasks-view {
+  position: relative;
+  isolation: isolate;
+}
+
+.tasks-view::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -3;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(0, 113, 227, 0.10), transparent 30rem),
+    linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 44%, #f5f5f7 100%);
+}
+
+.tasks-view .page-head,
+.tasks-view .page-head.split {
+  position: relative;
+  z-index: 0;
+  width: 100vw !important;
+  margin-left: calc(50% - 50vw) !important;
+  margin-bottom: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  overflow: visible;
+}
+
+.tasks-view .page-head::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 -110px;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% -8%, rgba(0, 113, 227, 0.14), transparent 34rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(245, 245, 247, 0.84) 58%, rgba(245, 245, 247, 0) 100%);
+}
+
+.tasks-view .page-head::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 130px;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(245, 245, 247, 0), rgba(245, 245, 247, 0.96) 74%, rgba(245, 245, 247, 0));
+}
+
+.tasks-view .task-list,
+.tasks-view .empty {
+  position: relative;
+  z-index: 1;
+  margin-top: 0;
+}
+
+html.custom-bg-on .tasks-view::before {
+  background:
+    linear-gradient(180deg, rgba(245, 245, 247, 0.62), rgba(245, 245, 247, 0.86)),
+    var(--custom-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+html.custom-bg-on .tasks-view .page-head::before {
+  background:
+    radial-gradient(circle at 50% -8%, rgba(0, 113, 227, 0.15), transparent 34rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(245, 245, 247, 0.54) 62%, rgba(245, 245, 247, 0));
+  -webkit-backdrop-filter: saturate(170%) blur(10px);
+  backdrop-filter: saturate(170%) blur(10px);
+}
+
+html[data-theme="dark"] .tasks-view::before {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(41, 151, 255, 0.16), transparent 30rem),
+    linear-gradient(180deg, #111217 0%, #0b0c0f 44%, #0b0c0f 100%);
+}
+
+html[data-theme="dark"] .tasks-view .page-head::before {
+  background:
+    radial-gradient(circle at 50% -8%, rgba(41, 151, 255, 0.18), transparent 34rem),
+    linear-gradient(180deg, rgba(22, 23, 28, 0.96) 0%, rgba(11, 12, 15, 0.82) 58%, rgba(11, 12, 15, 0) 100%);
+}
+
+html[data-theme="dark"] .tasks-view .page-head::after {
+  background: linear-gradient(180deg, rgba(11, 12, 15, 0), rgba(11, 12, 15, 0.96) 74%, rgba(11, 12, 15, 0));
+}
+
+html[data-theme="dark"].custom-bg-on .tasks-view::before {
+  background:
+    linear-gradient(180deg, rgba(11, 12, 15, 0.62), rgba(11, 12, 15, 0.88)),
+    var(--custom-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+
+/* Custom background layer cleanup. */
+html.custom-bg-on {
+  background-color: #f5f5f7 !important;
+  background-image: var(--custom-bg-image) !important;
+  background-size: cover !important;
+  background-position: center !important;
+  background-attachment: fixed !important;
+  background-repeat: no-repeat !important;
+}
+
+html.custom-bg-on body,
+html.custom-bg-on main,
+html.custom-bg-on .view,
+html.custom-bg-on .tasks-view,
+html.custom-bg-on .app-credit {
+  background: transparent !important;
+  background-image: none !important;
+}
+
+html.custom-bg-on .tasks-view::before {
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 0.34) 0%,
+    rgba(255, 255, 255, 0.18) 34%,
+    rgba(255, 255, 255, 0.10) 100%) !important;
+  background-attachment: fixed !important;
+}
+
+html.custom-bg-on .tasks-view .page-head,
+html.custom-bg-on .tasks-view .page-head.split {
+  background: transparent !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html.custom-bg-on .tasks-view .page-head::before {
+  inset: 0 !important;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.42), transparent 34rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.06)) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html.custom-bg-on .tasks-view .page-head::after {
+  display: none !important;
+}
+
+html.custom-bg-on .tasks-view .task-list,
+html.custom-bg-on .tasks-view .empty {
+  margin-top: 34px !important;
+}
+
+html.custom-bg-on .task-card,
+html.custom-bg-on .empty {
+  background: rgba(255, 255, 255, 0.76) !important;
+  -webkit-backdrop-filter: saturate(150%) blur(16px);
+  backdrop-filter: saturate(150%) blur(16px);
+}
+
+html.custom-bg-on .task-card.live {
+  background:
+    radial-gradient(circle at 88% 12%, rgba(0, 113, 227, 0.10), transparent 14rem),
+    rgba(255, 255, 255, 0.78) !important;
+}
+
+html[data-theme="dark"].custom-bg-on {
+  background-color: #0b0c0f !important;
+  background-image: var(--custom-bg-image) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .tasks-view::before {
+  background: linear-gradient(180deg,
+    rgba(0, 0, 0, 0.34) 0%,
+    rgba(0, 0, 0, 0.42) 46%,
+    rgba(0, 0, 0, 0.50) 100%) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .tasks-view .page-head::before {
+  inset: 0 !important;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(41, 151, 255, 0.16), transparent 34rem),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.20), rgba(0, 0, 0, 0.02)) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .tasks-view .page-head::after {
+  display: none !important;
+}
+
+html[data-theme="dark"].custom-bg-on .task-card,
+html[data-theme="dark"].custom-bg-on .empty {
+  background: rgba(23, 24, 28, 0.72) !important;
+  -webkit-backdrop-filter: saturate(150%) blur(16px);
+  backdrop-filter: saturate(150%) blur(16px);
+}
+
+/* Custom background final visibility fix. */
+html.custom-bg-on .tasks-view::before {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04)) !important;
+  pointer-events: none !important;
+}
+
+html.custom-bg-on .tasks-view .page-head::before,
+html.custom-bg-on .tasks-view .page-head::after {
+  display: none !important;
+  content: none !important;
+  background: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html.custom-bg-on .tasks-view .page-head,
+html.custom-bg-on .tasks-view .page-head.split {
+  background: transparent !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html[data-theme="dark"].custom-bg-on .tasks-view::before {
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.18)) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .tasks-view .page-head::before,
+html[data-theme="dark"].custom-bg-on .tasks-view .page-head::after {
+  display: none !important;
+  content: none !important;
+  background: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+
+/* Custom background global header layer fix. */
+html.custom-bg-on .page-head,
+html.custom-bg-on .page-head.split,
+html.custom-bg-on .tasks-view .page-head,
+html.custom-bg-on .tasks-view .page-head.split,
+html.custom-bg-on .mission-hero,
+html[data-theme="dark"].custom-bg-on .page-head,
+html[data-theme="dark"].custom-bg-on .page-head.split,
+html[data-theme="dark"].custom-bg-on .tasks-view .page-head,
+html[data-theme="dark"].custom-bg-on .tasks-view .page-head.split,
+html[data-theme="dark"].custom-bg-on .mission-hero {
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html.custom-bg-on .page-head::before,
+html.custom-bg-on .page-head::after,
+html.custom-bg-on .mission-hero::before,
+html.custom-bg-on .mission-hero::after,
+html[data-theme="dark"].custom-bg-on .page-head::before,
+html[data-theme="dark"].custom-bg-on .page-head::after,
+html[data-theme="dark"].custom-bg-on .mission-hero::before,
+html[data-theme="dark"].custom-bg-on .mission-hero::after {
+  display: none !important;
+  content: none !important;
+  background: none !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* Custom background readability and dark-mode controls. */
+html.custom-bg-on .page-head h2,
+html.custom-bg-on .page-sub,
+html.custom-bg-on .page-head p,
+html.custom-bg-on .mission-main h2,
+html.custom-bg-on .mission-main .eyebrow,
+html.custom-bg-on .settings-view .page-head,
+html.custom-bg-on .settings-view .page-head h2,
+html.custom-bg-on .settings-view .page-sub {
+  color: rgba(255, 255, 255, 0.96) !important;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.58), 0 1px 2px rgba(0, 0, 0, 0.42);
+}
+
+html.custom-bg-on .page-sub,
+html.custom-bg-on .page-head p,
+html.custom-bg-on .settings-view .page-sub {
+  font-weight: 600;
+}
+
+html.custom-bg-on .mission-main .eyebrow {
+  color: rgba(158, 214, 255, 0.96) !important;
+  font-weight: 800;
+}
+
+html.custom-bg-on .mission-meta,
+html.custom-bg-on .mission-runtime {
+  color: rgba(255, 255, 255, 0.82) !important;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
+}
+
+html.custom-bg-on .mission-meta span,
+html.custom-bg-on .runtime-chip,
+html.custom-bg-on .tabs,
+html.custom-bg-on .kind-tabs,
+html.custom-bg-on .board-mobile-switch {
+  background: rgba(255, 255, 255, 0.74) !important;
+  border-color: rgba(255, 255, 255, 0.48) !important;
+  color: rgba(29, 29, 31, 0.78) !important;
+  -webkit-backdrop-filter: saturate(160%) blur(18px);
+  backdrop-filter: saturate(160%) blur(18px);
+}
+
+html.custom-bg-on .runtime-chip b,
+html.custom-bg-on .runtime-chip i,
+html.custom-bg-on .runtime-chip small {
+  color: rgba(29, 29, 31, 0.72) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .mission-meta span,
+html[data-theme="dark"].custom-bg-on .runtime-chip,
+html[data-theme="dark"].custom-bg-on .tabs,
+html[data-theme="dark"].custom-bg-on .kind-tabs,
+html[data-theme="dark"].custom-bg-on .board-mobile-switch {
+  background: rgba(17, 18, 24, 0.64) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  color: rgba(255, 255, 255, 0.82) !important;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+  -webkit-backdrop-filter: saturate(150%) blur(18px);
+  backdrop-filter: saturate(150%) blur(18px);
+}
+
+html[data-theme="dark"].custom-bg-on .tabs button,
+html[data-theme="dark"].custom-bg-on .kind-tab,
+html[data-theme="dark"].custom-bg-on .board-mobile-switch button {
+  color: rgba(255, 255, 255, 0.72) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .tabs button:hover,
+html[data-theme="dark"].custom-bg-on .kind-tab:hover,
+html[data-theme="dark"].custom-bg-on .board-mobile-switch button:hover {
+  color: rgba(255, 255, 255, 0.96) !important;
+  background: rgba(255, 255, 255, 0.10) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .tabs button.active,
+html[data-theme="dark"].custom-bg-on .kind-tab.on,
+html[data-theme="dark"].custom-bg-on .board-mobile-switch button.active {
+  color: #ffffff !important;
+  background: rgba(255, 255, 255, 0.14) !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+html[data-theme="dark"].custom-bg-on .progress-ring {
+  background: rgba(17, 18, 24, 0.70) !important;
+  border-color: rgba(255, 255, 255, 0.18) !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.05) !important;
+  -webkit-backdrop-filter: saturate(150%) blur(18px);
+  backdrop-filter: saturate(150%) blur(18px);
+}
+
+html[data-theme="dark"].custom-bg-on .progress-ring b,
+html[data-theme="dark"].custom-bg-on .progress-ring span,
+html[data-theme="dark"].custom-bg-on .runtime-chip b,
+html[data-theme="dark"].custom-bg-on .runtime-chip i,
+html[data-theme="dark"].custom-bg-on .runtime-chip small {
+  color: rgba(255, 255, 255, 0.88) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .mission-actions button {
+  background: rgba(17, 18, 24, 0.52) !important;
+  border-color: rgba(255, 255, 255, 0.18) !important;
+  color: rgba(255, 255, 255, 0.9) !important;
+  -webkit-backdrop-filter: saturate(150%) blur(16px);
+  backdrop-filter: saturate(150%) blur(16px);
+}
+
+html[data-theme="dark"].custom-bg-on .mission-actions button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14) !important;
+}
+
+html[data-theme="dark"].custom-bg-on .mission-actions button:disabled {
+  color: rgba(255, 255, 255, 0.42) !important;
+  background: rgba(17, 18, 24, 0.30) !important;
+}
+
+/* Dark custom background: endpoint pool and worker cards. */
+html[data-theme="dark"] .llm-pool-pane,
+html[data-theme="dark"] .provider-detail,
+html[data-theme="dark"] .provider-empty,
+html[data-theme="dark"] .provider-selector-row,
+html[data-theme="dark"] .worker-card {
+  color: rgba(255, 255, 255, 0.88) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  background: rgba(17, 18, 24, 0.72) !important;
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.24) !important;
+  -webkit-backdrop-filter: saturate(150%) blur(18px);
+  backdrop-filter: saturate(150%) blur(18px);
+}
+
+html[data-theme="dark"].custom-bg-on .llm-pool-pane,
+html[data-theme="dark"].custom-bg-on .provider-detail,
+html[data-theme="dark"].custom-bg-on .provider-empty,
+html[data-theme="dark"].custom-bg-on .provider-selector-row,
+html[data-theme="dark"].custom-bg-on .worker-card {
+  background: rgba(17, 18, 24, 0.68) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+}
+
+html[data-theme="dark"] .provider-selector-row:hover,
+html[data-theme="dark"] .provider-selector-row.active,
+html[data-theme="dark"] .worker-card:hover,
+html[data-theme="dark"] .worker-card.clickable:hover {
+  background: rgba(28, 30, 38, 0.84) !important;
+  border-color: rgba(78, 161, 255, 0.46) !important;
+}
+
+html[data-theme="dark"] .llm-pool-toolbar b,
+html[data-theme="dark"] .provider-detail-head span,
+html[data-theme="dark"] .provider-selector-row b,
+html[data-theme="dark"] .wc-host,
+html[data-theme="dark"] .wc-model b {
+  color: rgba(255, 255, 255, 0.92) !important;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme="dark"] .llm-pool-toolbar span,
+html[data-theme="dark"] .provider-selector-row small,
+html[data-theme="dark"] .provider-selector-row em,
+html[data-theme="dark"] .provider-selector-row i,
+html[data-theme="dark"] .wc-meta,
+html[data-theme="dark"] .wc-model,
+html[data-theme="dark"] .wc-model small,
+html[data-theme="dark"] .wc-find {
+  color: rgba(255, 255, 255, 0.58) !important;
+}
+
+html[data-theme="dark"] .wc-action {
+  color: rgba(255, 255, 255, 0.92) !important;
+  background: rgba(7, 8, 12, 0.72) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+html[data-theme="dark"] .wc-score {
+  color: #ffb020 !important;
+  background: rgba(255, 176, 32, 0.16) !important;
+  border: 1px solid rgba(255, 176, 32, 0.24) !important;
+}
+
+html[data-theme="dark"] .wc-auth {
+  color: rgba(255, 255, 255, 0.72) !important;
+  background: rgba(255, 255, 255, 0.07) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+html[data-theme="dark"] .wc-auth.ok {
+  color: #54d88a !important;
+  background: rgba(48, 209, 88, 0.12) !important;
+  border-color: rgba(48, 209, 88, 0.22) !important;
+}
+
+html[data-theme="dark"] .wc-auth.bad {
+  color: #ff6b7a !important;
+  background: rgba(255, 69, 58, 0.12) !important;
+  border-color: rgba(255, 69, 58, 0.22) !important;
+}
+
+html[data-theme="dark"] .wc-del {
+  color: rgba(255, 255, 255, 0.46) !important;
+  background: transparent !important;
+}
+
+html[data-theme="dark"] .wc-del:hover {
+  color: #ff6b7a !important;
+  background: rgba(255, 69, 58, 0.14) !important;
+}
+
+html[data-theme="dark"] .wc-bar {
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
+html[data-theme="dark"] .provider-enabled,
+html[data-theme="dark"] .provider-health {
+  color: rgba(255, 255, 255, 0.82) !important;
+  background: rgba(255, 255, 255, 0.07) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+html[data-theme="dark"] .provider-head-actions > button,
+html[data-theme="dark"] .llm-pool-toolbar button,
+html[data-theme="dark"] .provider-empty button {
+  color: rgba(255, 255, 255, 0.88) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+html[data-theme="dark"] .provider-head-actions > button:hover,
+html[data-theme="dark"] .llm-pool-toolbar button:hover,
+html[data-theme="dark"] .provider-empty button:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Dark mode native select menu fix. */
+html[data-theme="dark"] select,
+html[data-theme="dark"] option,
+html[data-theme="dark"] optgroup {
+  color-scheme: dark !important;
+}
+
+html[data-theme="dark"] select {
+  color: rgba(255, 255, 255, 0.92) !important;
+  background-color: rgba(255, 255, 255, 0.07) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+}
+
+html[data-theme="dark"] option,
+html[data-theme="dark"] optgroup {
+  color: rgba(255, 255, 255, 0.92) !important;
+  background-color: #1c1d24 !important;
+}
+
+html[data-theme="dark"] option:checked,
+html[data-theme="dark"] option:hover {
+  color: #ffffff !important;
+  background-color: #2d5f9f !important;
+}
+
+html[data-theme="dark"] option:disabled {
+  color: rgba(255, 255, 255, 0.36) !important;
+  background-color: #1c1d24 !important;
+}
+
+html[data-theme="dark"].custom-bg-on select {
+  background-color: rgba(17, 18, 24, 0.66) !important;
+  border-color: rgba(255, 255, 255, 0.18) !important;
+  -webkit-backdrop-filter: saturate(150%) blur(16px);
+  backdrop-filter: saturate(150%) blur(16px);
+}
