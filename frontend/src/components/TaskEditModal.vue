@@ -278,7 +278,8 @@ async function save() {
         <button type="button" class="icon-btn" @click="emit('close')">×</button>
       </header>
 
-      <div class="settings-grid">
+      <div class="task-edit-body">
+        <div class="settings-grid">
         <label>任务名称 <input v-model="form.name" required /></label>
         <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="20" /></label>
         <label>任务模式
@@ -426,6 +427,8 @@ async function save() {
       <label>SRC 规则
         <textarea v-model="form.src_rules" rows="3"></textarea>
       </label>
+
+      </div>
 
       <footer>
         <button type="button" @click="emit('close')">取消</button>
