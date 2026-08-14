@@ -15,6 +15,8 @@ from typing import Any, Callable, Optional
 
 from pydantic import ValidationError
 
+from app.agents.backdoor_proof import WEAK_BACKDOOR_REASON, looks_like_weak_backdoor
+from app.agents.edu_scope import BOMBING_BLOCK_REASON, looks_like_edu_bombing
 from app.agents.prompts import normalize_src_type, reviewer_system_prompt
 from app.agents.write_proof import (
     HARMLESS_PROTOCOL,
@@ -46,6 +48,7 @@ _REVIEW_STATIC_PREFIX = (
 _REVIEW_NEVER_DEEPEN_MARKERS = (
     "反射型xss", "反射 xss", "self-xss", "self xss", "用户名枚举",
     "phpinfo", "拒绝服务", "dos",
+    "短信轰炸", "邮箱轰炸", "邮件轰炸", "验证码轰炸", "sms bomb", "email bomb",
     "非教育", "不在范围", "钓鱼", "中间人", "mitm", "本就公开", "公开展示", "公开接口",
 )
 _REVIEW_CAPTCHA_ONLY_IGNORE_MARKERS = ("图形验证码", "算术验证码")
@@ -189,6 +192,48 @@ def _ignored_deepen_directive(finding: Finding, review: Review, src_type: str) -
     return ""
 
 
+def _maybe_reject_edu_bombing(finding: Finding, review: Review, src_type: str) -> bool:
+    """EduSRC 不收短信/邮箱轰炸；LLM 误收或误打回深挖时改判 ignored。"""
+    if normalize_src_type(src_type) != "edusrc":
+        return False
+    if not looks_like_edu_bombing(finding):
+        return False
+    review.verdict = ReviewVerdict.ignored
+    review.confidence = Confidence.likely
+    review.severity_final = None
+    review.score = min(float(review.score or 0), 1.5)
+    reasons = list(review.ignore_reasons or [])
+    if "EduSRC不收短信/邮箱轰炸" not in reasons:
+        reasons.append("EduSRC不收短信/邮箱轰炸")
+    review.ignore_reasons = reasons
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + "\n[系统改判] "
+        + BOMBING_BLOCK_REASON
+    ).strip()
+    return True
+
+
+def _maybe_reject_weak_backdoor(finding: Finding, review: Review) -> bool:
+    """图床/CDN/无页面替换实锤的「疑似被黑」改判 ignored。"""
+    if not looks_like_weak_backdoor(finding):
+        return False
+    review.verdict = ReviewVerdict.ignored
+    review.confidence = Confidence.likely
+    review.severity_final = None
+    review.score = min(float(review.score or 0), 1.5)
+    reasons = list(review.ignore_reasons or [])
+    if "图床/CDN不是被黑" not in reasons:
+        reasons.append("图床/CDN不是被黑")
+    review.ignore_reasons = reasons
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + "\n[系统改判] "
+        + WEAK_BACKDOOR_REASON
+    ).strip()
+    return True
+
+
 def _maybe_accept_write_proof(finding: Finding, review: Review) -> bool:
     """无害写/删证据已经齐时，不允许因「没破坏真实数据」被 ignored/deepen。"""
     if review.verdict not in {ReviewVerdict.ignored, ReviewVerdict.deepen}:
@@ -307,7 +352,11 @@ class Reviewer:
             detail = f"：{self._last_llm_error}" if self._last_llm_error else ""
             raise RuntimeError(f"审核 LLM 调用异常或结构化输出无效{detail}，保留 pending_review 稍后重试。")
 
-        if _maybe_accept_write_proof(finding, review):
+        if _maybe_reject_edu_bombing(finding, review, self.src_type):
+            self._emit("review_auto_ignore_bombing", title=finding.title)
+        elif _maybe_reject_weak_backdoor(finding, review):
+            self._emit("review_auto_ignore_weak_backdoor", title=finding.title)
+        elif _maybe_accept_write_proof(finding, review):
             self._emit("review_auto_accept_write", title=finding.title, kind=classify_write_proof(finding))
         elif _maybe_deepen_ignored(finding, review, self.src_type):
             self._emit("review_auto_deepen", title=finding.title, directive=review.deepen_directive)

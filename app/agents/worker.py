@@ -18,6 +18,8 @@ from pydantic import ValidationError
 
 from app.agents.history import compact_messages
 from app.agents.prompts import is_enterprise_src, normalize_worker_prompt_version, worker_system_prompt
+from app.agents.backdoor_proof import weak_backdoor_block_reason
+from app.agents.edu_scope import edu_bombing_block_reason
 from app.agents.write_proof import HARMLESS_PROTOCOL, weak_write_block_reason
 from app.agents import auth_bootstrap
 from app.config import worker_config
@@ -1227,6 +1229,27 @@ class Worker:
         except ValidationError as e:
             self._emit("finding_invalid", errors=str(e))
             return {"ok": False, "error": f"Finding 校验失败，请修正后重新提交: {e}"}
+
+        if not self._enterprise:
+            bomb_block = edu_bombing_block_reason(finding)
+            if bomb_block:
+                self._emit("finding_out_of_scope", title=finding.title, reason=bomb_block[:200])
+                return {
+                    "ok": False,
+                    "kind": "out_of_scope",
+                    "submitted": False,
+                    "error": bomb_block,
+                }
+
+        backdoor_block = weak_backdoor_block_reason(finding)
+        if backdoor_block:
+            self._emit("finding_out_of_scope", title=finding.title, reason=backdoor_block[:200])
+            return {
+                "ok": False,
+                "kind": "out_of_scope",
+                "submitted": False,
+                "error": backdoor_block,
+            }
 
         evidence_block = self._weak_write_evidence_reason(finding)
         if evidence_block:
