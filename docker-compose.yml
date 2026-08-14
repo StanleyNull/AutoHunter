@@ -6,7 +6,9 @@
 # ============================================================================
 services:
   autohunter:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.cn
     image: autohunter:latest
     container_name: autohunter
     ports:
