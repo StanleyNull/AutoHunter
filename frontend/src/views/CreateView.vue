@@ -408,9 +408,12 @@ onMounted(async () => {
         </p>
         <label>worker 并发 <input v-model="form.concurrency" type="number" /></label>
       </details>
-      <label>SRC 规则（审核用，可留空，审核 agent 已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'edusrc' }}标准）
-        <textarea v-model="form.src_rules" rows="3"></textarea>
+      <label>SRC 规则（可选，叠加在内置标准上，不替换）
+        <textarea v-model="form.src_rules" rows="3" placeholder="例：本校不收弱口令；重点收越权与未授权。"></textarea>
       </label>
+      <p class="field-hint">
+        审核与挖掘已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'EduSRC' }}标准。这里只追加本任务额外要求；留空则只用内置标准。与内置冲突时按更严的执行，不能放宽红线。
+      </p>
       <button type="submit" class="primary" :disabled="submitting">{{ submitting ? "创建中…" : "创建任务" }}</button>
     </form>
   </section>

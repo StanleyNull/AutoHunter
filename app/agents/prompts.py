@@ -975,16 +975,46 @@ def normalize_worker_prompt_version(version: str | None) -> str:
     return _PROMPT_VERSION_ALIASES.get(str(version or "").strip().lower(), "legacy")
 
 
-def worker_system_prompt(src_type: str | bool | None, version: str | None = None) -> str:
+TASK_SRC_RULES_MAX_CHARS = 4000
+
+_TASK_SRC_RULES_HEADER = (
+    "# 任务附加 SRC 规则（叠加在上方内置标准之上，不替换）\n"
+    "以下规则由用户为本任务额外指定。与内置标准冲突时按更严的那条执行"
+    "（内置可收、附加写不收 → 不收）。附加规则不得放宽内置红线"
+    "（如轰炸、无证据被黑、无害写/删未闭环）。\n"
+)
+
+
+def append_task_src_rules(base_prompt: str, src_rules: str | None) -> str:
+    """把任务级 SRC 规则追加到内置 system prompt 末尾；空值原样返回。"""
+    extra = (src_rules or "").strip()
+    if not extra:
+        return base_prompt
+    if len(extra) > TASK_SRC_RULES_MAX_CHARS:
+        extra = extra[:TASK_SRC_RULES_MAX_CHARS].rstrip() + "\n…(截断)"
+    return f"{(base_prompt or '').rstrip()}\n\n{_TASK_SRC_RULES_HEADER}{extra}\n"
+
+
+def worker_system_prompt(
+    src_type: str | bool | None,
+    version: str | None = None,
+    src_rules: str | None = None,
+) -> str:
     if is_enterprise_src(src_type):
-        return ENTERPRISE_WORKER_SYSTEM_PROMPT_COMPACT
-    # edu worker 已统一收敛为 legacy(2026-06-25，经实战验证最佳)，为唯一正式版；
-    # version/历史别名一律 → legacy(见 _PROMPT_VERSION_ALIASES)，COMPACT/modern 仅归档保留。
-    return WORKER_SYSTEM_PROMPT_LEGACY
+        base = ENTERPRISE_WORKER_SYSTEM_PROMPT_COMPACT
+    else:
+        # edu worker 已统一收敛为 legacy(2026-06-25，经实战验证最佳)，为唯一正式版；
+        # version/历史别名一律 → legacy(见 _PROMPT_VERSION_ALIASES)，COMPACT/modern 仅归档保留。
+        base = WORKER_SYSTEM_PROMPT_LEGACY
+    return append_task_src_rules(base, src_rules)
 
 
-def reviewer_system_prompt(src_type: str | bool | None) -> str:
-    return ENTERPRISE_REVIEWER_SYSTEM_PROMPT if is_enterprise_src(src_type) else REVIEWER_SYSTEM_PROMPT_COMPACT
+def reviewer_system_prompt(
+    src_type: str | bool | None,
+    src_rules: str | None = None,
+) -> str:
+    base = ENTERPRISE_REVIEWER_SYSTEM_PROMPT if is_enterprise_src(src_type) else REVIEWER_SYSTEM_PROMPT_COMPACT
+    return append_task_src_rules(base, src_rules)
 
 
 def collector_query_prompt(src_type: str | bool | None) -> str:

@@ -1866,6 +1866,7 @@ class TaskRunner:
         target_meta: dict = {}
         duplicate_history: list[dict] = []
         src_type = "edusrc"
+        src_rules = ""
         fofa_key = ""
         fofa_base_url = ""
         engine_name = "fofa"
@@ -1874,6 +1875,7 @@ class TaskRunner:
             task_obj = await session.get(Task, task_id)
             if task_obj:
                 src_type = task_obj.src_type or "edusrc"
+                src_rules = task_obj.src_rules or ""
                 engine_cfg = resolve_engine_config(task_obj)
                 engine_name = engine_cfg["engine"]
                 fofa_key = engine_cfg["key"]
@@ -1969,6 +1971,7 @@ class TaskRunner:
                             fofa_key=fofa_key, fofa_base_url=fofa_base_url,
                             engine=engine_name,
                             prompt_version=prompt_version,
+                            src_rules=src_rules,
                             pop_directive=lambda: self._pop_directive(target_id))
             worker_holder["worker"] = worker
             try:
@@ -2877,6 +2880,7 @@ class TaskRunner:
                 return
             task_obj = await session.get(Task, task_id)
             src_type = (task_obj.src_type if task_obj else "edusrc") or "edusrc"
+            src_rules = (task_obj.src_rules if task_obj else "") or ""
             finding_schema = FindingSchema(
                 vuln_type=f.vuln_type, title=f.title, severity_claimed=f.severity_claimed,
                 target_url=f.target_url, description=f.description, steps=f.steps,
@@ -2900,7 +2904,7 @@ class TaskRunner:
             )
 
         def do_review() -> dict:
-            reviewer = Reviewer(llm=llm, on_event=emit, src_type=src_type)
+            reviewer = Reviewer(llm=llm, on_event=emit, src_type=src_type, src_rules=src_rules)
             return reviewer.review(finding_schema).model_dump(mode="json")
 
         review_sem = agent_semaphore("review")

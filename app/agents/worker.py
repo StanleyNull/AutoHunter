@@ -68,6 +68,7 @@ class Worker:
         fofa_base_url: str = "",
         engine: str = "fofa",
         prompt_version: str | None = None,
+        src_rules: str = "",
         pop_directive: Optional[Callable[[], Optional[str]]] = None,
     ):
         self.target = target
@@ -75,6 +76,7 @@ class Worker:
         self.cancel_event = cancel_event or threading.Event()
         self.src_type = src_type
         self._enterprise = is_enterprise_src(src_type)
+        self.src_rules = src_rules or ""
         self.prompt_version = normalize_worker_prompt_version(prompt_version or worker_config.prompt_version)
         self.executor = ToolExecutor(
             target, cancel_event=self.cancel_event,
@@ -249,7 +251,7 @@ class Worker:
             )
             self._emit("worker_start", target=self.target, prompt_version=self.prompt_version)
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": worker_system_prompt(self.src_type, self.prompt_version)},
+            {"role": "system", "content": worker_system_prompt(self.src_type, self.prompt_version, src_rules=self.src_rules)},
             {"role": "user", "content": _WORKER_STATIC_PREFIX},
             {"role": "user", "content": user_content},
         ]

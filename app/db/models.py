@@ -49,7 +49,7 @@ class Task(Base):
     name: Mapped[str] = mapped_column(String(200))
     src_type: Mapped[str] = mapped_column(String(20), default="edusrc")
     vuln_types: Mapped[list] = mapped_column(JSON, default=list)        # 选定漏洞类型
-    src_rules: Mapped[str] = mapped_column(Text, default="")            # SRC 规则全文（审核用）
+    src_rules: Mapped[str] = mapped_column(Text, default="")            # 任务附加 SRC 规则（叠加内置标准，不替换）
     target_source: Mapped[str] = mapped_column(String(20), default="fofa")  # fofa / manual / both / site
     fofa_query: Mapped[str] = mapped_column(Text, default="")
     manual_targets: Mapped[list] = mapped_column(JSON, default=list)
