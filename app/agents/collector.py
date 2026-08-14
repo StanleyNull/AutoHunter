@@ -27,7 +27,12 @@ from app.agents.manual_targets import parse_manual_targets
 from app.agents.prompts import is_enterprise_src
 from app.db.models import Target, Task
 from app.engines import get_engine, QuakeRateLimitError
-from app.engines.translator import translate_fofa_query
+from app.engines.translator import (
+    looks_like_fofa_syntax,
+    looks_like_native_syntax,
+    looks_like_query_syntax,
+    translate_fofa_query,
+)
 from app.agents import auth_bootstrap
 
 
@@ -113,9 +118,19 @@ def _is_edusrc_intent_task(task: Task, raw: str, is_intent: bool) -> bool:
     )
 
 
-def _with_edusrc_org_filter(query: str) -> str:
+def _with_edusrc_org_filter(query: str, engine: str = "fofa") -> str:
+    """给意图生成的 FOFA 语法套上教育网 org 圈定。
+
+    用户粘贴的引擎原生语法（Quake field:value 等）原样返回，禁止再套 FOFA `&& org=`，
+    否则翻译器会丢掉冒号条件、官网语法一跑就失败。
+    """
     q = (query or "").strip()
-    if not q or _EDUSRC_ORG_FILTER.lower() in q.lower():
+    if not q:
+        return q
+    if "china education and research network center" in q.lower():
+        return q
+    eng = (engine or "fofa").strip().lower() or "fofa"
+    if looks_like_native_syntax(eng, q) and not looks_like_fofa_syntax(q):
         return q
     return f"({q}) && {_EDUSRC_ORG_FILTER}"
 
@@ -194,7 +209,7 @@ def _extract_scope_anchors(raw: str) -> dict[str, list[str]]:
             seen_dom.add(root)
             domains.append(root)
 
-    for m in re.finditer(r'(?:domain|host)\s*=\s*"([^"]+)"', raw, re.I):
+    for m in re.finditer(r'(?:domain|host)\s*[=:]\s*"([^"]+)"', raw, re.I):
         _add_domain(m.group(1))
     # 裸写域名（未包在字段里）：如 `ecut.edu.cn && cert...`
     stripped = re.sub(r'(?:domain|host|org|cert\.[a-z.]+|title|body|icon_hash|ip|port|protocol)\s*=\s*"[^"]*"', " ", raw, flags=re.I)
@@ -283,11 +298,13 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
     cfg = dict(task.fofa_config or {})
     history: list[str] = list(cfg.get("history", []))
     raw = (task.fofa_query or "").strip()
-    intent_mode = cfg.get("intent_mode") or resolve_engine_config(task).get("intent_mode", "")
+    engine_cfg = resolve_engine_config(task)
+    intent_mode = cfg.get("intent_mode") or engine_cfg.get("intent_mode", "")
+    engine_name = str(engine_cfg.get("engine") or "fofa")
     # 'syntax' / 'intent'，未设则启发式判断
 
-    # 启发式：含 FOFA 字段符号视为语法，否则视为自然语言意图
-    looks_like_syntax = any(tok in raw for tok in ("=", "&&", "||", "domain", "title=", "body=", "org="))
+    # 同时认 FOFA 与当前引擎原生语法。Quake 官网 `title:"x" AND country:"CN"` 必须当语法。
+    looks_like_syntax = looks_like_query_syntax(engine_name, raw)
     is_intent = intent_mode == "intent" or (intent_mode != "syntax" and raw and not looks_like_syntax)
     force_edusrc_org = _is_edusrc_intent_task(task, raw, is_intent)
 
@@ -306,16 +323,19 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
         scope_anchors = _extract_scope_anchors(raw)
 
     def _apply_scope(q: str) -> str:
+        # 用户写的就是当前引擎原生语法：禁止再套 FOFA domain=/org= 外层。
+        if looks_like_native_syntax(engine_name, q) and not looks_like_fofa_syntax(q):
+            return q
         if enterprise_domains:
             return _with_enterprise_scope_filter(q, enterprise_domains)
         if scope_anchors.get("domains") or scope_anchors.get("cert_orgs"):
             return _with_scope_anchors(q, scope_anchors)
         if force_edusrc_org:
-            return _with_edusrc_org_filter(q)
+            return _with_edusrc_org_filter(q, engine_name)
         return q
 
-    # 用户直接给语法、且没历史 → 第一轮直用原语法（企业模式仍强制套范围约束）
-    if raw and looks_like_syntax and not history:
+    # 用户直接给语法（含显式 syntax 模式）、且没历史 → 第一轮直用原语法
+    if raw and not history and (intent_mode == "syntax" or looks_like_syntax):
         return _apply_scope(raw), "用户指定语法"
 
     # 需要 LLM 生成（自然语言意图 / 语法已用过要演化 / 完全没给）
@@ -341,7 +361,7 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
             task.fofa_config = cfg
 
     # 降级：有原语法就继续用原语法翻页，否则空（企业模式仍强制套范围约束）
-    if raw and looks_like_syntax:
+    if raw and (intent_mode == "syntax" or looks_like_syntax):
         return _apply_scope(raw), "降级沿用原语法"
     return "", ""
 

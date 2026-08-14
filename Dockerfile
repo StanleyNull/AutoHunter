@@ -23,10 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         whatweb \
     && rm -rf /var/lib/apt/lists/*
 
-# sqlmap（git 安装，复用官方）
-RUN git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap \
-    && printf '#!/bin/sh\nexec python3 /opt/sqlmap/sqlmap.py "$@"\n' > /usr/local/bin/sqlmap \
-    && chmod +x /usr/local/bin/sqlmap
+# sqlmap：官方 PyPI 月度版。构建不依赖 git clone GitHub（国内常超时/失败），
+# 也比跟踪 master HEAD 稳。pip 会把 sqlmap 装到 PATH，无需再包一层 wrapper。
+RUN pip install --no-cache-dir sqlmap
 
 # ProjectDiscovery 工具：nuclei + httpx（从官方 release 拉二进制，避免装 Go）
 # TARGETARCH 由 buildkit 自动注入(arm64/amd64)

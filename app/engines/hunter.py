@@ -48,9 +48,16 @@ class HunterEngine(SearchEngine):
             "is_web": "3",
         }
         try:
-            async with httpx.AsyncClient(timeout=45) as client:
+            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
                 resp = await client.get(f"{base}/openApi/search", params=params)
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except Exception:
+                    raise ValueError(
+                        f"Hunter 返回非 JSON (HTTP {resp.status_code}): {(resp.text or '')[:200]}"
+                    )
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Hunter 请求失败: {e}") from e
 

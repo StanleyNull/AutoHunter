@@ -82,7 +82,7 @@ _FOFA_TO_QUAKE = {
     "ip": "ip",
     "port": "port",
     "org": "org",
-    "protocol": "service",
+    "protocol": "service.name",
     "server": "server",
     "country": "country",
     "city": "city",
@@ -316,25 +316,27 @@ def fofa_to_shodan(query: str) -> str:
     return " OR ".join(f"({g})" for g in groups)
 
 
-# ── Censys（Legacy Search Language / v2 hosts search）─────────
+# ── Censys Platform（CenQL；host./web./cert. 前缀）─────────────
 _FOFA_TO_CENSYS = {
-    "title": "services.http.response.html_title",
-    "body": "services.http.response.body",
-    "domain": "dns.names",
-    "host": "dns.names",
-    "ip": "ip",
-    "port": "services.port",
-    "org": "autonomous_system.organization",
-    "protocol": "services.service_name",
-    "server": "services.http.response.headers.server",
-    "country": "location.country",
-    "city": "location.city",
-    "app": "services.software.product",
-    "os": "services.software.uniform_resource_identifier",
-    "header": "services.http.response.headers",
-    "cert.subject.org": "services.tls.certificates.leaf.names",
-    "cert.subject.cn": "services.tls.certificates.leaf.names",
-    "cert": "services.tls.certificates.leaf.names",
+    "title": "host.services.http.response.html_title",
+    "body": "host.services.http.response.body",
+    "domain": "host.dns.names",
+    "host": "host.dns.names",
+    "ip": "host.ip",
+    "port": "host.services.port",
+    "org": "host.autonomous_system.organization",
+    "protocol": "host.services.protocol",
+    "server": "host.services.software.product",
+    "country": "host.location.country",
+    "city": "host.location.city",
+    "app": "host.services.software.product",
+    "os": "host.operating_system.product",
+    "header": "host.services.http.response.headers",
+    "cert.subject.org": "host.dns.names",
+    "cert.subject.cn": "host.dns.names",
+    "cert": "host.dns.names",
+    "icon_hash": "host.services.http.response.favicons.md5_hash",
+    "status_code": "host.services.http.response.status_code",
 }
 
 
@@ -376,8 +378,10 @@ _FOFA_TRANSLATORS = {
 }
 
 
-# 冒号语法：Quake / Shodan / Censys（field:value）
-_COLON_FIELD_RE = re.compile(r"[a-zA-Z_][\w.]*\s*:")
+# 冒号字段：只认 token 边界的 field:value，避免把 "http://..." 里的 http: 误判成原生语法
+_COLON_FIELD_RE = re.compile(r"(?:^|[\s(])[a-zA-Z_][\w.]*\s*:\s*(?:\"|[^\s/=])")
+_FOFA_EQ_RE = re.compile(r'(?:^|[\s(])[a-zA-Z_][\w.]*\s*(!=~|!=|=~|==|=)\s*["\']')
+_BOOL_AND_OR_RE = re.compile(r"\b(AND|OR|NOT)\b", re.I)
 
 # 各引擎「一眼能认出」的原生字段/写法；命中则整句原样透传，不做 FOFA 翻译
 _HUNTER_NATIVE_RE = re.compile(
@@ -397,11 +401,13 @@ _SHODAN_NATIVE_RE = re.compile(
     r")"
 )
 _CENSYS_NATIVE_RE = re.compile(
-    r"(?i)\b(services\.|dns\.names|autonomous_system\.|location\.(country|city)|host\.services\.)"
+    r"(?i)\b(host\.|web\.|cert\.|services\.|dns\.names|autonomous_system\.|"
+    r"location\.(country|city)|host\.services\.)"
 )
 _QUAKE_NATIVE_RE = re.compile(
     r"(?i)(\b(AND|OR|NOT)\b|"
-    r"service\.http\.|service\.name|location\.|favicon:|hostname:|transport:)"
+    r"service\.http\.|service\.name|location\.|favicon:|hostname:|transport:|"
+    r"title:|domain:|app:|body:|org:|port:)"
 )
 
 
@@ -412,30 +418,32 @@ def looks_like_fofa_syntax(query: str) -> bool:
 
 
 def looks_like_native_syntax(engine: str, query: str) -> bool:
-    """判断是否已是目标引擎的原生语法 → 应原样透传。"""
+    """判断是否已是目标引擎的原生语法 → 应原样透传。
+
+    Quake/Shodan/Censys 以 token 边界的 field:value 为准；一旦出现冒号字段，
+    即使夹杂少量 FOFA `=`，也视为原生，避免翻译器丢掉冒号条件。
+    """
     q = (query or "").strip()
     if not q:
         return False
     eng = (engine or "").strip().lower()
 
     has_colon = bool(_COLON_FIELD_RE.search(q))
-    has_fofa = looks_like_fofa_syntax(q)
 
     if eng == "quake":
-        # Quake DSL 以 field:value + AND/OR 为主；没有 FOFA 的 = 条件即视为原生
-        if has_colon and not has_fofa:
+        if has_colon:
             return True
-        return bool(_QUAKE_NATIVE_RE.search(q) and has_colon)
+        return bool(_QUAKE_NATIVE_RE.search(q) and _BOOL_AND_OR_RE.search(q))
 
     if eng == "shodan":
-        if has_colon and not has_fofa:
+        if has_colon:
             return True
         return bool(_SHODAN_NATIVE_RE.search(q))
 
     if eng == "censys":
         if _CENSYS_NATIVE_RE.search(q):
             return True
-        return has_colon and not has_fofa
+        return has_colon
 
     if eng == "hunter":
         # Hunter 也是 field="value"，靠特有字段识别，避免把 web.title 再翻坏
@@ -445,6 +453,25 @@ def looks_like_native_syntax(engine: str, query: str) -> bool:
         # v2 与 FOFA 很像；出现 hostname=/iconhash= 等视为已按 ZoomEye 书写
         return bool(_ZOOMEYE_NATIVE_RE.search(q))
 
+    return False
+
+
+def looks_like_query_syntax(engine: str, query: str) -> bool:
+    """collector 用：这句话是查询语法还是自然语言意图？
+
+    同时认 FOFA（field=\"value\" / && / ||）和当前引擎原生（field:value / AND/OR）。
+    选了 Quake 却粘贴官网 `title:\"登录\" AND country:\"China\"` 时必须判成语法，
+    不能再丢给 LLM 当意图改写。
+    """
+    q = (query or "").strip()
+    if not q:
+        return False
+    if looks_like_fofa_syntax(q) or looks_like_native_syntax(engine, q):
+        return True
+    if "&&" in q or "||" in q or _BOOL_AND_OR_RE.search(q):
+        return True
+    if _FOFA_EQ_RE.search(q) or _COLON_FIELD_RE.search(q):
+        return True
     return False
 
 

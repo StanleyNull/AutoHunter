@@ -53,6 +53,36 @@ const engineLabel = computed(() => {
   const map = { fofa: "FOFA", quake: "360 Quake", hunter: "Hunter", zoomeye: "ZoomEye", shodan: "Shodan", censys: "Censys" };
   return map[form.engine] || (form.engine ? form.engine : "系统默认引擎");
 });
+const engineKey = computed(() => form.engine || "fofa");
+const queryPlaceholder = computed(() => {
+  if (form.intent_mode === "intent") {
+    return form.src_type === "enterprise"
+      ? "例：找某集团 OA/CRM/ERP/API/运维后台资产"
+      : "例：找全国高校的统一身份认证登录系统";
+  }
+  const samples = {
+    fofa: form.src_type === "enterprise"
+      ? 'domain="example.com" || cert="示例集团" || org="示例集团"'
+      : 'title="统一身份认证" && domain=".edu.cn"',
+    quake: 'title:"统一身份认证" AND domain:"edu.cn"',
+    hunter: 'web.title="统一身份认证" && domain.suffix="edu.cn"',
+    zoomeye: 'title="统一身份认证" && country="CN"',
+    shodan: 'http.title:"login" hostname:edu.cn',
+    censys: 'host.services.http.response.html_title:"Login" and host.dns.names: edu.cn',
+  };
+  return samples[engineKey.value] || samples.fofa;
+});
+const queryHintSample = computed(() => {
+  const samples = {
+    fofa: 'title="统一身份认证" && domain=".edu.cn"',
+    quake: 'title:"登录" AND domain:"edu.cn"',
+    hunter: 'web.title="登录" && domain.suffix="edu.cn"',
+    zoomeye: 'title="login" && country="CN"',
+    shodan: 'http.title:"nginx" port:443',
+    censys: 'host.dns.names: edu.cn',
+  };
+  return samples[engineKey.value] || samples.fofa;
+});
 
 const manualTargetsPlaceholder = computed(() =>
   isSiteMode.value
@@ -262,14 +292,11 @@ onMounted(async () => {
       </label>
       <label v-if="!isSiteMode">
         {{ form.intent_mode === "intent" ? "搜集意图（用大白话说要找什么）" : "查询语法 / 搜集意图" }}
-        <input v-model="form.fofa_query"
-          :placeholder="form.src_type === 'enterprise'
-            ? (form.intent_mode === 'intent' ? '例：找某集团 OA/CRM/ERP/API/运维后台资产' : 'domain=&quot;example.com&quot; || cert=&quot;示例集团&quot; || org=&quot;示例集团&quot;')
-            : (form.intent_mode === 'intent' ? '例：找全国高校的统一身份认证登录系统' : 'title=&quot;统一身份认证&quot; && domain=&quot;.edu.cn&quot;')" />
+        <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
       </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
         两种写法都可用：① <strong>FOFA 语法</strong>（换引擎会自动翻译）；② <strong>当前引擎原生语法</strong>（识别后原样请求，不二次翻译）。
-        例 Quake：<code>title:"登录" AND domain:"edu.cn"</code>；Hunter：<code>web.title="登录" && domain.suffix="edu.cn"</code>。
+        当前引擎示例：<code>{{ queryHintSample }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写：重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。&#10;例：后台在 /admin，重点测 API、越权、上传。"></textarea>

@@ -38,9 +38,16 @@ class ShodanEngine(SearchEngine):
         # 官方 /shodan/host/search：固定每页约 100；无 limit 参数
         params = {"key": api_key, "query": query, "page": str(page or 1)}
         try:
-            async with httpx.AsyncClient(timeout=45) as client:
+            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
                 resp = await client.get(f"{base}/shodan/host/search", params=params)
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except Exception:
+                    raise ValueError(
+                        f"Shodan 返回非 JSON (HTTP {resp.status_code}): {(resp.text or '')[:200]}"
+                    )
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Shodan 请求失败: {e}") from e
 

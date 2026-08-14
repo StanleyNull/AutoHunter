@@ -986,8 +986,15 @@ onUnmounted(() => {
               <div class="settings-grid" v-if="form.engines[eng.name]">
                 <label class="full">API Key
                   <input v-model="form.engines[eng.name].key" type="password"
-                    :placeholder="form.engines[eng.name]?.key_set ? '已配置，留空不修改' : `${eng.display_name || eng.name} API Key`" />
+                    :placeholder="form.engines[eng.name]?.key_set ? '已配置，留空不修改' : (
+                      eng.name === 'censys' ? 'Platform Personal Access Token，或旧版 API_ID:SECRET' :
+                      eng.name === 'quake' ? 'X-QuakeToken（个人中心 API Token）' :
+                      ((eng.display_name || eng.name) + ' API Key')
+                    )" />
                 </label>
+                <p v-if="eng.name === 'censys'" class="field-hint full">
+                  新账号用 Censys Platform 的 Personal Access Token；仅旧 Legacy Search 才填 <code>API_ID:SECRET</code>。
+                </p>
                 <label class="full">API 端点（可选）
                   <input v-model="form.engines[eng.name].base_url"
                     :placeholder="eng.name === 'fofa' ? 'https://fofa.info' : '留空用官方默认'" />

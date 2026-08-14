@@ -47,14 +47,24 @@ class ZoomEyeEngine(SearchEngine):
             "qbase64": _qbase64(query),
             "page": int(page or 1),
             "pagesize": int(min(page_size or 20, 1000)),
-            # web 侧重站点；与 edu/SRC 场景更匹配。用户可用原生语法再收窄。
-            "sub_type": "web",
             "fields": "ip,port,domain,hostname,title,url,organization.name",
         }
+        # 官网默认 sub_type=v4。写死 web 会让端口/协议/主机类查询恒为空。
+        # 只有查询明显在找网页标题/正文时才切 web。
+        qlow = (query or "").lower()
+        if any(tok in qlow for tok in ("title=", "title:", "body=", "body:", "http.title", "web.")):
+            payload["sub_type"] = "web"
         try:
-            async with httpx.AsyncClient(timeout=45) as client:
+            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
                 resp = await client.post(f"{base}/v2/search", json=payload, headers=headers)
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except Exception:
+                    raise ValueError(
+                        f"ZoomEye 返回非 JSON (HTTP {resp.status_code}): {(resp.text or '')[:200]}"
+                    )
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"ZoomEye 请求失败: {e}") from e
 

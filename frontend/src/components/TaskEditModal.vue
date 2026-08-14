@@ -84,6 +84,18 @@ const original = reactive({
 const isSiteMode = computed(() => form.target_source === "site");
 const isFofaMode = computed(() => form.target_source === "fofa");
 const engineIsFofa = computed(() => !form.engine || form.engine === "fofa");
+const engineKey = computed(() => form.engine || "fofa");
+const queryPlaceholder = computed(() => {
+  const samples = {
+    fofa: 'title="统一身份认证" && domain=".edu.cn"',
+    quake: 'title:"统一身份认证" AND domain:"edu.cn"',
+    hunter: 'web.title="统一身份认证" && domain.suffix="edu.cn"',
+    zoomeye: 'title="统一身份认证" && country="CN"',
+    shodan: 'http.title:"login" hostname:edu.cn',
+    censys: 'host.dns.names: edu.cn',
+  };
+  return samples[engineKey.value] || samples.fofa;
+});
 
 const showAuthBindings = computed(() => !isFofaMode.value);
 
@@ -317,9 +329,11 @@ async function save() {
       </div>
 
       <label>漏洞类型（逗号分隔） <input v-model="form.vuln_types" /></label>
-      <label v-if="!isSiteMode">查询语法 / 搜集意图 <input v-model="form.fofa_query" /></label>
+      <label v-if="!isSiteMode">查询语法 / 搜集意图
+        <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
+      </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
-        FOFA 语法会自动翻译到当前引擎；直接写该引擎原生语法则原样透传。
+        FOFA 语法会自动翻译到当前引擎；直接写该引擎原生语法则原样透传。示例：<code>{{ queryPlaceholder }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>
