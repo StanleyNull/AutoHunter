@@ -252,6 +252,10 @@ export const api = {
   ),
   taskModels: (id, data) => req("POST", `/api/tasks/${id}/models`, data),
   testLLM: (data) => req("POST", "/api/settings/test-llm", data),
+  // 工作目录管理
+  workdirStats: () => req("GET", "/api/settings/workdir/stats"),
+  workdirCleanup: (retentionDays, dryRun = true) =>
+    req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: dryRun })}`),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit) =>

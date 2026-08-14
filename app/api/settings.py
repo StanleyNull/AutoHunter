@@ -1,10 +1,12 @@
 """全局系统配置 API。"""
 from __future__ import annotations
 
+import asyncio
+import functools
 import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +15,7 @@ from app.config import LLMConfig
 from app.db.session import get_session
 from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
+from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
 from app.settings_service import (
     _clean_llm_providers,
     _preserve_provider_keys,
@@ -366,3 +369,29 @@ async def put_settings(
                     detail="端点池模式至少需要一个配置完整且已启用的 LLM 端点",
                 )
     return await update_settings(session, payload)
+
+
+# ===== 工作目录管理 =====
+
+
+@router.get("/workdir/stats")
+async def workdir_stats():
+    """获取工作目录磁盘占用统计。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, get_workdir_stats)
+
+
+@router.post("/workdir/cleanup")
+async def workdir_cleanup(
+    retention_days: int | None = Query(default=None, ge=0, le=365, description="保留天数，留空用配置默认值，0=不清理"),
+    dry_run: bool = Query(default=True, description="默认只模拟；要真删必须 dry_run=false"),
+):
+    """手动触发工作目录清理。
+
+    按目录内文件活动时间判断：超过 retention_days 天且最近 30 分钟无写入才删。
+    受保护目录（node_modules/browser_profile 等）和符号链接不会被删除。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, functools.partial(cleanup_workdir, retention_days=retention_days, dry_run=dry_run)
+    )
