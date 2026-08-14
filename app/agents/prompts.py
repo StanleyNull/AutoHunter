@@ -293,7 +293,7 @@ self_check 里如实填 is_public_interface 和 info_leak_hits_strict_list。
 - 提交前必须已用 http_request/run_shell 取得真实证据；如实填 self_check。
 - **提交前必须调用 check_duplicate_finding**：duplicate=true 说明同系统同洞已交过，不要再 submit；只拦同系统同洞，其它 endpoint/类型/证据链可继续挖；没新洞就 finish。
 - **密码重置可验证但必须实锤**：只有改密后证明新密码可登录、状态真实变化或拿到等价成功证据才可提交。不能把"JS 有接口 + 发包返回 200/错误码"编造成"已重置/已接管"；失败码、空响应、含糊响应一律不算成功。
-- **写接口必须实锤**：delete/update/save/del 接口只返回成功文案、但没有真实对象 ID 和前后状态差异时，属于半成品；不要提交，继续找 ID/查询接口，或用 deepen_lead 交给下一轮。
+- **写接口必须实锤，但无害证法即实锤**：delete/update/save 只返回成功文案、没有旁路回读/鉴权对照/哨兵闭环时，属于半成品，不要提交。正确证法是自建 SRC_TEST_ 哨兵增→改→删、未登录 401/403 vs 登录后授权通过、或幂等回写原值；不要为了取证去删改真实/他人数据。做不到就 deepen_lead 交棒。
 - 一个目标可提交多个漏洞；挖完（或确认无漏洞）必须调用 finish。不臆想，没证据不提交，宁可 no_vuln 不交垃圾洞。
 """
 
@@ -626,7 +626,7 @@ ENTERPRISE_REVIEWER_SYSTEM_PROMPT = """你是企业 SRC 平台的严格漏洞审
 - 弱口令只看到菜单、空后台、接口文档，没证明实际危害。
 - 信息泄露只是版本号、内网 IP、路径、phpinfo、公开公告、公开列表等低价值数据。
 - 声称可改密/接管/支付篡改，但响应是错误码、空响应或没有状态变化证据。
-- 越权修改只贴了 update/save/delete 返回 200/success，没有侧面回读证明数据已变（详情/列表/登录等旁路 before→after）→ ignored/deepen。但自建哨兵增→验→删闭环、幂等回写授权成功（写回原值、值未变但授权通过）、对不存在/自建 ID 的删除授权探测（授权通过语义而非 401/403），只要旁路 before→after 证据链完整，即视同写/删实锤 accepted，不得因"未破坏真实数据"驳回。
+- 越权修改只贴了 update/save/delete 返回 200/success，没有无害证据链 → ignored/deepen。下列视同写/删实锤 accepted，**不得因"未破坏真实数据"驳回**：自建哨兵增→验→删并旁路回读、幂等回写原值且授权通过、未登录/无 token 返回 401/403 而低权登录态返回 200/授权通过。禁止要求 worker 去删改真实业务数据；证据不够就 deepen 让它补无害证法。对不存在 ID 发删只返回 data:0/操作成功、没有鉴权对照或旁路回读 → 仍是半成品，不能 accepted。
 
 # deepen 使用规则
 线索真实且下一步很明确，但 worker 没打穿时，用 verdict=deepen，并给出具体指令。例如：用 JS secret 伪造签名访问某接口；用泄露 token 调用某后台接口；用 IDOR 枚举另一个对象证明越权。纯垃圾直接 ignored。

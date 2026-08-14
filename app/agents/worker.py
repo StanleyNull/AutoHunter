@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from app.agents.history import compact_messages
 from app.agents.prompts import is_enterprise_src, normalize_worker_prompt_version, worker_system_prompt
+from app.agents.write_proof import HARMLESS_PROTOCOL, weak_write_block_reason
 from app.agents import auth_bootstrap
 from app.config import worker_config
 from app import dedup
@@ -1236,9 +1237,7 @@ class Worker:
                 "submitted": False,
                 "error": evidence_block,
                 "guidance": (
-                    "不要把这条半成品提交给 reviewer。请继续找真实存在的对象 ID、列表/详情/查询接口，"
-                    "做 before/after 或响应差异验证；如果无法安全证明真实状态变化，调用 finish(verdict=no_vuln)，"
-                    "并在 deepen_lead 写清下一轮要沿哪个接口/ID 继续验证。"
+                    "不要把这条半成品提交给 reviewer。" + HARMLESS_PROTOCOL
                 ),
             }
 
@@ -1266,55 +1265,9 @@ class Worker:
     def _weak_write_evidence_reason(self, finding: Finding) -> str:
         """拦截 EduSRC 最常见半成品：写接口返回成功但影响 0 行。
 
-        这类 finding 会消耗 reviewer token，且大多被判 ignored。这里不终止 worker，
-        只把提交退回，要求继续找真实 ID/前后状态差异，或用 deepen_lead 交棒。
+        无害证法（哨兵闭环 / 鉴权对照 / 幂等回写 / 旁路回读）放行；
+        只拦「成功文案 + 零影响」且没有任何无害证据的半成品。
         """
         if self._enterprise:
             return ""
-        vuln_type = (finding.vuln_type or "").lower()
-        title_desc = "\n".join([
-            finding.title,
-            finding.target_url,
-            finding.description,
-            finding.poc,
-            finding.raw_request,
-            finding.raw_response,
-            finding.evidence.extracted_data_sample or "",
-            finding.evidence.notes or "",
-        ])
-        low = title_desc.lower()
-        if not any(marker in vuln_type for marker in ("unauthorized", "idor", "auth", "access", "越权", "未授权")):
-            return ""
-        write_markers = (
-            "updatedel", "delete", "remove", "update", "modify", "edit", "save",
-            "insert", "create", "del", "删除", "删", "修改", "更新", "写操作",
-        )
-        if not any(marker in low for marker in write_markers):
-            return ""
-        zero_effect_patterns = (
-            r'"data"\s*:\s*0\b',
-            r'"affected(?:rows)?"\s*:\s*0\b',
-            r'"row(?:s|count)?"\s*:\s*0\b',
-            r'"count"\s*:\s*0\b',
-            r"\b0\s+rows?\b",
-            r"影响\s*0",
-            r"0\s*行",
-            r"不存在",
-            r"未实证",
-            r"未证明",
-        )
-        if not any(re.search(pattern, low, re.IGNORECASE) for pattern in zero_effect_patterns):
-            return ""
-        positive_patterns = (
-            r'"data"\s*:\s*[1-9]\d*\b',
-            r'"affected(?:rows)?"\s*:\s*[1-9]\d*\b',
-            r"再次查询.*(不存在|消失|已删除|状态变化|已更新)",
-            r"(before|after|前后对比|状态变化|修改后查询|删除后查询)",
-            r"(真实存在的|已存在的)\s*(id|记录|对象)",
-        )
-        if any(re.search(pattern, low, re.IGNORECASE) for pattern in positive_patterns):
-            return ""
-        return (
-            "写/删/改接口证据不足：当前证据显示接口返回成功文案但影响为 0 或使用了不存在的对象，"
-            "只能证明接口可被调用，不能证明真实删除/修改了受限数据。"
-        )
+        return weak_write_block_reason(finding)

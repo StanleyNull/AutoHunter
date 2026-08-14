@@ -16,6 +16,13 @@ from typing import Any, Callable, Optional
 from pydantic import ValidationError
 
 from app.agents.prompts import normalize_src_type, reviewer_system_prompt
+from app.agents.write_proof import (
+    HARMLESS_PROTOCOL,
+    STRONG_KINDS,
+    classify_write_proof,
+    has_strong_write_proof,
+    should_skip_live_replay,
+)
 from app.llm.client import LLMClient, LLMError, _is_forced_tool_choice_unsupported
 from app.schemas import Confidence, Finding, Review, ReviewVerdict, Severity
 from app.tools.executor import ToolExecutor
@@ -23,9 +30,6 @@ from app.tools.schemas import REVIEWER_TOOL_SCHEMAS
 
 # 触发复现验证的等级
 _HIGH_VALUE = {Severity.critical, Severity.high}
-_DESTRUCTIVE_POC_MARKERS = (
-    "delete", "remove", "drop ", "truncate",
-)
 _REVIEW_TEXT_LIMITS = {
     "description": 1800,
     "poc": 1800,
@@ -172,8 +176,8 @@ def _ignored_deepen_directive(finding: Finding, review: Review, src_type: str) -
 
     if write_signal and auth_signal:
         return (
-            "沿未授权写接口继续深挖：先找到真实存在的对象 ID 和查询/详情接口，"
-            "再用前后状态差异证明可修改、删除、重置或越权操作真实业务数据；只有成功文案没有状态变化不要提交。"
+            "沿未授权写接口继续深挖，但禁止删改真实/他人数据。"
+            + HARMLESS_PROTOCOL
         )
 
     if src_type == "enterprise" and auth_signal:
@@ -183,6 +187,28 @@ def _ignored_deepen_directive(finding: Finding, review: Review, src_type: str) -
         )
 
     return ""
+
+
+def _maybe_accept_write_proof(finding: Finding, review: Review) -> bool:
+    """无害写/删证据已经齐时，不允许因「没破坏真实数据」被 ignored/deepen。"""
+    if review.verdict not in {ReviewVerdict.ignored, ReviewVerdict.deepen}:
+        return False
+    if review.is_duplicate or not review.in_scope:
+        return False
+    kind = classify_write_proof(finding)
+    if kind not in STRONG_KINDS:
+        return False
+    review.verdict = ReviewVerdict.accepted
+    review.confidence = Confidence.likely
+    if review.severity_final is None:
+        review.severity_final = finding.severity_claimed or Severity.medium
+    review.score = min(max(review.score, 5.0), 7.4)
+    review.ignore_reasons = []
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + f"\n[系统改判] 写/删证据属于无害证法（{kind}），不得因未破坏真实数据驳回或打回深挖。"
+    ).strip()
+    return True
 
 
 def _maybe_deepen_ignored(finding: Finding, review: Review, src_type: str) -> bool:
@@ -281,31 +307,57 @@ class Reviewer:
             detail = f"：{self._last_llm_error}" if self._last_llm_error else ""
             raise RuntimeError(f"审核 LLM 调用异常或结构化输出无效{detail}，保留 pending_review 稍后重试。")
 
-        if _maybe_deepen_ignored(finding, review, self.src_type):
+        if _maybe_accept_write_proof(finding, review):
+            self._emit("review_auto_accept_write", title=finding.title, kind=classify_write_proof(finding))
+        elif _maybe_deepen_ignored(finding, review, self.src_type):
             self._emit("review_auto_deepen", title=finding.title, directive=review.deepen_directive)
 
-        # 阶段③：仅 accepted 且 严重/高危 才触发复现验证
+        # 阶段③：仅 accepted 且 严重/高危 才触发复现验证。
+        # 写/删 PoC 禁止现场复放：URL 含 delete 不是破坏性 SQL，复放既不安全
+        # 也会把已取证的高危洞误降成 deepen，最后埋进「AI 未采纳」。
         if (
             self.enable_reproduce
             and review.verdict == ReviewVerdict.accepted
             and review.severity_final in _HIGH_VALUE
         ):
-            self._reproduce(finding, review)
-            if not review.reproduced:
-                review.verdict = ReviewVerdict.deepen
-                review.confidence = Confidence.uncertain
-                review.severity_final = None
-                review.score = min(review.score, 3.9)
-                if not review.deepen_directive:
-                    review.deepen_directive = (
-                        "当前高危/严重结论复现未通过，不能进入人工待审核。"
-                        "请补充真实成功证据：例如证明密码重置后可用新密码登录，"
-                        "或证明接口返回明确成功且状态已真实变化。"
+            skip_replay, skip_why = should_skip_live_replay(finding, finding.poc)
+            if skip_replay:
+                if has_strong_write_proof(finding):
+                    review.reproduced = True
+                    review.reviewer_notes += (
+                        f"\n[复现验证] SKIPPED({skip_why})：无害写/删证据链已齐，"
+                        "不现场复放写接口；视同已复现。"
                     )
-                review.reviewer_notes += (
-                    "\n[自动降级] 高危/严重漏洞必须有可复现实锤；本次系统复现未通过，"
-                    "已改为 deepen，禁止以未证实结论进入人工复审队列。"
-                )
+                    self._emit("reproduce_done", title=finding.title, reproduced=True, skipped=skip_why)
+                else:
+                    review.reproduced = False
+                    review.verdict = ReviewVerdict.deepen
+                    review.confidence = Confidence.uncertain
+                    review.severity_final = None
+                    review.score = min(review.score, 3.9)
+                    review.deepen_directive = review.deepen_directive or HARMLESS_PROTOCOL
+                    review.reviewer_notes += (
+                        f"\n[自动降级] 高危/严重写删结论不能现场复放（{skip_why}），"
+                        "且无害证据不足，改为 deepen，禁止未证实结论进入人工复审。"
+                    )
+                    self._emit("reproduce_done", title=finding.title, reproduced=False, skipped=skip_why)
+            else:
+                self._reproduce(finding, review)
+                if not review.reproduced:
+                    review.verdict = ReviewVerdict.deepen
+                    review.confidence = Confidence.uncertain
+                    review.severity_final = None
+                    review.score = min(review.score, 3.9)
+                    if not review.deepen_directive:
+                        review.deepen_directive = (
+                            "当前高危/严重结论复现未通过，不能进入人工待审核。"
+                            "请补充真实成功证据：例如证明密码重置后可用新密码登录，"
+                            "或证明接口返回明确成功且状态已真实变化。"
+                        )
+                    review.reviewer_notes += (
+                        "\n[自动降级] 高危/严重漏洞必须有可复现实锤；本次系统复现未通过，"
+                        "已改为 deepen，禁止以未证实结论进入人工复审队列。"
+                    )
 
         # 信度约束：未经系统复现的，不允许标 confirmed（最高 likely）
         if not review.reproduced and review.confidence == Confidence.confirmed:
@@ -400,12 +452,13 @@ class Reviewer:
             review.reviewer_notes += "\n[复现] 无 PoC 可执行。"
             self._emit("reproduce_done", title=finding.title, reproduced=False)
             return
-        if self._looks_destructive_poc(poc):
+        skip_replay, skip_why = should_skip_live_replay(finding, poc)
+        if skip_replay:
             review.reviewer_notes += (
-                "\n[复现验证] SKIPPED：PoC 疑似会删除、清库或执行不可逆写操作，"
-                "系统不会自动执行这类破坏性验证。该 PoC 不能作为已复现实锤。"
+                f"\n[复现验证] SKIPPED({skip_why})：不自动执行写/删或破坏性 SQL。"
+                "该 PoC 不能作为现场复放实锤，请看无害证据链。"
             )
-            self._emit("reproduce_done", title=finding.title, reproduced=False)
+            self._emit("reproduce_done", title=finding.title, reproduced=False, skipped=skip_why)
             return
         result = executor.run_shell(poc, timeout=60)
         out = (result.get("output") or "")[:1000]
@@ -430,8 +483,3 @@ class Reviewer:
             review.confidence = Confidence.likely
         review.reviewer_notes += f"\n[复现验证] {verdict_text}"
         self._emit("reproduce_done", title=finding.title, reproduced=reproduced)
-
-    @staticmethod
-    def _looks_destructive_poc(poc: str) -> bool:
-        text = (poc or "").lower()
-        return any(marker in text for marker in _DESTRUCTIVE_POC_MARKERS)

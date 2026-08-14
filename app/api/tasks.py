@@ -220,6 +220,10 @@ def _public_fofa_config(task: Task) -> dict:
         "last_target_filter_total": cfg.get("last_target_filter_total", 0),
         "last_target_filter_evaluated": cfg.get("last_target_filter_evaluated", 0),
         "last_skipped_filter": cfg.get("last_skipped_filter", 0),
+        "leak_roots_total": cfg.get("leak_roots_total", 0),
+        "leak_roots_done": cfg.get("leak_roots_done", 0),
+        "leak_hits": cfg.get("leak_hits", 0),
+        "leak_targets": cfg.get("leak_targets", 0),
     }
 
 
@@ -336,6 +340,27 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
             Review.verdict.in_(["ignored", "deepen"]),
             Review.user_status == "pending",
             Finding.status != "superseded",
+        )
+    )).scalar() or 0
+    stats.archived_write = (await session.execute(
+        select(func.count()).select_from(Finding)
+        .join(Review, Review.finding_id == Finding.id)
+        .where(
+            Finding.task_id == task_id,
+            Review.verdict.in_(["ignored", "deepen"]),
+            Review.user_status == "pending",
+            Finding.status != "superseded",
+            or_(
+                Finding.title.ilike("%删除%"),
+                Finding.title.ilike("%修改%"),
+                Finding.title.ilike("%更新%"),
+                Finding.title.ilike("%delete%"),
+                Finding.title.ilike("%update%"),
+                Finding.target_url.ilike("%delete%"),
+                Finding.target_url.ilike("%update%"),
+                Finding.target_url.ilike("%/save%"),
+                Finding.target_url.ilike("%remove%"),
+            ),
         )
     )).scalar() or 0
     return stats

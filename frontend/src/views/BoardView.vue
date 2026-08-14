@@ -1072,6 +1072,7 @@ const rejectedCount = computed(() =>
   Math.max(stats.value.rejected ?? 0, loadedTabs.value.has("rejected") ? rejectedItems.value.length : 0));
 const archivedCount = computed(() =>
   Math.max(stats.value.archived ?? 0, loadedTabs.value.has("archived") ? archivedItems.value.length : 0));
+const archivedWriteCount = computed(() => Number(stats.value.archived_write || 0));
 const totalTargets = computed(() =>
   (stats.value.queued ?? 0) + (stats.value.scanning ?? 0) +
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
@@ -1447,9 +1448,10 @@ function parseEventTs(ts) {
         <span class="tab-long">已驳回</span><span class="tab-short">驳回</span>
         <i v-if="rejectedCount">{{ rejectedCount }}</i>
       </button>
-      <button type="button" role="tab" :aria-selected="tab === 'archived'" :class="{ active: tab === 'archived' }" @click="tab = 'archived'">
+      <button type="button" role="tab" :aria-selected="tab === 'archived'" :class="{ active: tab === 'archived', 'has-write': archivedWriteCount }" @click="tab = 'archived'">
         <span class="tab-long">AI 未采纳</span><span class="tab-short">AI 未采纳</span>
         <i v-if="archivedCount">{{ archivedCount }}</i>
+        <em v-if="archivedWriteCount" class="write-flag">写删 {{ archivedWriteCount }}</em>
       </button>
     </div>
 
@@ -1721,17 +1723,18 @@ function parseEventTs(ts) {
       <div class="list-head">
         <span>AI 未采纳</span>
         <small>AI 判为非漏洞或深挖未升级的洞，保留在此防误杀，可点开查看、必要时「恢复到复审」</small>
+        <small v-if="archivedWriteCount" class="write-hint">有 {{ archivedWriteCount }} 条写/删类已置顶，优先人工看，别让真洞埋在这里</small>
         <small v-if="archivedItems.length" class="muted">已加载 {{ archivedItems.length }} 条{{ archivedHasMore ? "，还有更多" : "" }}</small>
       </div>
       <div v-if="!archivedItems.length" class="empty">
         暂无 AI 未采纳的漏洞（AI 审核判「非漏洞」或「深挖未升级」的洞会沉淀到这里，防止误杀）
       </div>
       <div v-else-if="!filteredArchived.length" class="empty">没有匹配当前关键词的未采纳漏洞</div>
-      <div v-for="f in filteredArchived" :key="f.id" class="result-row archived" @click="openArchived(f.id)">
+      <div v-for="f in filteredArchived" :key="f.id" class="result-row archived" :class="{ 'write-op': f.is_write_op }" @click="openArchived(f.id)">
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
           <div class="rr-title">
-            <span class="arch-tag" :class="f.archive_reason">{{ f.archive_reason_text }}</span>
+            <span class="arch-tag" :class="[f.archive_reason, { write: f.is_write_op }]">{{ f.archive_reason_text }}</span>
             {{ f.title }}
           </div>
           <div class="meta">{{ f.vuln_type }} · {{ f.target_url }}</div>

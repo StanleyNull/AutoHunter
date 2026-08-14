@@ -128,6 +128,7 @@ class TaskStats(BaseModel):
     submit_ready: int = 0
     rejected: int = 0
     archived: int = 0
+    archived_write: int = 0
 
 
 class TaskResponse(BaseModel):

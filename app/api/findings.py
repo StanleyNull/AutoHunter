@@ -12,11 +12,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import case, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
 from app.agents.deepen import apply_deepen
+from app.agents.write_proof import looks_like_write_op
 from app.settings_service import llm_client_for_task
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
@@ -343,7 +344,18 @@ async def archived_list(task_id: str, search: Optional[str] = Query(None, alias=
         Review.user_status == "pending",   # 用户已处理过的不再摆进来
         Finding.status != "superseded",    # 正在回炉重挖的 deepen 前身不显示（避免和新一轮重复）
     ).order_by(
-        # deepen（AI 认可、值得深挖但没打穿的好线索）置顶，排在 ignored（疑似误杀）之前
+        # 写/删类置顶（用户最容易在这里漏看真洞），其次 deepen，再是 ignored
+        case((or_(
+            Finding.title.ilike("%删除%"),
+            Finding.title.ilike("%修改%"),
+            Finding.title.ilike("%更新%"),
+            Finding.title.ilike("%delete%"),
+            Finding.title.ilike("%update%"),
+            Finding.target_url.ilike("%delete%"),
+            Finding.target_url.ilike("%update%"),
+            Finding.target_url.ilike("%/save%"),
+            Finding.target_url.ilike("%remove%"),
+        ), 0), else_=1),
         case((Review.verdict == "deepen", 0), else_=1),
         Review.reviewed_at.desc().nullslast(), Review.score.desc(),
     )
@@ -357,6 +369,13 @@ async def archived_list(task_id: str, search: Optional[str] = Query(None, alias=
         else:
             d["archive_reason"] = "deepen"
             d["archive_reason_text"] = "深挖未果 · 疑似好洞"
+        d["is_write_op"] = looks_like_write_op(
+            f.title or "", f.target_url or "", f.vuln_type or "", f.description or "",
+        )
+        if d["is_write_op"]:
+            d["archive_reason_text"] = (
+                "写/删 · 深挖未果" if r.verdict == "deepen" else "写/删 · AI 未收"
+            )
         d["ignore_reasons"] = r.ignore_reasons or []
         d["deepen_directive"] = r.deepen_directive or ""
         return d
