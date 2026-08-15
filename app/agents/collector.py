@@ -31,7 +31,6 @@ from app.engines.translator import (
     looks_like_fofa_syntax,
     looks_like_native_syntax,
     looks_like_query_syntax,
-    translate_fofa_query,
 )
 from app.agents import auth_bootstrap
 
@@ -121,8 +120,7 @@ def _is_edusrc_intent_task(task: Task, raw: str, is_intent: bool) -> bool:
 def _with_edusrc_org_filter(query: str, engine: str = "fofa") -> str:
     """给意图生成的 FOFA 语法套上教育网 org 圈定。
 
-    用户粘贴的引擎原生语法（Quake field:value 等）原样返回，禁止再套 FOFA `&& org=`，
-    否则翻译器会丢掉冒号条件、官网语法一跑就失败。
+    用户粘贴的引擎原生语法原样返回。非 FOFA 引擎禁止再套 FOFA `&& org=`。
     """
     q = (query or "").strip()
     if not q:
@@ -130,6 +128,8 @@ def _with_edusrc_org_filter(query: str, engine: str = "fofa") -> str:
     if "china education and research network center" in q.lower():
         return q
     eng = (engine or "fofa").strip().lower() or "fofa"
+    if eng not in ("", "fofa"):
+        return q
     if looks_like_native_syntax(eng, q) and not looks_like_fofa_syntax(q):
         return q
     return f"({q}) && {_EDUSRC_ORG_FILTER}"
@@ -323,7 +323,9 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
         scope_anchors = _extract_scope_anchors(raw)
 
     def _apply_scope(q: str) -> str:
-        # 用户写的就是当前引擎原生语法：禁止再套 FOFA domain=/org= 外层。
+        # 选了非 FOFA 引擎：原样用当前语法，禁止再套 FOFA domain=/org=。
+        if (engine_name or "fofa").strip().lower() not in ("", "fofa"):
+            return q
         if looks_like_native_syntax(engine_name, q) and not looks_like_fofa_syntax(q):
             return q
         if enterprise_domains:
@@ -334,9 +336,11 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
             return _with_edusrc_org_filter(q, engine_name)
         return q
 
-    # 用户直接给语法（含显式 syntax 模式）、且没历史 → 第一轮直用原语法
-    if raw and not history and (intent_mode == "syntax" or looks_like_syntax):
-        return _apply_scope(raw), "用户指定语法"
+    # 用户写的就是查询语法：原样用。非 FOFA 引擎即使已有历史也不再演化成 FOFA。
+    engine_is_fofa = (engine_name or "fofa").strip().lower() in ("", "fofa")
+    if raw and (intent_mode == "syntax" or looks_like_syntax) and not is_intent:
+        if intent_mode == "syntax" or not history or not engine_is_fofa:
+            return _apply_scope(raw), "用户指定语法"
 
     # 需要 LLM 生成（自然语言意图 / 语法已用过要演化 / 完全没给）
     if llm is not None:
@@ -692,23 +696,14 @@ async def _fofa_collect(
         task.fofa_config = {**cfg}
         return 0
 
-    # 产品约定：任务框统一写 FOFA 语法；非 FOFA 引擎在请求前自动翻译。
-    # 解析不到 FOFA 条件时原样透传（兼容用户直接粘贴该引擎原生语法）。
-    native_query = translate_fofa_query(cur_query, engine_name)
+    # 选了哪个引擎就原样请求，不再从 FOFA 翻译。
+    native_query = cur_query
     engine_cursor = cfg.get("engine_cursor") or None
     # 换语法时清掉跨页 cursor（Censys 等）
     if cfg.get("translated_query") != native_query:
         engine_cursor = None
         cfg.pop("engine_cursor", None)
     cfg["translated_query"] = native_query
-    if native_query != cur_query:
-        await report(
-            "fofa_search",
-            f"{engine.display_name} 语法已从 FOFA 自动翻译",
-            query=cur_query,
-            translated_query=native_query,
-            engine=engine_name,
-        )
 
     try:
         res = await engine.search(

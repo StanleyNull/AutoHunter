@@ -89,7 +89,7 @@ const queryPlaceholder = computed(() => {
   const samples = {
     fofa: 'title="统一身份认证" && domain=".edu.cn"',
     quake: 'title:"统一身份认证" AND domain:"edu.cn"',
-    hunter: 'web.title="统一身份认证" && domain.suffix="edu.cn"',
+    hunter: 'ip.isp="中国教育网"&&header.status_code="200"',
     zoomeye: 'title="统一身份认证" && country="CN"',
     shodan: 'http.title:"login" hostname:edu.cn',
     censys: 'host.dns.names: edu.cn',
@@ -322,7 +322,7 @@ async function save() {
         <label v-if="!isSiteMode">搜集方式
           <select v-model="form.intent_mode">
             <option value="">自动判断</option>
-            <option value="syntax">查询语法（FOFA 或引擎原生均可）</option>
+            <option value="syntax">查询语法（当前引擎官网语法）</option>
             <option value="intent">自然语言意图</option>
           </select>
         </label>
@@ -333,7 +333,7 @@ async function save() {
         <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
       </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
-        FOFA 语法会自动翻译到当前引擎；直接写该引擎原生语法则原样透传。示例：<code>{{ queryPlaceholder }}</code>
+        选了哪个引擎就写哪个引擎的官网语法，原样请求，不再从 FOFA 翻译。示例：<code>{{ queryPlaceholder }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>

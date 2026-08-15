@@ -1006,7 +1006,7 @@ async function runCleanup() {
             <label class="full">默认搜集方式
               <select v-model="form.default_intent_mode">
                 <option value="">自动判断</option>
-                <option value="syntax">查询语法（FOFA 语法或当前引擎原生均可）</option>
+                <option value="syntax">查询语法（当前引擎官网语法）</option>
                 <option value="intent">自然语言意图</option>
               </select>
             </label>

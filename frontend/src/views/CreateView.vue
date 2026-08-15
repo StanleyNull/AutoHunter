@@ -65,7 +65,7 @@ const queryPlaceholder = computed(() => {
       ? 'domain="example.com" || cert="示例集团" || org="示例集团"'
       : 'title="统一身份认证" && domain=".edu.cn"',
     quake: 'title:"统一身份认证" AND domain:"edu.cn"',
-    hunter: 'web.title="统一身份认证" && domain.suffix="edu.cn"',
+    hunter: 'ip.isp="中国教育网"&&header.status_code="200"',
     zoomeye: 'title="统一身份认证" && country="CN"',
     shodan: 'http.title:"login" hostname:edu.cn',
     censys: 'host.services.http.response.html_title:"Login" and host.dns.names: edu.cn',
@@ -76,7 +76,7 @@ const queryHintSample = computed(() => {
   const samples = {
     fofa: 'title="统一身份认证" && domain=".edu.cn"',
     quake: 'title:"登录" AND domain:"edu.cn"',
-    hunter: 'web.title="登录" && domain.suffix="edu.cn"',
+    hunter: 'ip.isp="中国教育网"&&header.status_code="200"',
     zoomeye: 'title="login" && country="CN"',
     shodan: 'http.title:"nginx" port:443',
     censys: 'host.dns.names: edu.cn',
@@ -286,7 +286,7 @@ onMounted(async () => {
       <label v-if="!isSiteMode">搜集方式
         <select v-model="form.intent_mode">
           <option value="">自动判断（写得像语法就当语法，否则当意图）</option>
-          <option value="syntax">查询语法（FOFA 或当前引擎原生均可）</option>
+          <option value="syntax">查询语法（当前引擎官网语法，原样请求）</option>
           <option value="intent">自然语言意图（让搜集 Agent 翻译成语法并逐轮演化）</option>
         </select>
       </label>
@@ -295,7 +295,7 @@ onMounted(async () => {
         <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
       </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
-        两种写法都可用：① <strong>FOFA 语法</strong>（换引擎会自动翻译）；② <strong>当前引擎原生语法</strong>（识别后原样请求，不二次翻译）。
+        选了哪个引擎就写哪个引擎的官网语法，<strong>原样请求，不再从 FOFA 翻译</strong>。
         当前引擎示例：<code>{{ queryHintSample }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
