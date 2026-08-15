@@ -43,6 +43,7 @@ from app.llm.client import LLMClient
 from app.settings_service import (
     llm_client_for_task,
     resolve_engine_config,
+    resolve_engine_name,
     resolve_llm_runtime_mode,
     resolve_worker_prompt_version,
 )
@@ -112,6 +113,9 @@ WORKER_WALL_TIMEOUT = float(os.environ.get("WORKER_WALL_TIMEOUT", "1800"))
 WORKER_IDLE_TIMEOUT = float(os.environ.get("WORKER_IDLE_TIMEOUT", str(WORKER_WALL_TIMEOUT)))
 WORKER_MAX_WALL_TIMEOUT = float(os.environ.get("WORKER_MAX_WALL_TIMEOUT", str(max(WORKER_WALL_TIMEOUT * 4, WORKER_WALL_TIMEOUT))))
 WORKER_WAIT_POLL_INTERVAL = float(os.environ.get("WORKER_WAIT_POLL_INTERVAL", "10"))
+# 等待 worker 并发位的超时：并发位被幽灵线程长期占住时 acquire 可能永远等不到，
+# 超时后把目标回队列并退出本协程，避免「启动中…」无限挂起（由下一轮 tick 再试）。
+WORKER_SEM_ACQUIRE_TIMEOUT = float(os.environ.get("WORKER_SEM_ACQUIRE_TIMEOUT", "120"))
 REVIEW_WALL_TIMEOUT = float(os.environ.get("REVIEW_WALL_TIMEOUT", "600"))
 KILLSWEEP_WALL_TIMEOUT = float(os.environ.get("KILLSWEEP_WALL_TIMEOUT", "3600"))
 # 扩大危害深挖刻意克制：轮数少、墙钟短，打不动就撤。
@@ -303,7 +307,7 @@ def _probe_target_liveness(url: str, host: str, timeout: float) -> dict:
     urls = _probe_urls(url, host)
     skipped: list[dict] = []
     for probe_url in urls:
-        skip, reason, info = prefilter.should_skip_ex(host, probe_url)
+        skip, reason, info = prefilter.should_skip_ex(host, probe_url, timeout=timeout)
         if not skip:
             return {
                 "alive": True,
@@ -740,11 +744,13 @@ class TaskRunner:
                 ),
             )
 
-            # FOFA 账号连续无效达阈值 → 自动暂停任务，不再空转刷无效请求。
+            # 测绘引擎账号连续无效达阈值 → 自动暂停任务，不再空转刷无效请求。
             fofa_fail = int((task.fofa_config or {}).get("fofa_auth_fail_count", 0))
             if FOFA_AUTH_FAIL_PAUSE_THRESHOLD and fofa_fail >= FOFA_AUTH_FAIL_PAUSE_THRESHOLD:
                 last_err = (task.fofa_config or {}).get("last_fofa_error", "")
-                reason = f"FOFA 账号连续 {fofa_fail} 次无效，已自动暂停任务，请检查/更换 FOFA key 后重新启动"
+                from app.engines.sync import engine_display_name
+                disp = engine_display_name(resolve_engine_name(task))
+                reason = f"{disp} 账号连续 {fofa_fail} 次无效，已自动暂停任务，请检查/更换 {disp} key 后重新启动"
                 task.status = "paused"
                 await session.commit()
                 await self._log(session, "orchestrator", "auto_paused", f"{reason}（最后错误：{last_err}）",
@@ -752,12 +758,14 @@ class TaskRunner:
                 await self.pause(reason)
                 return
 
-            # FOFA 每日额度耗尽，连续 12 次（约 12 小时）未恢复 → 自动暂停任务。
+            # 测绘引擎每日额度耗尽，连续 12 次（约 12 小时）未恢复 → 自动暂停任务。
             # 适合挂机过夜：额度恢复则自动继续搜集；12 小时都没恢复才停。
             if (task.fofa_config or {}).get("daily_limit_exhausted"):
                 dl_count = int((task.fofa_config or {}).get("daily_limit_count", 0))
                 last_err = (task.fofa_config or {}).get("last_fofa_error", "")
-                reason = f"FOFA 每日额度耗尽，连续 {dl_count} 次（约 {dl_count} 小时）未恢复，已自动暂停任务"
+                from app.engines.sync import engine_display_name
+                disp = engine_display_name(resolve_engine_name(task))
+                reason = f"{disp} 每日额度耗尽，连续 {dl_count} 次（约 {dl_count} 小时）未恢复，已自动暂停任务"
                 task.status = "paused"
                 await session.commit()
                 await self._log(session, "orchestrator", "auto_paused", f"{reason}（最后错误：{last_err}）",
@@ -1996,7 +2004,27 @@ class TaskRunner:
         # 仍在跑的情况)时才释放，避免线程未退就放行新 worker 导致池子超订。
         worker_sem = agent_semaphore("worker")
         # acquire 本身可能被取消(pause/stop)——此时还没建 heartbeat/future，无需清理。
-        await worker_sem.acquire()
+        # 并发位超时保护：幽灵线程占位时 acquire 会无限等待，worker 会永久挂在
+        # 「启动中…」且没有心跳/超时兜底（历史现象：配了并发却只有 1 个在跑）。
+        # 等不到位就把目标回队列、退出本协程，由下一轮 tick 重新派发。
+        try:
+            await asyncio.wait_for(worker_sem.acquire(), timeout=WORKER_SEM_ACQUIRE_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[sem_wait] target=%s 等待 worker 并发位超时(%.0fs)，目标回队待重派，活跃协程=%d",
+                target_id[:8], WORKER_SEM_ACQUIRE_TIMEOUT, len(self._active_workers),
+            )
+            self._live.pop(target_id, None)
+            self._worker_last_activity.pop(target_id, None)
+            async with SessionLocal() as s2:
+                tgt = await s2.get(Target, target_id)
+                if tgt is not None and tgt.status == "scanning":
+                    tgt.status = "queued"
+                    tgt.assigned_worker = ""
+                    tgt.heartbeat_at = None
+                    tgt.last_error = f"等待 worker 并发位超时({WORKER_SEM_ACQUIRE_TIMEOUT:.0f}s)，已回队"
+                    await s2.commit()
+            return
         # 心跳放在拿到并发位之后再起：确保它的生命周期与 worker_future 完全对齐，
         # 任何一条退出路径都能在下方 finally 里把它取消，杜绝心跳协程泄漏。
         heartbeat_task = asyncio.create_task(self._heartbeat_target(target_id))
@@ -2012,7 +2040,17 @@ class TaskRunner:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
             raise
-        worker_future.add_done_callback(lambda _f: worker_sem.release())
+        # 幂等释放：future 正常完成释放一次；若线程卡死（future 永不完成），由下方
+        # 超时/取消路径强制释放一次，未来线程真返回时不会重复释放导致超订。
+        _sem_released = False
+
+        def _release_sem(_f: object = None) -> None:
+            nonlocal _sem_released
+            if not _sem_released:
+                _sem_released = True
+                worker_sem.release()
+
+        worker_future.add_done_callback(_release_sem)
         try:
             # 活跃续命：worker 有持续事件就不因旧的 30min 墙钟被误杀；
             # 真正卡死则按 idle timeout 回收，活跃过久也有 max wall 兜底。
@@ -2054,6 +2092,9 @@ class TaskRunner:
                         result["resume_context"] = cleaned.get("resume_context") or {}
             except Exception:
                 worker_future.add_done_callback(_consume_task_exception)
+                # 线程仍卡死未返回：强制释放并发位，防止幽灵线程永久占位
+                # （线程真返回时 _release_sem 幂等，不会重复释放）。
+                _release_sem()
             async with SessionLocal() as s:
                 await self._log(s, "worker", "timeout",
                                 f"目标超时强制回收：{timeout_reason}，已触发工具子进程清理",
@@ -2066,6 +2107,7 @@ class TaskRunner:
             if worker:
                 worker.executor.cancel_running()
             worker_future.add_done_callback(_consume_task_exception)
+            _release_sem()
         except Exception as e:
             result = {"verdict": "error", "findings": [], "error": str(e)}
         finally:

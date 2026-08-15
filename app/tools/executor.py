@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import httpx
 
+from app.agents.prefilter import capped_resolution
 from app.config import worker_config
 from app.tools.decoder import decode_transform as _decode_transform
 from app.tools.guard import CommandBlocked, check_command
@@ -372,7 +373,8 @@ class ToolExecutor:
                 method.upper(), url, headers=merged_headers, content=data, json=json_body,
                 timeout=timeout,
             )
-            resp = client.send(req, stream=True, follow_redirects=follow_redirects)
+            with capped_resolution():
+                resp = client.send(req, stream=True, follow_redirects=follow_redirects)
             body, truncated = self._read_limited_response(resp)
             # 吸收整条重定向链（resp.history 里每个中间 302 + 最终响应）的 Set-Cookie，
             # 而不是只读最终 resp.cookies；再兜底吸收 client.cookies jar 里的全部。
@@ -595,7 +597,7 @@ class ToolExecutor:
         q = (query or "").strip()
         if not q:
             return {"ok": False, "kind": "arg_error", "error": "query 不能为空",
-                    "guidance": '传 FOFA 语法，如 ip="1.2.3.4" 或 host="example.com"。'}
+                    "guidance": f'传 {disp} 查询语法，如 ip="1.2.3.4" 或 host="example.com"。'}
         safe_size = max(1, min(int(size or 10), _FOFA_LOOKUP_MAX_SIZE))
         try:
             res = engine_search_sync(
