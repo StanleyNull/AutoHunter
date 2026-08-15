@@ -520,7 +520,13 @@ function fmtEvent(ev) {
     case "tool_js_analyze": return `JS 分析: ${(d.url || "").slice(0, 120)}`;
     case "tool_decode": return `解码: ${d.mode || "auto"}`;
     case "tool_waf_advice": return `WAF 建议: ${d.context || "generic"}`;
-    case "tool_fofa_lookup": return `FOFA: ${(d.query || "").slice(0, 100)}`;
+    case "tool_fofa_lookup": {
+      const eng = ({
+        fofa: "FOFA", quake: "360 Quake", hunter: "Hunter",
+        zoomeye: "ZoomEye", shodan: "Shodan", censys: "Censys",
+      })[task.value?.engine] || task.value?.engine || "测绘";
+      return `${eng}: ${(d.query || "").slice(0, 100)}`;
+    }
     case "tool_session_set": return `会话态更新`;
     case "worker_thought": return `💭 ${(d.text || "").slice(0, 200)}`;
     case "worker_directive": return `🎛 执行人工指令: ${(d.text || "").slice(0, 160)}`;
@@ -1085,7 +1091,7 @@ const collectorCfg = computed(() => task.value?.fofa_config || {});
 // 才算搜集中——主进度条走不确定动画 + collectorPct。终态/待命阶段一律不算搜集，
 // 即便 24×7 自动补队列让搜集器常驻待命也一样：
 //   dispatch=派发完成，idle=队列充足待命/手动清单入队完成，
-//   exhausted=FOFA 已翻尽，fofa_error=搜集出错。
+//   exhausted=测绘已翻尽，fofa_error=搜集出错。
 // 这些阶段必须切到「处置进度」(resolved/total)，否则 collectorPct 会兜底成无意义的 25%，
 // 让手动清单等入队完成后永久停在「25% 搜集进度」。
 const COLLECT_DONE_PHASES = new Set(["dispatch", "idle", "exhausted", "fofa_error"]);
@@ -1169,9 +1175,9 @@ const cacheHitRate = computed(() => {
 const isEnterpriseTask = computed(() => task.value?.src_type === "enterprise");
 const taskModeName = computed(() => isEnterpriseTask.value ? "企业SRC" : "EduSRC");
 const targetSourceName = computed(() => (({
-  fofa: "FOFA",
+  fofa: "测绘搜集",
   manual: "手动清单",
-  both: "FOFA+手动",
+  both: "测绘+手动",
   site: "单站协作",
 })[task.value?.target_source] || task.value?.target_source || "-"));
 const engineName = computed(() => (({
@@ -1301,7 +1307,7 @@ function parseEventTs(ts) {
         <div class="mission-meta">
           <span>{{ taskModeName }}</span>
           <span>{{ targetSourceName }}</span>
-          <span v-if="task.engine && task.engine !== 'fofa'" class="engine-badge">🔍 {{ engineName }}</span>
+          <span v-if="task.target_source !== 'manual' && task.target_source !== 'site'" class="engine-badge">{{ engineName }}</span>
           <span>{{ missionScopeText }}</span>
           <span>并发 {{ task.concurrency }}</span>
           <span>{{ runState.hint }}</span>
@@ -1654,8 +1660,8 @@ function parseEventTs(ts) {
               <p>{{ fmtLocalTime(k.created_at) || "未知" }}</p>
             </div>
             <div>
-              <span>FOFA 语法</span>
-              <code>{{ k.fofa_query || "无 FOFA 语法" }}</code>
+              <span>测绘语法</span>
+              <code>{{ k.fofa_query || "无测绘语法" }}</code>
             </div>
             <div>
               <span>指纹依据</span>

@@ -333,7 +333,7 @@ async function save() {
         <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
       </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
-        选了哪个引擎就写哪个引擎的官网语法，原样请求，不再从 FOFA 翻译。示例：<code>{{ queryPlaceholder }}</code>
+        选了哪个引擎就写哪个引擎的官网语法，原样请求，不会改写成别的引擎语法。示例：<code>{{ queryPlaceholder }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>
@@ -428,7 +428,7 @@ async function save() {
         <div class="settings-grid" style="margin-top: 12px">
           <label v-if="!isSiteMode">搜集最大页数 <input v-model="form.max_pages" type="number" min="1" max="200" /></label>
           <label v-if="!isSiteMode">每页条数 <input v-model="form.page_size" type="number" min="1" max="1000" /></label>
-          <p v-if="!isSiteMode" class="field-hint full">分页对当前选用的测绘引擎生效（不限于 FOFA）。</p>
+          <p v-if="!isSiteMode" class="field-hint full">分页对当前选用的测绘引擎生效。</p>
           <template v-if="!isSiteMode && engineIsFofa">
             <label>FOFA Key（任务级覆盖） <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
             <label>FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>

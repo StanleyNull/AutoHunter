@@ -295,7 +295,7 @@ onMounted(async () => {
         <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
       </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
-        选了哪个引擎就写哪个引擎的官网语法，<strong>原样请求，不再从 FOFA 翻译</strong>。
+        选了哪个引擎就写哪个引擎的官网语法，<strong>原样请求，不会改写成别的引擎语法</strong>。
         当前引擎示例：<code>{{ queryHintSample }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
@@ -397,7 +397,7 @@ onMounted(async () => {
         />
 
         <label v-if="!isSiteMode">搜集最大页数 <input v-model="form.max_pages" type="number" /></label>
-        <p v-if="!isSiteMode" class="field-hint">对当前选用的测绘引擎生效（不限于 FOFA）。</p>
+        <p v-if="!isSiteMode" class="field-hint">对当前选用的测绘引擎生效。</p>
         <template v-if="!isSiteMode && engineIsFofa">
           <label>FOFA Key（任务级覆盖，可选） <input v-model="form.fofa_key" type="password" placeholder="留空用系统设置" /></label>
           <label>FOFA API 端点（可选） <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>

@@ -1010,7 +1010,7 @@ async function runCleanup() {
                 <option value="intent">自然语言意图</option>
               </select>
             </label>
-            <p class="field-hint full">分页与搜集方式对当前选用的测绘引擎生效，不限于 FOFA。</p>
+            <p class="field-hint full">分页与搜集方式对当前选用的测绘引擎生效。</p>
           </div>
 
           <div class="engine-keys">
