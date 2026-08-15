@@ -70,7 +70,7 @@
       <a href="https://github.com/1diot9">
         <img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=128" width="72" height="72" alt="1diot9" /><br />
         <sub><b>1diot9</b></sub>
-      </a><br /><sup>Contributor</sup>
+      </a><br /><sup>Workdir Cleanup</sup>
     </td>
     <td align="center" width="100">
       <a href="https://github.com/qianchongceng0-cyber">
@@ -89,6 +89,12 @@
         <img src="https://avatars.githubusercontent.com/u/102737018?v=4&s=128" width="72" height="72" alt="DmcforSpc" /><br />
         <sub><b>DmcforSpc</b></sub>
       </a><br /><sup>Kimi Code</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/moliyu1101">
+        <img src="https://avatars.githubusercontent.com/u/78614185?v=4&s=128" width="72" height="72" alt="moliyu1101" /><br />
+        <sub><b>moliyu1101</b></sub>
+      </a><br /><sup>DNS Probe</sup>
     </td>
   </tr>
 </table>
