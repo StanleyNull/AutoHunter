@@ -25,6 +25,7 @@ from app.agents import collector_llm, playbook_router, prefilter, scorer, site_c
 from app.agents import target_cluster
 from app.agents.manual_targets import parse_manual_targets
 from app.agents.prompts import is_enterprise_src
+from app.agents.scope_anchors import extract_enterprise_domains, extract_scope_anchors
 from app.db.models import Target, Task
 from app.engines import get_engine, QuakeRateLimitError
 from app.engines.translator import (
@@ -135,28 +136,6 @@ def _with_edusrc_org_filter(query: str, engine: str = "fofa") -> str:
     return f"({q}) && {_EDUSRC_ORG_FILTER}"
 
 
-def _extract_enterprise_domains(raw: str) -> list[str]:
-    """从用户的企业资产范围（如 `*.21cn.com *.189.cn ，资产范围就这些`）里提取根域名。
-    支持通配符、逗号/空格/中文逗号分隔、零散域名。返回去重后的根域名列表。"""
-    import re
-    if not raw:
-        return []
-    # 抓出所有形如 (*.)example.com / sub.example.com.cn 的域名 token
-    tokens = re.findall(r"[*]?\.?[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9][a-z0-9\-]*)+", raw.lower())
-    domains: list[str] = []
-    seen: set[str] = set()
-    for t in tokens:
-        t = t.lstrip("*.").strip(".")
-        if not t or "." not in t:
-            continue
-        # 用 target_cluster 的 root_domain 归一到根域（含 .com.cn 等二级后缀处理）
-        root = target_cluster.root_domain(t)
-        if root and root not in seen:
-            seen.add(root)
-            domains.append(root)
-    return domains
-
-
 def _with_enterprise_scope_filter(query: str, domains: list[str]) -> str:
     """企业模式范围硬约束：把 LLM 生成的整条语法用用户指定的域名范围 `&&` 包裹，
     彻底杜绝 `||` 运算符优先级导致的范围逃逸（否则 (domain=a)&&(body=x) || (body=y)
@@ -170,53 +149,6 @@ def _with_enterprise_scope_filter(query: str, domains: list[str]) -> str:
     if scope.lower() in q.lower():
         return q
     return f"{scope} && ({q})"
-
-
-def _extract_scope_anchors(raw: str) -> dict[str, list[str]]:
-    """从用户原始 FOFA 语法里提取「资产归属锚点」：具体域名 + cert.subject.org。
-
-    专治单目标任务(如 `example.edu.cn && cert.subject.org="某高校"`)被 LLM
-    逐轮演化时把这些锚点丢掉、换成宽泛的 `body="某高校"`，导致范围从一所
-    学校扩散到全国教育网（body 里凡是提到这几个字的友链/新闻/名录站全被圈进来）。
-
-    返回 {"domains": [...根域...], "cert_orgs": ['某高校', ...]}。
-    只提取「精确锚点」——纯 org=/body= 这类宽泛条件不算锚点，不参与硬约束。
-    """
-    import re
-    raw = (raw or "").strip()
-    if not raw:
-        return {"domains": [], "cert_orgs": []}
-
-    cert_orgs: list[str] = []
-    seen_org: set[str] = set()
-    for m in re.finditer(r'cert\.subject\.org\s*=\s*"([^"]+)"', raw, re.I):
-        v = m.group(1).strip()
-        if v and v not in seen_org:
-            seen_org.add(v)
-            cert_orgs.append(v)
-
-    # 提取具体域名锚点：优先 domain="x"/host="x"，其次裸写的域名 token。
-    # 排除 FOFA 通用 org 值（China Education... 不是资产锚点，是全网范围）。
-    domains: list[str] = []
-    seen_dom: set[str] = set()
-
-    def _add_domain(token: str) -> None:
-        t = token.strip().strip('"').lstrip("*.").strip(".").lower()
-        if not t or "." not in t:
-            return
-        root = target_cluster.root_domain(t)
-        if root and root not in seen_dom:
-            seen_dom.add(root)
-            domains.append(root)
-
-    for m in re.finditer(r'(?:domain|host)\s*[=:]\s*"([^"]+)"', raw, re.I):
-        _add_domain(m.group(1))
-    # 裸写域名（未包在字段里）：如 `ecut.edu.cn && cert...`
-    stripped = re.sub(r'(?:domain|host|org|cert\.[a-z.]+|title|body|icon_hash|ip|port|protocol)\s*=\s*"[^"]*"', " ", raw, flags=re.I)
-    for tok in re.findall(r"[*]?\.?[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9][a-z0-9\-]*)+", stripped.lower()):
-        _add_domain(tok)
-
-    return {"domains": domains, "cert_orgs": cert_orgs}
 
 
 def _with_scope_anchors(query: str, anchors: dict[str, list[str]]) -> str:
@@ -313,14 +245,14 @@ async def _resolve_query(task: Task, llm: LLMClient | None) -> tuple[str, str]:
     # `||` 分支脱离域名约束逃逸到全网（实测会圈进俄罗斯/西班牙等无关资产）。
     enterprise_domains: list[str] = []
     if is_enterprise_src(task.src_type):
-        enterprise_domains = _extract_enterprise_domains(raw)
+        enterprise_domains = extract_enterprise_domains(raw)
 
     # 单目标资产锚点硬约束（非企业模式）：用户原始语法里若带具体域名 /
     # cert.subject.org，就把它作为外层 && 强制包住每一轮演化后的语法，
     # 防止 LLM 把归属锚点替换成宽泛 body= 后范围扩散到别的学校。
     scope_anchors: dict[str, list[str]] = {"domains": [], "cert_orgs": []}
     if not enterprise_domains and looks_like_syntax:
-        scope_anchors = _extract_scope_anchors(raw)
+        scope_anchors = extract_scope_anchors(raw)
 
     def _apply_scope(q: str) -> str:
         # 选了非 FOFA 引擎：原样用当前语法，禁止再套 FOFA domain=/org=。
@@ -869,9 +801,9 @@ async def _fofa_collect(
     #   不做客户端根域过滤（证书归属无法在本地判定，靠语法层的 && 硬约束兜底）。
     scope_domains: set[str] = set()
     if is_enterprise_src(task.src_type):
-        scope_domains = set(_extract_enterprise_domains((task.fofa_query or "")))
+        scope_domains = set(extract_enterprise_domains((task.fofa_query or "")))
     else:
-        anchor_domains = _extract_scope_anchors((task.fofa_query or "")).get("domains") or []
+        anchor_domains = extract_scope_anchors((task.fofa_query or "")).get("domains") or []
         scope_domains = set(anchor_domains)
 
     fields = res.fields
