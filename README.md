@@ -96,6 +96,12 @@
         <sub><b>moliyu1101</b></sub>
       </a><br /><sup>DNS Probe</sup>
     </td>
+    <td align="center" width="100">
+      <a href="https://github.com/Saide-sec">
+        <img src="https://avatars.githubusercontent.com/u/90189362?v=4&s=128" width="72" height="72" alt="Saide-sec" /><br />
+        <sub><b>Saide-sec</b></sub>
+      </a><br /><sup>Frontend UX</sup>
+    </td>
   </tr>
 </table>
 
