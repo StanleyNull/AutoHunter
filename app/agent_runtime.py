@@ -177,10 +177,10 @@ _SUM_LIMITS = (
     + ESCALATION_MAX_CONCURRENCY
     + ASSISTANT_MAX_CONCURRENCY
 )
-# 余量：为偶发的临时提交（如少量并发的 report assistant）留 4 个缓冲，仍可 env 覆盖，
-# 但无论如何不会小于 _SUM_LIMITS（否则触发历史 futex_wait 死锁）。
+# 余量：为偶发的临时提交（如少量并发的 report assistant）留 4 个缓冲。
+# env 可以再加大，但不能把缓冲削掉——池子一旦 < 各类上限之和就会 futex_wait 死锁。
 AGENT_THREAD_POOL_SIZE = max(
-    _SUM_LIMITS,
+    _SUM_LIMITS + 4,
     _int_env("AUTOHUNTER_AGENT_THREAD_POOL_SIZE", _SUM_LIMITS + 4),
 )
 

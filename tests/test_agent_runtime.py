@@ -35,6 +35,24 @@ class AutoWorkerBaseTests(unittest.TestCase):
     def test_fractional_cpu_quota(self):
         self.assertEqual(_auto_worker_base_from(1.5, 4.0), 8)
 
+    def test_agent_pool_keeps_four_slot_buffer(self):
+        from app.agent_runtime import (
+            AGENT_THREAD_POOL_SIZE,
+            ASSISTANT_MAX_CONCURRENCY,
+            ESCALATION_MAX_CONCURRENCY,
+            KILLSWEEP_MAX_CONCURRENCY,
+            REVIEW_MAX_CONCURRENCY,
+            WORKER_MAX_CONCURRENCY,
+        )
+        total = (
+            WORKER_MAX_CONCURRENCY
+            + REVIEW_MAX_CONCURRENCY
+            + KILLSWEEP_MAX_CONCURRENCY
+            + ESCALATION_MAX_CONCURRENCY
+            + ASSISTANT_MAX_CONCURRENCY
+        )
+        self.assertGreaterEqual(AGENT_THREAD_POOL_SIZE, total + 4)
+
 
 if __name__ == "__main__":
     unittest.main()
