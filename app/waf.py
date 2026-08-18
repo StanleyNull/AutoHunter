@@ -23,6 +23,9 @@ WAF_ENABLED = _env_bool("AUTOHUNTER_WAF_ENABLED", True)
 WAF_BLOCK_MODE = _env_bool("AUTOHUNTER_WAF_BLOCK", True)
 TRUST_PROXY_HEADERS = _env_bool("AUTOHUNTER_TRUST_PROXY", False)
 MAX_CONTENT_LENGTH = int(os.environ.get("AUTOHUNTER_WAF_MAX_BODY", str(2 * 1024 * 1024)))
+# 备份恢复要上传整库 tar.gz（生产库常 >100MB），单独放宽；其它接口仍走上面的 2MB。
+BACKUP_MAX_CONTENT_LENGTH = int(os.environ.get("AUTOHUNTER_BACKUP_MAX_BODY", str(8 * 1024 * 1024 * 1024)))
+_BACKUP_UPLOAD_PATHS = frozenset({"/api/backup/restore"})
 
 _STATIC_PREFIXES = ("/assets/",)
 _EXACT_ALLOW = {"/", "/health", "/favicon.svg", "/favicon.ico", "/api/auth/status"}
@@ -113,8 +116,10 @@ def inspect_request(request: Request) -> WAFDecision:
         return WAFDecision(False, "path_too_long", 414)
 
     content_length = request.headers.get("content-length")
-    if content_length and content_length.isdigit() and int(content_length) > MAX_CONTENT_LENGTH:
-        return WAFDecision(False, "body_too_large", 413)
+    if content_length and content_length.isdigit():
+        limit = BACKUP_MAX_CONTENT_LENGTH if path in _BACKUP_UPLOAD_PATHS else MAX_CONTENT_LENGTH
+        if int(content_length) > limit:
+            return WAFDecision(False, "body_too_large", 413)
 
     ua = request.headers.get("user-agent", "")
     if _BAD_UA.search(ua):

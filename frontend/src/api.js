@@ -209,6 +209,48 @@ function qs(params = {}) {
   return out ? `?${out}` : "";
 }
 
+async function downloadFile(method, url) {
+  const headers = {};
+  const token = apiToken();
+  if (token) headers["X-Autohunter-Token"] = token;
+  const res = await fetch(base + url, { method, headers });
+  if (res.status === 403) throw new Error("只读令牌不允许此操作");
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  const blob = await res.blob();
+  let filename = "autohunter-backup.tar.gz";
+  const cd = res.headers.get("content-disposition") || "";
+  const star = cd.match(/filename\*=UTF-8''([^;]+)/i);
+  const plain = cd.match(/filename=\"?([^\";]+)\"?/i);
+  if (star) filename = decodeURIComponent(star[1]);
+  else if (plain) filename = plain[1];
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 2000);
+}
+
+async function uploadBackup(file, includeWork) {
+  const headers = {};
+  const token = apiToken();
+  if (token) headers["X-Autohunter-Token"] = token;
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch(base + `/api/backup/restore${qs({ include_work: includeWork })}`, {
+    method: "POST",
+    headers,
+    body,
+  });
+  const text = await res.text();
+  if (res.status === 403) throw new Error("只读令牌不允许此操作");
+  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  try { return JSON.parse(text); }
+  catch { return { ok: true, message: text }; }
+}
+
 export const api = {
   listTasks: () => req("GET", "/api/tasks"),
   createTask: (data) => req("POST", "/api/tasks", data),
@@ -258,6 +300,13 @@ export const api = {
   workdirStats: () => req("GET", "/api/settings/workdir/stats"),
   workdirCleanup: (retentionDays, dryRun = true) =>
     req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: dryRun })}`),
+  backupStatus: () => req("GET", "/api/backup/status"),
+  backupSnapshot: () => req("POST", "/api/backup/snapshot"),
+  downloadBackupExport: (includeWork = false) =>
+    downloadFile("POST", `/api/backup/export${qs({ include_work: includeWork })}`),
+  downloadBackupSnapshot: (name) =>
+    downloadFile("GET", `/api/backup/snapshots/${encodeURIComponent(name)}`),
+  restoreBackup: (file, includeWork = false) => uploadBackup(file, includeWork),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit) =>

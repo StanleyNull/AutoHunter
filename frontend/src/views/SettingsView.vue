@@ -20,6 +20,13 @@ const workdirStats = ref(null);
 const workdirResult = ref(null);
 const cleanupRetentionDays = ref(7);
 const cleanupDryRun = ref(true);
+const backupLoading = ref(false);
+const backupBusy = ref("");
+const backupStats = ref(null);
+const backupIncludeWork = ref(false);
+const restoreIncludeWork = ref(false);
+const restoreFile = ref(null);
+const backupRestarting = ref(false);
 /** 自动保存状态：idle | pending | saving | saved | error | incomplete */
 const autoSaveStatus = ref("idle");
 const autoSaveError = ref("");
@@ -89,13 +96,15 @@ function pollHealth() {
       const r = await fetch("/health");
       if (r.ok) {
         clearInterval(restartPoll);
+        const fromBackup = backupRestarting.value;
         updateState.restarting = false;
-        toast("更新完成，服务已重启 🎉");
+        backupRestarting.value = false;
+        toast(fromBackup ? "备份恢复完成，服务已重启" : "更新完成，服务已重启 🎉");
         updateState.info = null;
         load();
       }
     } catch {}
-    if (attempts > 60) { clearInterval(restartPoll); updateState.restarting = false; updateState.error = "重启超时，请手动刷新页面"; }
+    if (attempts > 60) { clearInterval(restartPoll); updateState.restarting = false; backupRestarting.value = false; updateState.error = "重启超时，请手动刷新页面"; }
   }, 3000);
 }
 
@@ -710,12 +719,87 @@ onMounted(async () => {
   // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
   checkUpdate();
   loadWorkdirStats();
+  loadBackupStats();
 });
 onUnmounted(() => {
   clearInterval(healthPoll);
   clearInterval(restartPoll);
   clearTimeout(autoSaveTimer);
 });
+
+async function loadBackupStats() {
+  backupLoading.value = true;
+  try {
+    backupStats.value = await api.backupStatus();
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupLoading.value = false;
+  }
+}
+
+function pollBackupRestart() {
+  backupRestarting.value = true;
+  pollHealth();
+}
+
+async function exportBackup() {
+  backupBusy.value = "export";
+  try {
+    await api.downloadBackupExport(backupIncludeWork.value);
+    toast(backupIncludeWork.value ? "已开始下载（含工作目录）" : "已开始下载数据库备份");
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
+
+async function snapshotNow() {
+  backupBusy.value = "snapshot";
+  try {
+    const r = await api.backupSnapshot();
+    toast(`已在服务器保存快照 ${r.name}（${r.human}）`);
+    await loadBackupStats();
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
+
+async function downloadSnapshot(name) {
+  backupBusy.value = name;
+  try {
+    await api.downloadBackupSnapshot(name);
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
+
+function onRestoreFile(ev) {
+  restoreFile.value = ev.target.files?.[0] || null;
+}
+
+async function restoreBackup() {
+  if (!restoreFile.value) {
+    toast("请先选择备份文件（.tar.gz）");
+    return;
+  }
+  if (!confirm("将覆盖当前数据库并重启服务。进行中的任务会中断。确定恢复？")) return;
+  backupBusy.value = "restore";
+  try {
+    const r = await api.restoreBackup(restoreFile.value, restoreIncludeWork.value);
+    toast(r.message || "已恢复");
+    if (r.restarted) pollBackupRestart();
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
 
 async function loadWorkdirStats() {
   workdirLoading.value = true;
@@ -1057,6 +1141,80 @@ async function runCleanup() {
               <input v-model="form.skip_score_threshold" type="number" step="1" />
             </label>
             <p class="field-hint full">Collector 评分低于此值的目标直接跳过，避免 worker 消耗在垃圾资产上。</p>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-block">
+          <legend>
+            <span>数据备份</span>
+            <small>SQLite 在线备份打一致快照，避免直接拷文件碰到 WAL 半截损坏。主要备份数据库，工作目录可选。</small>
+          </legend>
+          <div v-if="backupRestarting" class="update-restarting">
+            <div class="update-spinner"></div>
+            <p>备份已写入，服务正在重启…</p>
+          </div>
+          <div v-else-if="backupLoading && !backupStats" class="field-hint">加载中…</div>
+          <div v-else-if="backupStats" class="workdir-panel">
+            <div class="workdir-stats-grid">
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">数据库</span>
+                <b class="workdir-stat-value">{{ backupStats.db_human }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">本地快照</span>
+                <b class="workdir-stat-value">{{ backupStats.snapshots?.length || 0 }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">自动备份</span>
+                <b class="workdir-stat-value" :class="backupStats.auto_backup?.enabled ? 'on' : 'off'">
+                  {{ backupStats.auto_backup?.enabled ? `每 ${backupStats.auto_backup.interval_hours} 小时` : '已关闭' }}
+                </b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">工作目录</span>
+                <b class="workdir-stat-value small">{{ backupStats.work?.human || '0 B' }}</b>
+              </div>
+            </div>
+            <p class="field-hint">
+              自动快照保存在服务器 <code>data/backups/</code>（保留 {{ backupStats.auto_backup?.keep || 7 }} 份）。
+              工作目录可选打包，上限 {{ backupStats.work?.max_human }}。
+            </p>
+            <div class="workdir-cleanup-controls">
+              <label class="workdir-dryrun-label">
+                <input type="checkbox" v-model="backupIncludeWork" />
+                下载时同时打包工作目录
+              </label>
+              <button type="button" :disabled="!!backupBusy" @click="exportBackup">
+                {{ backupBusy === 'export' ? '打包中…' : '下载备份' }}
+              </button>
+              <button type="button" :disabled="!!backupBusy" @click="snapshotNow">
+                {{ backupBusy === 'snapshot' ? '快照中…' : '立即在服务器打快照' }}
+              </button>
+              <button type="button" :disabled="backupLoading" @click="loadBackupStats">刷新</button>
+            </div>
+            <details v-if="backupStats.snapshots?.length" class="workdir-result-details">
+              <summary>服务器快照（{{ backupStats.snapshots.length }}）</summary>
+              <div class="workdir-result-list">
+                <div v-for="s in backupStats.snapshots" :key="s.name" class="workdir-result-item">
+                  <span class="workdir-item-name">{{ s.name }}</span>
+                  <span class="workdir-item-size">{{ s.human }}</span>
+                  <button type="button" class="mini-action" :disabled="!!backupBusy" @click="downloadSnapshot(s.name)">下载</button>
+                </div>
+              </div>
+            </details>
+            <div class="backup-restore">
+              <p class="field-hint">从备份恢复会覆盖当前数据库并重启。请先下载一份当前备份。</p>
+              <div class="workdir-cleanup-controls">
+                <input type="file" accept=".gz,.tgz,.tar.gz,application/gzip" @change="onRestoreFile" />
+                <label class="workdir-dryrun-label">
+                  <input type="checkbox" v-model="restoreIncludeWork" />
+                  同时恢复工作目录
+                </label>
+                <button type="button" class="danger" :disabled="!!backupBusy || !restoreFile" @click="restoreBackup">
+                  {{ backupBusy === 'restore' ? '恢复中…' : '恢复并重启' }}
+                </button>
+              </div>
+            </div>
           </div>
         </fieldset>
 

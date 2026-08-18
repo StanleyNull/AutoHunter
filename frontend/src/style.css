@@ -1591,6 +1591,16 @@ main {
   white-space: nowrap;
 }
 
+.backup-restore {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.settings-block button.danger {
+  color: var(--danger, #e5484d);
+  border-color: color-mix(in oklch, var(--danger, #e5484d) 35%, var(--border));
+}
+
 /* ---------- 任务指挥台 ---------- */
 .mission-hero {
   position: relative; overflow: hidden;

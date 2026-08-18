@@ -33,7 +33,8 @@ from app.agent_runtime import (
     REVIEW_MAX_CONCURRENCY,
     WORKER_MAX_CONCURRENCY,
 )
-from app.api import findings, intel, runtime_logs, settings, stream, tasks, update, vulns
+from app.api import backup, findings, intel, runtime_logs, settings, stream, tasks, update, vulns
+from app.backup import run_periodic_backup
 from app.db.session import init_db
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
 from app.orchestrator import manager
@@ -119,6 +120,7 @@ async def lifespan(app: FastAPI):
     asyncio.get_running_loop().set_default_executor(default_executor)
     lag_monitor = asyncio.create_task(_loop_lag_monitor())
     cleanup_task = asyncio.create_task(run_periodic_cleanup())
+    backup_task = asyncio.create_task(run_periodic_backup())
     await init_db()
     await init_settings_cache()
     DIAG_LOG.info(
@@ -148,7 +150,8 @@ async def lifespan(app: FastAPI):
     finally:
         lag_monitor.cancel()
         cleanup_task.cancel()
-        for t in (lag_monitor, cleanup_task):
+        backup_task.cancel()
+        for t in (lag_monitor, cleanup_task, backup_task):
             try:
                 await t
             except asyncio.CancelledError:
@@ -162,6 +165,7 @@ app = FastAPI(title="AutoHunter", version="0.1", lifespan=lifespan)
 if DS2API_ENABLED:
     app.include_router(ds2api_router)
 app.include_router(settings.router)
+app.include_router(backup.router)
 
 
 @app.middleware("http")
