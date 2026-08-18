@@ -25,6 +25,9 @@ from app.agent_runtime import (
     AGENT_THREAD_POOL_SIZE,
     ASSISTANT_MAX_CONCURRENCY,
     COLLECTOR_IO_POOL_SIZE,
+    DEFAULT_THREAD_POOL_SIZE,
+    DETECTED_CPUS,
+    DETECTED_MEM_GIB,
     ESCALATION_MAX_CONCURRENCY,
     KILLSWEEP_MAX_CONCURRENCY,
     REVIEW_MAX_CONCURRENCY,
@@ -110,7 +113,7 @@ async def _loop_lag_monitor() -> None:
 async def lifespan(app: FastAPI):
     _install_diagnostics(asyncio.get_running_loop())
     default_executor = ThreadPoolExecutor(
-        max_workers=int(os.environ.get("AUTOHUNTER_DEFAULT_THREAD_POOL_SIZE", "16")),
+        max_workers=DEFAULT_THREAD_POOL_SIZE,
         thread_name_prefix="ah-default",
     )
     asyncio.get_running_loop().set_default_executor(default_executor)
@@ -119,7 +122,9 @@ async def lifespan(app: FastAPI):
     await init_db()
     await init_settings_cache()
     DIAG_LOG.info(
-        "并发档: worker=%s review=%s killsweep=%s escalation=%s assistant=%s agent_pool=%s collector_io=%s",
+        "并发档: cpus=%.1f mem_gib=%.1f worker=%s review=%s killsweep=%s escalation=%s assistant=%s agent_pool=%s collector_io=%s",
+        DETECTED_CPUS,
+        DETECTED_MEM_GIB,
         WORKER_MAX_CONCURRENCY,
         REVIEW_MAX_CONCURRENCY,
         KILLSWEEP_MAX_CONCURRENCY,

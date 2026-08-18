@@ -418,7 +418,7 @@ hunt.example.com {
 > **访问控制**：公网部署**务必设 `AUTOHUNTER_API_TOKEN`**，否则控制台和挖洞能力对全网裸奔。内置 WAF 默认开启，但令牌是第一道门。
 
 - **成本控制**：Worker 靠 LLM 驱动，目标越多 token 越贵。用 `.env` 的 `WORKER_MAX_ROUNDS` / `*_BUDGET_CAP` 收紧预算，或降低并发。
-- **资源**：每个并发 Worker 会跑真实工具子进程。小内存机器调小 `AUTOHUNTER_AGENT_THREAD_POOL_SIZE` 和任务并发数。
+- **资源**：默认按 CPU/内存自动定 Worker 并发（约 1C1G→3，2C4G→8，大机器顶 32），Docker 会读 cgroup 限额。复制 `.env.example` 不必再填线程池。要强制用 `AUTOHUNTER_WORKER_MAX_CONCURRENCY`；每个 Worker 会跑真实工具子进程，小机器把任务并发也调低。
 - **网络**：服务器需能访问 LLM API 和目标网络；走代理要给 Docker/容器配好出网。
 - **重启恢复**：`AUTOHUNTER_RESTORE_ON_STARTUP=1` 时重启自动续跑之前 running 的任务；受限机器设 `0` 只起 Web/API。
 

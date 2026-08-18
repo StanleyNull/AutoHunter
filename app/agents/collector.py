@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent_runtime import COLLECTOR_IO_EXECUTOR
+from app.agent_runtime import COLLECTOR_IO_EXECUTOR, PREFILTER_CONCURRENCY, SCORE_CONCURRENCY, TARGET_FILTER_CONCURRENCY
 from app.agents import collector_llm, playbook_router, prefilter, scorer, site_collab, target_filter
 from app.agents import target_cluster
 from app.agents.manual_targets import parse_manual_targets
@@ -48,9 +48,9 @@ from app.llm.client import LLMClient, LLMError
 from app.settings_service import llm_client_for_task_optional, resolve_engine_config, resolve_skip_score_threshold
 
 _EDUSRC_ORG_FILTER = 'org="China Education and Research Network Center"'
-_PREFILTER_CONCURRENCY = int(os.environ.get("COLLECTOR_PREFILTER_CONCURRENCY", "24"))
-_SCORE_CONCURRENCY = int(os.environ.get("COLLECTOR_SCORE_CONCURRENCY", "16"))
-_TARGET_FILTER_CONCURRENCY = int(os.environ.get("TARGET_FILTER_CONCURRENCY", "12"))
+_PREFILTER_CONCURRENCY = PREFILTER_CONCURRENCY
+_SCORE_CONCURRENCY = SCORE_CONCURRENCY
+_TARGET_FILTER_CONCURRENCY = TARGET_FILTER_CONCURRENCY
 _TARGET_FILTER_HARD_TIMEOUT = float(os.environ.get("TARGET_FILTER_HARD_TIMEOUT", "10.0"))
 # 大批量入队时分批 commit，避免一次 flush 上万行把 SQLite 冲垮。
 _ENQUEUE_COMMIT_BATCH = max(50, int(os.environ.get("ENQUEUE_COMMIT_BATCH", "200")))
