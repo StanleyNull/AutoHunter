@@ -113,53 +113,6 @@
         <sub><b>tf748i5gf5t</b></sub>
       </a><br /><sup>Reviewer Fix</sup>
     </td>
-    <td align="center" width="100">
-      <a href="https://github.com/21a21a">
-        <img src="https://avatars.githubusercontent.com/u/109836771?v=4&s=128" width="72" height="72" alt="21a21a" /><br />
-        <sub><b>21a21a</b></sub>
-      </a><br /><sup>Task Delete</sup>
-    </td>
-    <td align="center" width="100">
-      <a href="https://github.com/Dr3Wm">
-        <img src="https://avatars.githubusercontent.com/u/114931663?v=4&s=128" width="72" height="72" alt="Dr3Wm" /><br />
-        <sub><b>Dr3Wm</b></sub>
-      </a><br /><sup>Auth Binding</sup>
-    </td>
-    <td align="center" width="100">
-      <a href="https://github.com/Ilyasfiel">
-        <img src="https://avatars.githubusercontent.com/u/58058862?v=4&s=128" width="72" height="72" alt="Ilyasfiel" /><br />
-        <sub><b>Ilyasfiel</b></sub>
-      </a><br /><sup>Review Queue</sup>
-    </td>
-    <td align="center" width="100">
-      <a href="https://github.com/wr0x00">
-        <img src="https://avatars.githubusercontent.com/u/86941613?v=4&s=128" width="72" height="72" alt="wr0x00" /><br />
-        <sub><b>wr0x00</b></sub>
-      </a><br /><sup>Dockerfile</sup>
-    </td>
-    <td align="center" width="100">
-      <a href="https://github.com/sjjly">
-        <img src="https://avatars.githubusercontent.com/u/201740083?v=4&s=128" width="72" height="72" alt="sjjly" /><br />
-        <sub><b>sjjly</b></sub>
-      </a><br /><sup>Quake API</sup>
-    </td>
-  </tr>
-</table>
-
-<table>
-  <tr>
-    <td align="center" width="100">
-      <a href="https://github.com/xaio-xu">
-        <img src="https://avatars.githubusercontent.com/u/240871376?v=4&s=128" width="72" height="72" alt="xaio-xu" /><br />
-        <sub><b>xaio-xu</b></sub>
-      </a><br /><sup>Killsweep</sup>
-    </td>
-    <td align="center" width="100">
-      <a href="https://github.com/Mrship12138">
-        <img src="https://avatars.githubusercontent.com/u/68830639?v=4&s=128" width="72" height="72" alt="Mrship12138" /><br />
-        <sub><b>Mrship12138</b></sub>
-      </a><br /><sup>Coding Plan</sup>
-    </td>
   </tr>
 </table>
 
