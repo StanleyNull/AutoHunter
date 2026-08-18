@@ -594,6 +594,8 @@ REPORT_ASSISTANT_TOOLS = [
                     "data": {"type": "string"},
                     "json_body": {"type": "object"},
                     "follow_redirects": {"type": "boolean", "default": False},
+                    "confirm_destructive": {"type": "boolean", "default": False},
+                    "confirm_reason": {"type": "string"},
                 },
                 "required": ["url"],
             },
@@ -609,6 +611,8 @@ REPORT_ASSISTANT_TOOLS = [
                 "properties": {
                     "command": {"type": "string"},
                     "timeout": {"type": "integer", "default": 30},
+                    "confirm_destructive": {"type": "boolean", "default": False},
+                    "confirm_reason": {"type": "string"},
                 },
                 "required": ["command"],
             },
@@ -738,6 +742,8 @@ def _tool_result_summary(name: str, result: dict) -> str:
     """把工具结果浓缩成一句关键信息，给前端实时展示。"""
     if not isinstance(result, dict):
         return str(result)[:200]
+    if result.get("needs_confirm"):
+        return f"需反思确认：{result.get('error', '')}"[:200]
     if result.get("blocked"):
         return f"已拦截：{result.get('error', '')}"[:200]
     if result.get("ok") is False:
@@ -909,6 +915,8 @@ def _run_report_assistant_loop(
                         headers=args.get("headers"), data=args.get("data"),
                         json_body=args.get("json_body"), follow_redirects=args.get("follow_redirects", False),
                         timeout=20,
+                        confirm_destructive=args.get("confirm_destructive", False),
+                        confirm_reason=args.get("confirm_reason") or "",
                     )
             elif tc.function.name == "run_shell":
                 command = _clean_shell_command(args.get("command") or "")
@@ -918,7 +926,11 @@ def _run_report_assistant_loop(
                 if not command:
                     result = {"ok": False, "error": "run_shell 缺少 command"}
                 else:
-                    result = executor.run_shell(command, timeout=timeout)
+                    result = executor.run_shell(
+                        command, timeout=timeout,
+                        confirm_destructive=args.get("confirm_destructive", False),
+                        confirm_reason=args.get("confirm_reason") or "",
+                    )
             else:
                 result = {"ok": False, "error": f"未知工具: {tc.function.name}"}
             tool_logs.append({"tool": tc.function.name, "args": args, "result": result})

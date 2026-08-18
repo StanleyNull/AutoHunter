@@ -750,6 +750,8 @@ class Worker:
                 data=args.get("data"),
                 json_body=args.get("json_body"),
                 follow_redirects=args.get("follow_redirects", False),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
             )
             if not self._js_tool_enabled and isinstance(result, dict):
                 headers = result.get("response_headers") if isinstance(result.get("response_headers"), dict) else {}
@@ -806,7 +808,12 @@ class Worker:
                     ),
                 }
             self._emit("tool_shell", round=rnd, command=command[:200])
-            return self.executor.run_shell(command, timeout=args.get("timeout"))
+            return self.executor.run_shell(
+                command,
+                timeout=args.get("timeout"),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
+            )
 
         if name == "decode_transform":
             self._mark_tool_used(name, rnd)

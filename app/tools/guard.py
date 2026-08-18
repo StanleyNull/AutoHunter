@@ -70,9 +70,9 @@ _ENTERPRISE_DANGER_PATTERNS = [
 
 _ENTERPRISE_COMPILED = [(re.compile(p, re.IGNORECASE), msg) for p, msg in _ENTERPRISE_DANGER_PATTERNS]
 
-# 全模式硬拦截：对目标造成不可逆损害（Issue #30：脱库删库 / 清缓存导致不可用 / 覆盖下载文件改不回）。
-# 不管 edu 还是 enterprise；http_request 与 run_shell 共用。
-# 不拦：IDOR 的 DELETE /api/x?id=…、自建 SRC_TEST_ 哨兵、布尔/延时 SQLi、无害上传探针。
+# 全模式：疑似对目标造成不可逆损害时先暂停，让模型反思确认后再执行（Issue #30）。
+# 不永久硬拦。不拦：IDOR 的 DELETE /api/x?id=…、自建 SRC_TEST_ 哨兵、布尔/延时 SQLi。
+# 自毁本机/容器、企业生产红线仍硬拦。
 _DESTRUCTIVE_ALWAYS = [
     (r"\b(drop|truncate)\s+(table|database|schema)\b",
      "禁止 DROP/TRUNCATE：用布尔/延时/读单条证明注入，不要删库。"),
@@ -105,19 +105,45 @@ class CommandBlocked(Exception):
     pass
 
 
-def check_destructive_text(text: str) -> None:
-    """对命令或 HTTP 请求原文做不可逆损害拦截。"""
+class NeedsConfirm(Exception):
+    """疑似破坏性操作：本次不执行，等模型反思后带确认再跑。"""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _truthy(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, (int, float)) and value == 1:
+        return True
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def destructive_warning(text: str) -> str | None:
     blob = text or ""
     if not blob.strip():
-        return
+        return None
     for pat, msg in _DESTRUCTIVE_ALWAYS_COMPILED:
         if pat.search(blob):
-            raise CommandBlocked(f"危险操作被拦截：{msg}")
+            return msg
     if _OVERWRITE_FILE.search(blob) and not _SRC_TEST.search(blob):
-        raise CommandBlocked(
-            "危险操作被拦截：禁止覆盖站点已有下载文件（改不回）。"
-            "上传请用 SRC_TEST_ 前缀的无害探针。"
-        )
+        return "覆盖站点已有下载文件可能改不回。上传请用 SRC_TEST_ 前缀的无害探针。"
+    return None
+
+
+def _maybe_need_confirm(
+    warning: str | None,
+    confirm_destructive: Any = False,
+    confirm_reason: str = "",
+) -> None:
+    if not warning:
+        return
+    if not _truthy(confirm_destructive):
+        raise NeedsConfirm(warning)
+    if not str(confirm_reason or "").strip():
+        raise NeedsConfirm(warning + " 请填写 confirm_reason：为何这是无害验证。")
 
 
 def check_http_request(
@@ -125,16 +151,26 @@ def check_http_request(
     url: str = "",
     data: str | None = None,
     json_body: Any = None,
+    confirm_destructive: Any = False,
+    confirm_reason: str = "",
 ) -> None:
     parts = [method or "", url or "", data or ""]
     if json_body is not None:
         parts.append(str(json_body))
-    check_destructive_text("\n".join(parts))
+    _maybe_need_confirm(
+        destructive_warning("\n".join(parts)),
+        confirm_destructive,
+        confirm_reason,
+    )
 
 
-def check_command(cmd: str, enterprise: bool = False) -> None:
-    """命中自毁模式则抛 CommandBlocked，否则放行。
-    全模式拦截不可逆损害；enterprise=True 时再加企业生产红线。"""
+def check_command(
+    cmd: str,
+    enterprise: bool = False,
+    confirm_destructive: Any = False,
+    confirm_reason: str = "",
+) -> None:
+    """命中自毁模式则抛 CommandBlocked。疑似破坏目标则 NeedsConfirm。"""
     for pat in _COMPILED:
         if pat.search(cmd):
             hint = ""
@@ -146,7 +182,7 @@ def check_command(cmd: str, enterprise: bool = False) -> None:
             raise CommandBlocked(
                 f"命令被安全防护拦截（疑似自毁运行环境，非攻击限制）：匹配模式 {pat.pattern}{hint}"
             )
-    check_destructive_text(cmd)
+    _maybe_need_confirm(destructive_warning(cmd), confirm_destructive, confirm_reason)
     if enterprise:
         for pat, msg in _ENTERPRISE_COMPILED:
             if pat.search(cmd):

@@ -151,13 +151,19 @@ class EscalateHunter:
                 url=url, method=args.get("method", "GET"),
                 headers=args.get("headers"), data=args.get("data"),
                 json_body=args.get("json_body"), follow_redirects=args.get("follow_redirects", False),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
             )
         if name == "run_shell":
             command = args.get("command")
             if not command:
                 return {"ok": False, "error": "run_shell 缺少 command"}
             self._emit("escalate_shell", command=str(args.get("command", ""))[:160])
-            return self.executor.run_shell(command, timeout=args.get("timeout"))
+            return self.executor.run_shell(
+                command, timeout=args.get("timeout"),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
+            )
         if name == "session_set":
             self._emit("escalate_session",
                        has_cookies=bool(args.get("cookies")), has_headers=bool(args.get("headers")))

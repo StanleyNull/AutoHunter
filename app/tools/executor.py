@@ -20,7 +20,7 @@ import httpx
 from app.agents.prefilter import capped_resolution
 from app.config import worker_config
 from app.tools.decoder import decode_transform as _decode_transform
-from app.tools.guard import CommandBlocked, check_command, check_http_request
+from app.tools.guard import CommandBlocked, NeedsConfirm, check_command, check_http_request
 from app.tools.js_analyzer import analyze_javascript as analyze_js_text
 from app.tools.js_analyzer import analyze_url as analyze_js_url
 from app.tools.waf_advisor import suggest_waf_bypass as _suggest_waf_bypass
@@ -38,7 +38,20 @@ _WORKDIR_MAX_BYTES = int(os.environ.get("WORKER_WORKDIR_MAX_BYTES", str(50 * 102
 # _dir_size 用非递归 glob，只数顶层文件，git clone 落的子目录树不在统计内）。
 _WORKDIR_RESCAN_EVERY = 32
 _SHELL_CAPTURE_MAX_BYTES = int(os.environ.get("WORKER_SHELL_CAPTURE_MAX_BYTES", str(512 * 1024)))
-_HTTP_MAX_BYTES = int(os.environ.get("WORKER_HTTP_MAX_BYTES", str(1024 * 1024)))
+_REFLECT_GUIDANCE = (
+    "本次未执行。请先反思：会不会删库、清缓存、覆盖已有文件导致改不回？"
+    "能改成 SRC_TEST_ 哨兵、ROLLBACK、或只证明接口存在就不要做破坏。"
+    "若确认是无害验证，再次调用并设 confirm_destructive=true，confirm_reason 写明原因。"
+)
+
+
+def _confirm_pause(exc: NeedsConfirm) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "needs_confirm": True,
+        "error": f"疑似不可逆操作，先停一下：{exc.reason}",
+        "guidance": _REFLECT_GUIDANCE,
+    }
 
 
 def _truncate(text: str, limit: Optional[int] = None) -> str:
@@ -157,7 +170,13 @@ class ToolExecutor:
         self.close_http_client()
 
     # ---- run_shell ----
-    def run_shell(self, command: str, timeout: Optional[int] = None) -> dict[str, Any]:
+    def run_shell(
+        self,
+        command: str,
+        timeout: Optional[int] = None,
+        confirm_destructive: Any = False,
+        confirm_reason: str = "",
+    ) -> dict[str, Any]:
         try:
             timeout = int(timeout) if timeout else worker_config.shell_timeout
         except (TypeError, ValueError):
@@ -165,7 +184,14 @@ class ToolExecutor:
         # 硬上限 + 下限：防 LLM 传超大/非法 timeout 长期占用 worker 槽位（DoS）。
         timeout = max(1, min(timeout, worker_config.shell_timeout_max))
         try:
-            check_command(command, enterprise=self.enterprise)
+            check_command(
+                command,
+                enterprise=self.enterprise,
+                confirm_destructive=confirm_destructive,
+                confirm_reason=confirm_reason,
+            )
+        except NeedsConfirm as e:
+            return _confirm_pause(e)
         except CommandBlocked as e:
             return {"ok": False, "blocked": True, "error": str(e)}
 
@@ -341,13 +367,21 @@ class ToolExecutor:
         json_body: Optional[Any] = None,
         follow_redirects: bool = False,
         timeout: int = 20,
+        confirm_destructive: Any = False,
+        confirm_reason: str = "",
     ) -> dict[str, Any]:
         # LLM 可能把 headers 传成非 dict 形态（list["K: V"] / "K: V\nK2: V2" / None），
         # 直接喂给 dict()/httpx 会抛 "dictionary update sequence element..." 崩掉整个 agent。
         # 这里统一规范化成 dict，容错所有 agent 的 http_request 调用。
         headers = _normalize_headers(headers)
         try:
-            check_http_request(method, url, data=data, json_body=json_body)
+            check_http_request(
+                method, url, data=data, json_body=json_body,
+                confirm_destructive=confirm_destructive,
+                confirm_reason=confirm_reason,
+            )
+        except NeedsConfirm as e:
+            return {**_confirm_pause(e), "url": url}
         except CommandBlocked as e:
             return {"ok": False, "blocked": True, "error": str(e), "url": url}
         # 会话保持：把已维持的 cookie/header 合并进本次请求（用户传的同名键优先）。
