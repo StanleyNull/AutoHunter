@@ -359,7 +359,7 @@ class Reviewer:
         elif _maybe_reject_weak_backdoor(finding, review):
             self._emit("review_auto_ignore_weak_backdoor", title=finding.title)
         elif _maybe_accept_write_proof(finding, review):
-            self._emit("review_auto_accept_write", title=finding.title, kind=classify_write_proof(finding))
+            self._emit("review_auto_accept_write", title=finding.title, write_kind=classify_write_proof(finding))
         elif _maybe_deepen_ignored(finding, review, self.src_type):
             self._emit("review_auto_deepen", title=finding.title, directive=review.deepen_directive)
 
