@@ -292,7 +292,7 @@ async function save() {
 
       <div class="settings-grid">
         <label>任务名称 <input v-model="form.name" required /></label>
-        <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="20" /></label>
+        <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
         <label>任务模式
           <select v-model="form.src_type">
             <option value="edusrc">EduSRC（教育行业）</option>

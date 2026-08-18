@@ -630,7 +630,14 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
     if "defaults" in payload and payload["defaults"]:
         defaults = dict(row.defaults or {})
         for k, v in payload["defaults"].items():
-            if v is not None:
+            if v is None:
+                continue
+            if k == "concurrency":
+                try:
+                    defaults[k] = max(1, min(int(v), 32))
+                except (TypeError, ValueError):
+                    continue
+            else:
                 defaults[k] = v
         row.defaults = defaults
 

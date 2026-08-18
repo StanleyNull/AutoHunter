@@ -140,13 +140,13 @@ FOFA_AUTH_FAIL_PAUSE_THRESHOLD = int(os.environ.get("FOFA_AUTH_FAIL_PAUSE_THRESH
 STALE_NO_WORKER_GRACE = float(os.environ.get("STALE_NO_WORKER_GRACE", "150"))
 # 派发前探活：queued 目标真正交给 worker 前再复查一次，避免 worker 时间浪费在死链上。
 QUEUE_LIVENESS_TIMEOUT = float(os.environ.get("QUEUE_LIVENESS_TIMEOUT", "6"))
-QUEUE_LIVENESS_CONCURRENCY = int(os.environ.get("QUEUE_LIVENESS_CONCURRENCY", "8"))
+QUEUE_LIVENESS_CONCURRENCY = int(os.environ.get("QUEUE_LIVENESS_CONCURRENCY", "16"))
 QUEUE_LIVENESS_CACHE_TTL = float(os.environ.get("QUEUE_LIVENESS_CACHE_TTL", "300"))
 QUEUE_LOW_SUCCESS_SKIP = os.environ.get("QUEUE_LOW_SUCCESS_SKIP", "1").lower() not in {"0", "false", "no"}
 QUEUE_LOW_SUCCESS_SCORE_THRESHOLD = float(os.environ.get("QUEUE_LOW_SUCCESS_SCORE_THRESHOLD", "-3.5"))
 QUEUE_TRANSIENT_PREFILTER_COOLDOWN = float(os.environ.get("QUEUE_TRANSIENT_PREFILTER_COOLDOWN", "900"))
 QUEUE_DISPATCH_CANDIDATE_LIMIT = max(30, int(os.environ.get("QUEUE_DISPATCH_CANDIDATE_LIMIT", "120")))
-QUEUE_LIVENESS_BATCH_SIZE = max(1, int(os.environ.get("QUEUE_LIVENESS_BATCH_SIZE", "24")))
+QUEUE_LIVENESS_BATCH_SIZE = max(1, int(os.environ.get("QUEUE_LIVENESS_BATCH_SIZE", "48")))
 
 _LOW_SUCCESS_SCORE_MARKERS = (
     "pure_frontend", "pure_marketing_site", "static_assets", "data_display_platform",

@@ -406,7 +406,7 @@ onMounted(async () => {
         <p v-else-if="!isSiteMode" class="field-hint">
           当前引擎不是 FOFA：Key 请用系统设置里的「各引擎 API Key」，高级区不再重复填。
         </p>
-        <label>worker 并发 <input v-model="form.concurrency" type="number" /></label>
+        <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
       </details>
       <label>SRC 规则（可选，叠加在内置标准上，不替换）
         <textarea v-model="form.src_rules" rows="3" placeholder="例：本校不收弱口令；重点收越权与未授权。"></textarea>

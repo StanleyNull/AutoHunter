@@ -48,9 +48,9 @@ from app.llm.client import LLMClient, LLMError
 from app.settings_service import llm_client_for_task_optional, resolve_engine_config, resolve_skip_score_threshold
 
 _EDUSRC_ORG_FILTER = 'org="China Education and Research Network Center"'
-_PREFILTER_CONCURRENCY = int(os.environ.get("COLLECTOR_PREFILTER_CONCURRENCY", "12"))
-_SCORE_CONCURRENCY = int(os.environ.get("COLLECTOR_SCORE_CONCURRENCY", "8"))
-_TARGET_FILTER_CONCURRENCY = int(os.environ.get("TARGET_FILTER_CONCURRENCY", "6"))
+_PREFILTER_CONCURRENCY = int(os.environ.get("COLLECTOR_PREFILTER_CONCURRENCY", "24"))
+_SCORE_CONCURRENCY = int(os.environ.get("COLLECTOR_SCORE_CONCURRENCY", "16"))
+_TARGET_FILTER_CONCURRENCY = int(os.environ.get("TARGET_FILTER_CONCURRENCY", "12"))
 _TARGET_FILTER_HARD_TIMEOUT = float(os.environ.get("TARGET_FILTER_HARD_TIMEOUT", "10.0"))
 # 大批量入队时分批 commit，避免一次 flush 上万行把 SQLite 冲垮。
 _ENQUEUE_COMMIT_BATCH = max(50, int(os.environ.get("ENQUEUE_COMMIT_BATCH", "200")))

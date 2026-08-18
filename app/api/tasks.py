@@ -40,6 +40,17 @@ from app.settings_service import (
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
+# 任务级 worker 并发上限（与设置页 max=32、全局 WORKER_MAX_CONCURRENCY 对齐）。
+_TASK_CONCURRENCY_MAX = 32
+
+
+def _clamp_task_concurrency(value: int | None, default: int = 3) -> int:
+    try:
+        n = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        n = default
+    return max(1, min(n, _TASK_CONCURRENCY_MAX))
+
 
 # Activity Stream 历史回放：过滤高频低价值事件（与前端 BoardView 规则对齐）。
 _STREAM_NOISE_KINDS = frozenset({"refill", "cluster_cooldown_skip", "skip", "ping"})
@@ -417,7 +428,7 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         manual_targets=clean_manual_target_list(req.manual_targets or []),
         auth_bindings=_dump_auth_bindings(req.auth_bindings),
         model_config_json=model_config,
-        fofa_config=fofa_cfg, concurrency=req.concurrency,
+        fofa_config=fofa_cfg, concurrency=_clamp_task_concurrency(req.concurrency),
         status="created",
     )
     session.add(task)
@@ -609,7 +620,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     if req.auth_bindings is not None:
         task.auth_bindings = _dump_auth_bindings(req.auth_bindings)
     if req.concurrency is not None:
-        task.concurrency = max(1, min(int(req.concurrency), 20))
+        task.concurrency = _clamp_task_concurrency(req.concurrency)
 
     old_query = task.fofa_query or ""
     if req.fofa_query is not None:

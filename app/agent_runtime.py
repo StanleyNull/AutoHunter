@@ -49,32 +49,31 @@ def _auto_worker_base() -> int:
 
     agent 工作是 IO 密集（大部分时间阻塞等 LLM 响应），不是 CPU 密集，所以：
     - 不按 CPU 线性缩放（28 核不代表要开 28 worker）；
-    - 真正的天花板是 LLM 上游限流，故 worker 封顶 12——再高只会撞 429；
+    - 真正的天花板是 LLM 上游限流 + 本机句柄，故 worker 封顶 32；
     - 小机器则按 CPU / 内存里更紧的那个降档，避免内存和上下文切换吃紧。
 
     可用 AUTOHUNTER_WORKER_MAX_CONCURRENCY 显式覆盖（覆盖优先，跳过自动档）。
     """
     cpus = _detect_cpus()
     mem = _detect_mem_gib()
-    # CPU 档：worker 是 IO 密集（大部分时间阻塞等 LLM），2 核也能并发好几个，
-    # 所以 CPU 少也不压太狠，保证小云服务器有基本吞吐。
+    # CPU 档：worker 是 IO 密集（大部分时间阻塞等 LLM），可按核数约 2～3 倍叠 in-flight。
     if cpus <= 2:
-        by_cpu = 4
-    elif cpus <= 4:
-        by_cpu = 6
-    elif cpus <= 8:
         by_cpu = 8
-    elif cpus <= 16:
-        by_cpu = 10
-    else:
+    elif cpus <= 4:
         by_cpu = 12
-    # 内存档（每个 worker 峰值主要是 LLM 上下文，粗估 ~0.8GiB 预算；0=未知则不限）。
+    elif cpus <= 8:
+        by_cpu = 20
+    elif cpus <= 16:
+        by_cpu = 24
+    else:
+        by_cpu = 32
+    # 内存档（每个 worker 峰值主要是 LLM 上下文，粗估 ~0.5GiB 预算；0=未知则不限）。
     if mem <= 0:
         by_mem = by_cpu
     else:
-        by_mem = max(4, int(mem // 0.8))
-    # 绝对下限 4：再小的机器也别把并发压到个位数以下，否则小云服务器几乎跑不动。
-    return max(4, min(by_cpu, by_mem, 12))
+        by_mem = max(6, int(mem // 0.5))
+    # 绝对下限 6：再小的机器也别把并发压到个位数，否则小云服务器几乎跑不动。
+    return max(6, min(by_cpu, by_mem, 32))
 
 
 # worker 基准：env 显式给了就用 env，否则按机器规格自动定档。
@@ -83,7 +82,7 @@ _WORKER_BASE = _int_env("AUTOHUNTER_WORKER_MAX_CONCURRENCY", _auto_worker_base()
     if _WORKER_ENV else _auto_worker_base()
 
 # 各类 agent 并发上限：worker 为主，其余按固定比例从 worker 基准推导，
-# 保持 worker:review:killsweep:escalation:assistant ≈ 12:4:3:2:3 的成熟配比。
+# 保持 worker:review:killsweep:escalation:assistant ≈ 6:2:1.5:1:1.5 的成熟配比。
 # 每一项仍可用对应 env 单独覆盖（覆盖优先）。
 WORKER_MAX_CONCURRENCY = _WORKER_BASE
 REVIEW_MAX_CONCURRENCY = _int_env("AUTOHUNTER_REVIEW_MAX_CONCURRENCY", max(2, _WORKER_BASE // 3))
@@ -114,9 +113,9 @@ AGENT_EXECUTOR = ThreadPoolExecutor(
 
 # collector 轻量 IO（探活/评分）独立小池，与重型 agent 工作彻底隔离，
 # 避免 collector 一轮几十个探测把 agent 池占满。
-_COLLECTOR_IO_SIZE = _int_env("AUTOHUNTER_COLLECTOR_IO_POOL_SIZE", 12)
+COLLECTOR_IO_POOL_SIZE = _int_env("AUTOHUNTER_COLLECTOR_IO_POOL_SIZE", max(24, _WORKER_BASE))
 COLLECTOR_IO_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_COLLECTOR_IO_SIZE,
+    max_workers=COLLECTOR_IO_POOL_SIZE,
     thread_name_prefix="ah-collector-io",
 )
 

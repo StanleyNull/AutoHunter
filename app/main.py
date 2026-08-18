@@ -21,6 +21,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from app.agent_runtime import (
+    AGENT_THREAD_POOL_SIZE,
+    ASSISTANT_MAX_CONCURRENCY,
+    COLLECTOR_IO_POOL_SIZE,
+    ESCALATION_MAX_CONCURRENCY,
+    KILLSWEEP_MAX_CONCURRENCY,
+    REVIEW_MAX_CONCURRENCY,
+    WORKER_MAX_CONCURRENCY,
+)
 from app.api import findings, intel, runtime_logs, settings, stream, tasks, update, vulns
 from app.db.session import init_db
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
@@ -101,7 +110,7 @@ async def _loop_lag_monitor() -> None:
 async def lifespan(app: FastAPI):
     _install_diagnostics(asyncio.get_running_loop())
     default_executor = ThreadPoolExecutor(
-        max_workers=int(os.environ.get("AUTOHUNTER_DEFAULT_THREAD_POOL_SIZE", "8")),
+        max_workers=int(os.environ.get("AUTOHUNTER_DEFAULT_THREAD_POOL_SIZE", "16")),
         thread_name_prefix="ah-default",
     )
     asyncio.get_running_loop().set_default_executor(default_executor)
@@ -109,6 +118,16 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(run_periodic_cleanup())
     await init_db()
     await init_settings_cache()
+    DIAG_LOG.info(
+        "并发档: worker=%s review=%s killsweep=%s escalation=%s assistant=%s agent_pool=%s collector_io=%s",
+        WORKER_MAX_CONCURRENCY,
+        REVIEW_MAX_CONCURRENCY,
+        KILLSWEEP_MAX_CONCURRENCY,
+        ESCALATION_MAX_CONCURRENCY,
+        ASSISTANT_MAX_CONCURRENCY,
+        AGENT_THREAD_POOL_SIZE,
+        COLLECTOR_IO_POOL_SIZE,
+    )
     if not auth_enabled():
         DIAG_LOG.warning(
             "安全告警：未配置任何访问令牌（AUTOHUNTER_API_TOKEN / _READ_TOKEN / _OBSERVER_TOKEN），"
