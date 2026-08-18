@@ -43,6 +43,13 @@
 | <img src="https://avatars.githubusercontent.com/u/78614185?v=4&s=64" width="40" height="40" alt="moliyu1101" /> | [@moliyu1101](https://github.com/moliyu1101) | 黑洞 DNS 防护 · worker 并发位超时 |
 | <img src="https://avatars.githubusercontent.com/u/90189362?v=4&s=64" width="40" height="40" alt="Saide-sec" /> | [@Saide-sec](https://github.com/Saide-sec) | 看板分析 · 命令面板 |
 | <img src="https://avatars.githubusercontent.com/u/110716280?v=4&s=64" width="40" height="40" alt="tf748i5gf5t" /> | [@tf748i5gf5t](https://github.com/tf748i5gf5t) | 审核写证明事件参数冲突修复 |
+| <img src="https://avatars.githubusercontent.com/u/109836771?v=4&s=64" width="40" height="40" alt="21a21a" /> | [@21a21a](https://github.com/21a21a) | 历史任务删除 |
+| <img src="https://avatars.githubusercontent.com/u/114931663?v=4&s=64" width="40" height="40" alt="Dr3Wm" /> | [@Dr3Wm](https://github.com/Dr3Wm) | 登录后挖掘（凭据绑定） |
+| <img src="https://avatars.githubusercontent.com/u/58058862?v=4&s=64" width="40" height="40" alt="Ilyasfiel" /> | [@Ilyasfiel](https://github.com/Ilyasfiel) | 通杀多站验证 · 审核吞洞修复 |
+| <img src="https://avatars.githubusercontent.com/u/86941613?v=4&s=64" width="40" height="40" alt="wr0x00" /> | [@wr0x00](https://github.com/wr0x00) | Dockerfile sqlmap 安装 |
+| <img src="https://avatars.githubusercontent.com/u/201740083?v=4&s=64" width="40" height="40" alt="sjjly" /> | [@sjjly](https://github.com/sjjly) | Quake 引擎语法适配 |
+| <img src="https://avatars.githubusercontent.com/u/240871376?v=4&s=64" width="40" height="40" alt="xaio-xu" /> | [@xaio-xu](https://github.com/xaio-xu) | 通杀失败一键重启 |
+| <img src="https://avatars.githubusercontent.com/u/68830639?v=4&s=64" width="40" height="40" alt="Mrship12138" /> | [@Mrship12138](https://github.com/Mrship12138) | Coding Plan /vN 接口适配 |
 
 <!-- 新贡献者请在上一行表格末尾追加，保持格式一致 -->
 
