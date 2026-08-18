@@ -759,7 +759,7 @@ async function snapshotNow() {
   backupBusy.value = "snapshot";
   try {
     const r = await api.backupSnapshot();
-    toast(`已在服务器保存快照 ${r.name}（${r.human}）`);
+    toast(`已在服务器覆盖保存 ${r.name}（${r.human}）`);
     await loadBackupStats();
   } catch (e) {
     toast(String(e.message || e).replace(/^\d+\s*/, ""));
@@ -1147,7 +1147,7 @@ async function runCleanup() {
         <fieldset class="settings-block">
           <legend>
             <span>数据备份</span>
-            <small>SQLite 在线备份打一致快照，避免直接拷文件碰到 WAL 半截损坏。主要备份数据库，工作目录可选。</small>
+            <small>导出/导入是主路径。SQLite 在线备份打一致快照，不要直接拷正在写的库文件。</small>
           </legend>
           <div v-if="backupRestarting" class="update-restarting">
             <div class="update-spinner"></div>
@@ -1161,8 +1161,12 @@ async function runCleanup() {
                 <b class="workdir-stat-value">{{ backupStats.db_human }}</b>
               </div>
               <div class="workdir-stat-item">
+                <span class="workdir-stat-label">库盘剩余</span>
+                <b class="workdir-stat-value small">{{ backupStats.disk?.free_human || '未知' }}</b>
+              </div>
+              <div class="workdir-stat-item">
                 <span class="workdir-stat-label">本地快照</span>
-                <b class="workdir-stat-value">{{ backupStats.snapshots?.length || 0 }}</b>
+                <b class="workdir-stat-value small">{{ backupStats.snapshots_human || '0 B' }}</b>
               </div>
               <div class="workdir-stat-item">
                 <span class="workdir-stat-label">自动备份</span>
@@ -1176,7 +1180,8 @@ async function runCleanup() {
               </div>
             </div>
             <p class="field-hint">
-              自动快照保存在服务器 <code>data/backups/</code>（保留 {{ backupStats.auto_backup?.keep || 7 }} 份）。
+              日常请点「下载备份」把文件带走。服务器只覆盖留 1 份 gzip 快照（再打会覆盖），不自动堆多份。
+              当前库盘剩余 {{ backupStats.disk?.free_human || '未知' }}，快照占用 {{ backupStats.snapshots_human || '0 B' }}。
               工作目录可选打包，上限 {{ backupStats.work?.max_human }}。
             </p>
             <div class="workdir-cleanup-controls">
@@ -1188,7 +1193,7 @@ async function runCleanup() {
                 {{ backupBusy === 'export' ? '打包中…' : '下载备份' }}
               </button>
               <button type="button" :disabled="!!backupBusy" @click="snapshotNow">
-                {{ backupBusy === 'snapshot' ? '快照中…' : '立即在服务器打快照' }}
+                {{ backupBusy === 'snapshot' ? '覆盖中…' : '在服务器覆盖留一份' }}
               </button>
               <button type="button" :disabled="backupLoading" @click="loadBackupStats">刷新</button>
             </div>

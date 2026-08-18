@@ -383,7 +383,7 @@ docker compose up -d --build           # 更新代码后重建
 
 数据持久化在 Docker volume：`ah_data`（SQLite + 漏洞证据）、`ah_work`（Worker 临时工作区）。**升级/重启不丢数据。**
 
-**备份 / 迁移**：设置页「数据备份」可下载一致的 SQLite 快照（可选打包工作目录），也可上传备份恢复。服务器还会按间隔把快照写到 volume 里的 `data/backups/`（默认 6 小时、保留 7 份），避免虚机突然断电把正在写的 db 写坏后无退路。不要用 `cp autohunter.db` 当备份——WAL 模式下直接拷文件很容易拷到半截库。
+**备份 / 迁移**：设置页「数据备份」可导出一致的 SQLite 快照（可选打包工作目录）并上传恢复，这是主路径。服务器默认不自动堆快照；若点「在服务器覆盖留一份」，只覆盖 `data/backups/autohunter-latest.db.gz` 这一份，空间不够会拒绝以免把库盘写满。不要用 `cp autohunter.db` 当备份——WAL 模式下直接拷文件很容易拷到半截库。
 
 **开机自启**：`docker compose up -d` 的容器默认 `restart: unless-stopped`，崩溃/重启会自动拉起。若想托管给 systemd：
 

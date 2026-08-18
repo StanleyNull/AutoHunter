@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import os
 import signal
-import tempfile
 import threading
 import time
 from datetime import datetime
@@ -38,6 +37,18 @@ def _require_full(request: Request) -> None:
     role = resolve_role(token_from_headers(request.headers))
     if role != "full":
         raise HTTPException(403, "备份/恢复需要全权限令牌")
+
+
+def _backup_http_error(exc: Exception, action: str) -> HTTPException:
+    msg = str(exc)
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(404, msg)
+    if isinstance(exc, ValueError):
+        return HTTPException(400, msg)
+    if "磁盘剩余" in msg:
+        return HTTPException(507, msg)
+    logger.exception("%s失败", action)
+    return HTTPException(500, f"{action}失败: {exc}")
 
 
 def _unlink(path: str) -> None:
@@ -67,11 +78,8 @@ def make_snapshot(request: Request):
     _require_full(request)
     try:
         return bak.snapshot_now()
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("本地快照失败")
-        raise HTTPException(500, f"快照失败: {exc}") from exc
+        raise _backup_http_error(exc, "快照") from exc
 
 
 @router.post("/export")
@@ -82,17 +90,13 @@ def export_backup(
     _require_full(request)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     kind = "full" if include_work else "db"
-    tmp = tempfile.NamedTemporaryFile(
-        prefix=f"ah-export-{kind}-", suffix=".tar.gz", delete=False,
-    )
-    tmp_path = tmp.name
-    tmp.close()
+    stage = bak.staging_dir()
+    tmp_path = str(stage / f"ah-export-{kind}-{ts}.tar.gz")
     try:
         bak.create_archive(tmp_path, include_work=include_work)
     except Exception as exc:  # noqa: BLE001
         _unlink(tmp_path)
-        logger.exception("导出备份失败")
-        raise HTTPException(500, f"导出失败: {exc}") from exc
+        raise _backup_http_error(exc, "导出") from exc
     filename = f"autohunter-backup-{kind}-{ts}.tar.gz"
     return FileResponse(
         tmp_path,
@@ -111,7 +115,11 @@ def download_snapshot(request: Request, name: str):
         raise HTTPException(400, str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return FileResponse(path, media_type="application/x-sqlite3", filename=name)
+    return FileResponse(
+        path,
+        media_type="application/gzip" if path.name.endswith(".gz") else "application/x-sqlite3",
+        filename=name,
+    )
 
 
 @router.post("/restore")
@@ -126,23 +134,17 @@ def restore_backup(
     if suffix not in {".gz", ".tgz"} and not (file.filename or "").endswith(".tar.gz"):
         # 仍允许无后缀；后面 tar 打开会再校验
         pass
-    tmp = tempfile.NamedTemporaryFile(prefix="ah-restore-up-", suffix=".tar.gz", delete=False)
-    tmp_path = tmp.name
+    tmp_path = str(bak.staging_dir() / f"ah-restore-up-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz")
     try:
-        while True:
-            chunk = file.file.read(1024 * 1024)
-            if not chunk:
-                break
-            tmp.write(chunk)
-        tmp.close()
+        with open(tmp_path, "wb") as tmp:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                tmp.write(chunk)
         result = bak.restore_archive(tmp_path, include_work=include_work)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("恢复备份失败")
-        raise HTTPException(500, f"恢复失败: {exc}") from exc
+        raise _backup_http_error(exc, "恢复") from exc
     finally:
         _unlink(tmp_path)
 

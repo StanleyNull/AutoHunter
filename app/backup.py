@@ -8,10 +8,12 @@
   db/autohunter.db
   work/...                 # 仅 include_work=True
 
-服务器本地快照只存 db：{db_dir}/backups/autohunter-YYYYmmdd-HHMMSS.db
+服务器本地快照只留一份压缩文件：{db_dir}/backups/autohunter-latest.db.gz
+再备份会覆盖，避免把磁盘堆满。日常迁移请用导出/导入把文件带走。
 """
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import logging
@@ -32,7 +34,8 @@ logger = logging.getLogger("autohunter.backup")
 MAGIC = "autohunter-backup"
 FORMAT_VERSION = 1
 SNAPSHOT_PREFIX = "autohunter-"
-SNAPSHOT_SUFFIX = ".db"
+LATEST_NAME = "autohunter-latest.db.gz"
+PRE_RESTORE_NAME = "autohunter-pre-restore.db.gz"
 
 _op_lock = threading.Lock()
 
@@ -48,16 +51,21 @@ def _env_int(name: str, default: int) -> int:
 
 
 def backup_interval_seconds() -> float:
-    hours = max(0.0, float(_env_int("AUTOHUNTER_BACKUP_INTERVAL_HOURS", 6)))
+    hours = max(0.0, float(_env_int("AUTOHUNTER_BACKUP_INTERVAL_HOURS", 0)))
     return hours * 3600
 
 
 def backup_keep() -> int:
-    return max(0, _env_int("AUTOHUNTER_BACKUP_KEEP", 7))
+    """本地只覆盖 1 份。KEEP=0 表示连这一份也不写（仍可用导出/导入）。"""
+    return 1 if _env_int("AUTOHUNTER_BACKUP_KEEP", 1) > 0 else 0
 
 
 def work_backup_max_bytes() -> int:
-    return max(0, _env_int("AUTOHUNTER_BACKUP_WORK_MAX_MB", 2048)) * 1024 * 1024
+    return max(0, _env_int("AUTOHUNTER_BACKUP_WORK_MAX_MB", 512)) * 1024 * 1024
+
+
+def reserve_bytes() -> int:
+    return max(0, _env_int("AUTOHUNTER_BACKUP_RESERVE_MB", 512)) * 1024 * 1024
 
 
 def db_path() -> Path:
@@ -87,6 +95,60 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def disk_info(path: Path | None = None) -> dict[str, Any]:
+    target = path or db_path().parent
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(target)
+    except OSError:
+        return {"free": 0, "total": 0, "free_human": "未知", "total_human": "未知"}
+    return {
+        "free": usage.free,
+        "total": usage.total,
+        "free_human": _human_size(usage.free),
+        "total_human": _human_size(usage.total),
+    }
+
+
+def assert_free_space(needed: int, path: Path | None = None, what: str = "备份") -> None:
+    """需要 needed 字节峰值，外加预留，否则拒绝，避免把库盘写满。"""
+    info = disk_info(path)
+    need = max(0, int(needed)) + reserve_bytes()
+    if info["free"] < need:
+        raise RuntimeError(
+            f"磁盘剩余 {info['free_human']}，{what}大约还要 {_human_size(need)} "
+            f"（含 {_human_size(reserve_bytes())} 预留）。请先导出带走或清理工作目录。"
+        )
+
+
+def _gzip_file(src: Path, dest: Path) -> None:
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    with open(src, "rb") as fin, gzip.open(tmp, "wb", compresslevel=6) as fout:
+        shutil.copyfileobj(fin, fout, 1024 * 1024)
+    os.replace(tmp, dest)
+
+
+def _iter_snapshot_files(d: Path) -> list[Path]:
+    if not d.is_dir():
+        return []
+    out = []
+    for p in d.iterdir():
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        if p.name.startswith(SNAPSHOT_PREFIX) and (
+            p.name.endswith(".db") or p.name.endswith(".db.gz")
+        ):
+            out.append(p)
+    return out
+
+
+def staging_dir() -> Path:
+    d = backups_dir() / ".staging"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def integrity_check(path: str | Path) -> tuple[bool, str]:
@@ -133,38 +195,57 @@ def snapshot_sqlite(src: str | Path, dest: str | Path) -> Path:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"备份完整性检查失败: {msg}")
     os.replace(tmp, dest_path)
+    for suffix in ("-wal", "-shm"):
+        Path(str(tmp) + suffix).unlink(missing_ok=True)
     return dest_path
 
 
 def rotate_snapshots(keep: int | None = None) -> list[str]:
-    """按 mtime 保留最新 keep 份，返回被删文件名。"""
-    n = backup_keep() if keep is None else max(0, keep)
+    """本地只留 latest + 一份恢复前快照，清掉旧的时间戳文件。"""
+    n = backup_keep() if keep is None else max(0, int(keep))
     d = backups_dir()
-    if not d.is_dir() or n <= 0:
+    if not d.is_dir():
         return []
-    files = sorted(
-            [p for p in d.glob(f"{SNAPSHOT_PREFIX}*{SNAPSHOT_SUFFIX}")
-             if p.is_file() and "pre-restore" not in p.name],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    keep_names = {PRE_RESTORE_NAME}
+    if n > 0:
+        keep_names.add(LATEST_NAME)
     deleted: list[str] = []
-    for extra in files[n:]:
+    for extra in _iter_snapshot_files(d):
+        if extra.name in keep_names:
+            continue
         try:
             extra.unlink()
             deleted.append(extra.name)
         except OSError as exc:
             logger.warning("删除过期快照失败 %s: %s", extra, exc)
+    for extra in list(d.iterdir()):
+        if not extra.is_file():
+            continue
+        if ".tmp" in extra.name or extra.name.endswith(".tmp"):
+            try:
+                extra.unlink()
+                deleted.append(extra.name)
+            except OSError as exc:
+                logger.warning("删除备份临时文件失败 %s: %s", extra, exc)
     return deleted
 
 
 def snapshot_now() -> dict[str, Any]:
-    """在 backups/ 打一份本地 db 快照并轮转。"""
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    dest = backups_dir() / f"{SNAPSHOT_PREFIX}{ts}{SNAPSHOT_SUFFIX}"
-    with _op_lock:
-        snapshot_sqlite(db_path(), dest)
-        deleted = rotate_snapshots()
+    """覆盖写入 backups/autohunter-latest.db.gz。KEEP=0 时拒绝。"""
+    if backup_keep() <= 0:
+        raise RuntimeError("本地快照已关闭（AUTOHUNTER_BACKUP_KEEP=0），请用导出把备份下载带走。")
+    live = db_path()
+    dest_dir = backups_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / LATEST_NAME
+    # 峰值：未压缩临时库 + gzip 临时文件 + 旧 latest，约 3 倍库体积
+    assert_free_space(_file_size(live) * 3, dest_dir, "本地快照")
+    with tempfile.TemporaryDirectory(prefix="ah-snap-", dir=str(dest_dir)) as td:
+        tmp_db = Path(td) / "snap.db"
+        with _op_lock:
+            snapshot_sqlite(live, tmp_db)
+            _gzip_file(tmp_db, dest)
+            deleted = rotate_snapshots()
     logger.info("本地快照 %s (%s)", dest.name, _human_size(_file_size(dest)))
     return {
         "ok": True,
@@ -173,32 +254,34 @@ def snapshot_now() -> dict[str, Any]:
         "bytes": _file_size(dest),
         "human": _human_size(_file_size(dest)),
         "rotated": deleted,
+        "overwritten": True,
     }
 
 
 def list_snapshots() -> list[dict[str, Any]]:
     d = backups_dir()
-    if not d.is_dir():
-        return []
     items = []
-    for p in sorted(d.glob(f"{SNAPSHOT_PREFIX}*{SNAPSHOT_SUFFIX}"), key=lambda x: x.stat().st_mtime, reverse=True):
-        if not p.is_file():
-            continue
+    for p in sorted(_iter_snapshot_files(d), key=lambda x: x.stat().st_mtime, reverse=True):
         st = p.stat()
         items.append({
             "name": p.name,
             "bytes": st.st_size,
             "human": _human_size(st.st_size),
             "mtime": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+            "slot": "latest" if p.name == LATEST_NAME else (
+                "pre-restore" if p.name == PRE_RESTORE_NAME else "leftover"
+            ),
         })
     return items
 
 
 def snapshot_file(name: str) -> Path:
-    """只允许 backups/ 下 autohunter-*.db，拒绝路径穿越。"""
-    if "/" in name or "\\" in name or name in {".", ".."} or not name.endswith(SNAPSHOT_SUFFIX):
+    """只允许 backups/ 下 autohunter-*.db / .db.gz，拒绝路径穿越。"""
+    if "/" in name or "\\" in name or name in {".", ".."}:
         raise ValueError("非法快照名")
     if not name.startswith(SNAPSHOT_PREFIX) or ".." in name:
+        raise ValueError("非法快照名")
+    if not (name.endswith(".db") or name.endswith(".db.gz")):
         raise ValueError("非法快照名")
     path = (backups_dir() / name).resolve()
     if path.parent != backups_dir().resolve() or not path.is_file():
@@ -236,7 +319,7 @@ def _work_bytes(root: Path, cap: int) -> int:
 
 
 def create_archive(dest: str | Path, include_work: bool = False) -> dict[str, Any]:
-    """生成可下载/迁移的 tar.gz。dest 为最终路径。"""
+    """生成可下载/迁移的 tar.gz。dest 为最终路径。临时文件落在库同盘 backups/.staging。"""
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     work_root = _safe_work_root() if include_work else None
@@ -252,10 +335,15 @@ def create_archive(dest: str | Path, include_work: bool = False) -> dict[str, An
                 "请先清理工作目录，或提高 AUTOHUNTER_BACKUP_WORK_MAX_MB。"
             )
 
-    with tempfile.TemporaryDirectory(prefix="ah-bak-") as td:
+    live = db_path()
+    stage = staging_dir()
+    # 峰值：临时 sqlite + tar.gz ≈ 2×库 + work
+    assert_free_space(_file_size(live) * 2 + work_bytes, stage, "导出备份")
+
+    with tempfile.TemporaryDirectory(prefix="ah-bak-", dir=str(stage)) as td:
         tmp_db = Path(td) / "autohunter.db"
         with _op_lock:
-            snapshot_sqlite(db_path(), tmp_db)
+            snapshot_sqlite(live, tmp_db)
         db_bytes = _file_size(tmp_db)
         manifest = {
             "magic": MAGIC,
@@ -394,15 +482,19 @@ def restore_archive(
             if live.is_file():
                 pre_dir = backups_dir()
                 pre_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                pre = pre_dir / f"{SNAPSHOT_PREFIX}pre-restore-{ts}{SNAPSHOT_SUFFIX}"
+                pre = pre_dir / PRE_RESTORE_NAME
                 try:
-                    snapshot_sqlite(live, pre)
-                except Exception as exc:  # noqa: BLE001 - 旧库已坏时仍允许覆盖
+                    assert_free_space(_file_size(live) * 3, pre_dir, "恢复前快照")
+                    with tempfile.TemporaryDirectory(prefix="ah-pre-", dir=str(pre_dir)) as pre_td:
+                        tmp_pre = Path(pre_td) / "pre.db"
+                        snapshot_sqlite(live, tmp_pre)
+                        _gzip_file(tmp_pre, pre)
+                except Exception as exc:  # noqa: BLE001 - 旧库已坏或盘满时仍允许覆盖
                     logger.warning("恢复前快照失败（将继续覆盖）: %s", exc)
                     pre = None
 
             with _op_lock:
+                assert_free_space(_file_size(extracted_db) * 2, live.parent, "恢复数据库")
                 _install_db(extracted_db, live)
                 rotate_snapshots()
 
@@ -424,6 +516,8 @@ def backup_status() -> dict[str, Any]:
     work_bytes = _work_bytes(work, 0) if work and work.is_dir() else 0
     interval = backup_interval_seconds()
     snaps = list_snapshots()
+    snap_bytes = sum(int(s.get("bytes") or 0) for s in snaps)
+    disk = disk_info(live.parent)
     return {
         "db_path": str(live),
         "db_exists": live.is_file(),
@@ -433,6 +527,10 @@ def backup_status() -> dict[str, Any]:
         "shm_bytes": _file_size(shm),
         "snapshots": snaps,
         "last_snapshot": snaps[0] if snaps else None,
+        "snapshots_bytes": snap_bytes,
+        "snapshots_human": _human_size(snap_bytes),
+        "disk": disk,
+        "reserve_human": _human_size(reserve_bytes()),
         "auto_backup": {
             "enabled": interval > 0 and backup_keep() > 0,
             "interval_hours": interval / 3600 if interval else 0,
@@ -448,12 +546,19 @@ def backup_status() -> dict[str, Any]:
 
 
 async def run_periodic_backup() -> None:
-    """启动时若过期则补一份，之后按间隔轮转。interval=0 关闭自动快照。"""
+    """启动时清掉多出来的旧快照；interval=0 则不再自动打新的。"""
     import asyncio
+
+    try:
+        deleted = rotate_snapshots()
+        if deleted:
+            logger.info("已清理过期本地快照: %s", ", ".join(deleted))
+    except Exception:
+        logger.exception("清理过期快照失败")
 
     interval = backup_interval_seconds()
     if interval <= 0 or backup_keep() <= 0:
-        logger.info("自动备份已关闭（AUTOHUNTER_BACKUP_INTERVAL_HOURS=0 或 KEEP=0）")
+        logger.info("自动备份已关闭（AUTOHUNTER_BACKUP_INTERVAL_HOURS=0 或 KEEP=0），请用设置页导出带走")
         return
 
     async def _once(reason: str) -> None:

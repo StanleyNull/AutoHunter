@@ -137,18 +137,59 @@ class BackupTest(unittest.TestCase):
             bak.inspect_archive(archive)
         self.assertIn("AutoHunter", str(ctx.exception))
 
-    def test_snapshot_rotation_keeps_n(self):
-        with patch("app.backup.backup_keep", lambda: 2):
-            a = bak.snapshot_now()
-            b = bak.snapshot_now()
-            c = bak.snapshot_now()
-        names = {p["name"] for p in bak.list_snapshots()}
-        self.assertIn(c["name"], names)
-        self.assertIn(b["name"], names)
-        self.assertNotIn(a["name"], names)
-        self.assertEqual(len(names), 2)
+    def test_snapshot_overwrites_single_file(self):
+        leftover = self.tmp / "backups"
+        leftover.mkdir()
+        old = leftover / "autohunter-20200101-000000.db"
+        old.write_bytes(b"x" * 200)
+        a = bak.snapshot_now()
+        b = bak.snapshot_now()
+        self.assertEqual(a["name"], bak.LATEST_NAME)
+        self.assertEqual(b["name"], bak.LATEST_NAME)
+        names = [p["name"] for p in bak.list_snapshots()]
+        self.assertEqual(names.count(bak.LATEST_NAME), 1)
+        self.assertNotIn(old.name, names)
+        self.assertFalse(old.exists())
+        live_gz = leftover / bak.LATEST_NAME
+        self.assertTrue(live_gz.is_file())
+        self.assertLess(live_gz.stat().st_size, self.live.stat().st_size * 2)
+
+    def test_gzip_snapshot_can_be_gunzipped(self):
+        bak.snapshot_now()
+        gz = self.tmp / "backups" / bak.LATEST_NAME
+        raw = self.tmp / "from-gz.db"
+        import gzip
+        with gzip.open(gz, "rb") as fin, open(raw, "wb") as fout:
+            fout.write(fin.read())
+        self.assertEqual(_read_note(raw), "v1")
+        ok, msg = bak.integrity_check(raw)
+        self.assertTrue(ok, msg)
+
+    def test_snapshot_refuses_when_disk_low(self):
+        with patch("app.backup.disk_info", return_value={
+            "free": 100, "total": 1000, "free_human": "100 B", "total_human": "1 KB",
+        }), patch("app.backup.reserve_bytes", return_value=50):
+            with self.assertRaises(RuntimeError) as ctx:
+                bak.snapshot_now()
+        self.assertIn("磁盘剩余", str(ctx.exception))
+
+    def test_rotate_cleans_timestamped_and_tmp(self):
+        d = self.tmp / "backups"
+        d.mkdir()
+        old = d / "autohunter-20200101-000000.db"
+        old.write_bytes(b"x" * 200)
+        shm = d / "autohunter-20200101-000000.db.tmp-shm"
+        shm.write_bytes(b"x")
+        bak.rotate_snapshots()
+        self.assertFalse(old.exists())
+        self.assertFalse(shm.exists())
 
     def test_snapshot_file_rejects_traversal(self):
+        with self.assertRaises(ValueError):
+            bak.snapshot_file("../autohunter.db")
+        with self.assertRaises(ValueError):
+            bak.snapshot_file("foo.txt")
+
         with self.assertRaises(ValueError):
             bak.snapshot_file("../autohunter.db")
         with self.assertRaises(ValueError):
