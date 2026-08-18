@@ -20,7 +20,7 @@ import httpx
 from app.agents.prefilter import capped_resolution
 from app.config import worker_config
 from app.tools.decoder import decode_transform as _decode_transform
-from app.tools.guard import CommandBlocked, check_command
+from app.tools.guard import CommandBlocked, check_command, check_http_request
 from app.tools.js_analyzer import analyze_javascript as analyze_js_text
 from app.tools.js_analyzer import analyze_url as analyze_js_url
 from app.tools.waf_advisor import suggest_waf_bypass as _suggest_waf_bypass
@@ -346,6 +346,10 @@ class ToolExecutor:
         # 直接喂给 dict()/httpx 会抛 "dictionary update sequence element..." 崩掉整个 agent。
         # 这里统一规范化成 dict，容错所有 agent 的 http_request 调用。
         headers = _normalize_headers(headers)
+        try:
+            check_http_request(method, url, data=data, json_body=json_body)
+        except CommandBlocked as e:
+            return {"ok": False, "blocked": True, "error": str(e), "url": url}
         # 会话保持：把已维持的 cookie/header 合并进本次请求（用户传的同名键优先）。
         merged_headers, session_applied = self._apply_session(headers)
 
@@ -714,8 +718,8 @@ class ToolExecutor:
         if "client_signed_encrypted_api" in kinds:
             return (
                 base
-                + " 已命中「客户端签名+AES 加密请求体」链路：立刻提取 AppID/AppSecret/AES 口令，"
-                "按前端算法构造签名头并加密请求体，POST Admin/Client* 接口并解密响应取证；"
+                + " 已命中「客户端签名+AES 加密请求体」链路：立刻提取 ClientAppID/ClientAppSecret/AES 口令，"
+                "按前端算法构造 HeadJson + PWDDATA_ 加密 body，POST Admin/Client* 接口并解密 Model 取证；"
                 "只发现密钥不算洞。"
             )
         if "frontend_secret_followup" in kinds:
