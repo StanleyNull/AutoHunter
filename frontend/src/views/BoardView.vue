@@ -29,6 +29,7 @@ const drawerMode = ref("view");
 const toastMsg = ref("");
 const editOpen = ref(false);
 const invalidatingKillsweepId = ref(null);
+const retryingKillsweepId = ref(null);
 const traceOpen = ref(false);
 const traceWorker = ref(null);
 const traceEvents = ref([]);
@@ -276,7 +277,7 @@ const IMPORTANT_KINDS = new Set([
   "review_start", "review_done", "review_error", "review_deferred", "review_cancelled",
   "reproduce_start", "reproduce_done",
   "killsweep_start", "killsweep_done", "killsweep_error", "killsweep_dedup",
-  "killsweep_invalid", "killsweep_cancelled",
+  "killsweep_invalid", "killsweep_cancelled", "killsweep_retry",
   "llm_error", "llm_soft_retry", "llm_interrupt", "worker_resume", "llm_provider_failed", "quota_stop", "reclaim", "recover", "workers_cancelled",
   "tool_exception",
   "auth_status",
@@ -297,7 +298,7 @@ const LOG_INFO_IMPORTANT = new Set([
   "target_done", "target_requeued", "timeout", "auto_deepen", "salvage",
   "review_done", "review_deferred", "review_cancelled",
   "reclaim", "recover", "workers_cancelled", "quota_stop",
-  "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled",
+  "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled", "killsweep_retry",
   "escalate_done", "escalate_skip", "escalate_cancelled",
 ]);
 const TRACE_KINDS = new Set([
@@ -507,6 +508,7 @@ function fmtEvent(ev) {
     case "killsweep_error": return `通杀分析异常: ${(d.error || "").slice(0, 120)}`;
     case "killsweep_dedup": return `通杀分析去重：${d.product || ""}`;
     case "killsweep_invalid": return `通杀记录已标记无效：${d.product || ""}`;
+    case "killsweep_retry": return `手动重启通杀分析：${d.product || d.title || ""}`;
     case "llm_error": return `⚠ LLM 调用失败: ${d.error || ""}`;
     case "llm_soft_retry": return `LLM 软重试 ${d.attempt || "?"}/${d.max_attempts || "?"}（${d.kind || "retry"}，等 ${d.wait_seconds || 0}s）: ${(d.error || "").slice(0, 120)}`;
     case "llm_interrupt": return `LLM 中断收尾${d.has_resume ? "（已保存进度）" : ""}: ${(d.error || "").slice(0, 120)}`;
@@ -586,7 +588,7 @@ const _EV_CAT = {
   killsweep_error: "error", escalate_error: "error",
   worker_start: "phase", worker_resume: "phase", llm_round_start: "phase",
   collector_phase: "phase", review_start: "phase", reproduce_start: "phase",
-  escalate_start: "phase", killsweep_start: "phase",
+  escalate_start: "phase", killsweep_start: "phase", killsweep_retry: "phase",
   auth_status: "auth",
 };
 function evCat(ev) {
@@ -958,6 +960,33 @@ async function invalidateKillsweep(k) {
     toast(`标记失败：${e.message || e}`);
   } finally {
     invalidatingKillsweepId.value = null;
+  }
+}
+function ksStatusLabel(k) {
+  if (k.status === "analyzing") return "分析中";
+  if (k.status === "failed") return "启动失败";
+  if (k.status === "cancelled") return "已取消";
+  if (k.status === "invalid") return "已无效";
+  if (k.is_killsweep || k.has_sites) return k.verified ? "有通杀站·已验证" : "有通杀站";
+  return "无通杀站";
+}
+function ksCanRetry(k) {
+  if (readonly.value) return false;
+  if (k.status === "invalid") return false;
+  if (k.status === "done" && (k.is_killsweep || k.has_sites)) return false;
+  return true;
+}
+async function retryKillsweep(k) {
+  if (readonly.value || retryingKillsweepId.value) return;
+  retryingKillsweepId.value = k.id;
+  try {
+    await api.retryKillsweep(props.id, k.id);
+    toast("已重新启动通杀分析");
+    await Promise.all([loadTabData("killsweep"), loadBoard()]);
+  } catch (e) {
+    toast(`重启失败：${e.message || e}`);
+  } finally {
+    retryingKillsweepId.value = null;
   }
 }
 
@@ -1631,15 +1660,15 @@ function parseEventTs(ts) {
 
     <!-- 通杀列 -->
     <div v-show="tab === 'killsweep'" class="list-panel">
-      <div class="list-head"><span>通杀列</span><small>人工通过后触发，验证 1 个同款站点</small></div>
-      <div v-if="!killsweepItems.length" class="empty">还没有通杀候选（人工复审通过后，通杀 Hunter 会自动分析同款系统）</div>
+      <div class="list-head"><span>通杀列</span><small>人工通过后进入此列；失败可直接重启，不必改库回退复审</small></div>
+      <div v-if="!killsweepItems.length" class="empty">还没有通杀记录（人工复审通过后，通杀 Hunter 会自动分析同款系统，失败也会留在这里）</div>
       <div v-else-if="!filteredKillsweeps.length" class="empty">没有匹配当前关键词的通杀记录</div>
-      <div v-for="k in filteredKillsweeps" :key="k.id" class="killsweep-card" :class="{ open: isKillsweepOpen(k.id) }">
+      <div v-for="k in filteredKillsweeps" :key="k.id" class="killsweep-card" :class="{ open: isKillsweepOpen(k.id), failed: k.status === 'failed', running: k.status === 'analyzing' }">
         <button class="ks-summary" type="button" :aria-expanded="isKillsweepOpen(k.id)" @click="toggleKillsweep(k.id)">
           <span class="ks-chevron">{{ isKillsweepOpen(k.id) ? "⌄" : "›" }}</span>
           <span class="ks-main">
-            <span class="ks-title">{{ k.product_name || "未知产品" }}</span>
-            <span class="meta">{{ k.vuln_type }} · {{ k.origin_title || k.vuln_summary || "通杀候选" }}</span>
+            <span class="ks-title">{{ k.product_name || k.origin_title || k.vuln_summary || "通杀分析" }}</span>
+            <span class="meta">{{ k.vuln_type }} · {{ k.origin_title || k.vuln_summary || "源漏洞" }}</span>
             <span class="meta rr-time">发现 {{ fmtLocalTime(k.created_at) }}</span>
           </span>
           <span class="ks-summary-metrics">
@@ -1648,8 +1677,13 @@ function parseEventTs(ts) {
             <span><b>{{ k.asset_count ?? 0 }}</b>全网</span>
           </span>
           <span class="ks-badges">
+            <span class="tag-run" v-if="k.status === 'analyzing'">分析中</span>
+            <span class="tag-fail" v-else-if="k.status === 'failed'">启动失败</span>
+            <span class="tag-miss" v-else-if="k.status === 'cancelled'">已取消</span>
+            <span class="tag-done" v-else-if="k.is_killsweep || k.has_sites">有通杀站{{ verifiedCount(k) > 1 ? ` ${verifiedCount(k)} 个` : "" }}</span>
+            <span class="tag-miss" v-else>无通杀站</span>
             <span class="tag-done" v-if="k.verified">已验证{{ verifiedCount(k) > 1 ? ` ${verifiedCount(k)} 个` : "" }}</span>
-            <span class="sev-pill" :class="k.confidence">{{ k.confidence || "uncertain" }}</span>
+            <span class="sev-pill" :class="k.confidence" v-if="k.confidence">{{ k.confidence }}</span>
           </span>
         </button>
 
@@ -1665,7 +1699,7 @@ function parseEventTs(ts) {
             </div>
             <div>
               <span>指纹依据</span>
-              <p>{{ k.fingerprint || k.notes || "无补充依据" }}</p>
+              <p>{{ k.fingerprint || (k.status === 'failed' || k.status === 'cancelled' ? k.notes : '') || k.notes || "无补充依据" }}</p>
             </div>
           </div>
 
@@ -1698,10 +1732,17 @@ function parseEventTs(ts) {
           </div>
 
           <div class="ks-actions" v-if="!readonly">
-            <button class="ks-invalid" type="button" :disabled="invalidatingKillsweepId === k.id" @click="invalidateKillsweep(k)">
+            <button v-if="ksCanRetry(k)" class="ks-retry" type="button"
+              :disabled="retryingKillsweepId === k.id"
+              @click="retryKillsweep(k)">
+              {{ retryingKillsweepId === k.id ? "启动中…" : "重新启动通杀" }}
+            </button>
+            <button class="ks-invalid" type="button" :disabled="invalidatingKillsweepId === k.id || k.status === 'analyzing'" @click="invalidateKillsweep(k)">
               {{ invalidatingKillsweepId === k.id ? "标记中…" : "标记为无效" }}
             </button>
-            <span>误判、资产不稳定、未实际验证或通杀条件不成立时使用。</span>
+            <span v-if="k.status === 'failed'">LLM/中转站失败后可直接重启，不用改复审状态。</span>
+            <span v-else-if="!(k.is_killsweep || k.has_sites)">分析完成但没有圈到通杀站；也可再跑一轮。</span>
+            <span v-else>误判、资产不稳定、未实际验证或通杀条件不成立时使用。</span>
           </div>
         </div>
       </div>

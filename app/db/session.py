@@ -143,6 +143,9 @@ _SECONDARY_INDEXES = [
     ("ix_killsweeps_task_hit_rank",
      "CREATE INDEX IF NOT EXISTS ix_killsweeps_task_hit_rank "
      "ON killsweeps(task_id, is_killsweep, verified, asset_count, created_at)"),
+    ("ix_killsweeps_origin_finding",
+     "CREATE INDEX IF NOT EXISTS ix_killsweeps_origin_finding "
+     "ON killsweeps(origin_finding_id)"),
     # 运行异常日志：按 level/agent 过滤 + ts DESC 排序。
     ("ix_task_events_level_ts",
      "CREATE INDEX IF NOT EXISTS ix_task_events_level_ts ON task_events(level, ts)"),

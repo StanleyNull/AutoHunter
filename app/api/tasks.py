@@ -66,7 +66,7 @@ _STREAM_IMPORTANT_KINDS = frozenset({
     "review_start", "review_done", "review_error", "review_deferred", "review_cancelled",
     "reproduce_start", "reproduce_done",
     "killsweep_start", "killsweep_done", "killsweep_dedup", "killsweep_error",
-    "killsweep_invalid", "killsweep_cancelled",
+    "killsweep_invalid", "killsweep_cancelled", "killsweep_retry",
     "reclaim", "recover", "workers_cancelled", "quota_stop",
     "llm_error", "llm_soft_retry", "llm_interrupt", "worker_resume", "llm_provider_failed",
     "tool_exception",
@@ -340,7 +340,7 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
             stats.rejected += cnt
     stats.killsweep = (await session.execute(
         select(func.count()).select_from(Killsweep).where(
-            Killsweep.task_id == task_id, Killsweep.is_killsweep == True)  # noqa: E712
+            Killsweep.task_id == task_id, Killsweep.status != "invalid")
     )).scalar() or 0
     # AI 未采纳归档：与 /archived 接口筛选完全一致，保证徽标数字 == 列表条数（不用点开即预加载）
     stats.archived = (await session.execute(

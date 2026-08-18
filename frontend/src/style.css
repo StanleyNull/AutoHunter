@@ -2280,6 +2280,9 @@ main {
   font-variant-numeric: tabular-nums;
 }
 .tag-done { font-size: 10.5px; background: var(--ok-bg); color: var(--ok); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; }
+.tag-fail { font-size: 10.5px; background: var(--danger-bg); color: var(--danger); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; }
+.tag-run { font-size: 10.5px; background: var(--info-bg); color: var(--info); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; }
+.tag-miss { font-size: 10.5px; background: var(--surface-2); color: var(--muted); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; border: 1px solid var(--border); }
 
 /* ---------- 等级标识：语义色 + 文字（不只靠色） ---------- */
 .sev-pill {
@@ -2403,6 +2406,14 @@ main {
   font-weight: 700;
 }
 .ks-invalid:hover { background: var(--danger); color: var(--on-accent); }
+.ks-retry {
+  background: var(--info-bg); color: var(--info);
+  border-color: color-mix(in oklch, var(--info) 42%, transparent);
+  font-weight: 700;
+}
+.ks-retry:hover { background: var(--info); color: var(--on-accent); }
+.killsweep-card.failed { border-color: color-mix(in oklch, var(--danger) 35%, var(--border-soft)); }
+.killsweep-card.running { border-color: color-mix(in oklch, var(--info) 35%, var(--border-soft)); }
 
 /* ---------- 抽屉：实底面板，遮罩轻暗（非毛玻璃） ---------- */
 .drawer-mask { position: fixed; inset: 0; background: oklch(0% 0 0 / 0.5); z-index: var(--z-backdrop); animation: fade .15s ease; }

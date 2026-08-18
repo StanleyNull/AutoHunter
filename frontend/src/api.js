@@ -237,6 +237,8 @@ export const api = {
   killsweeps: (id, q) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q })}`),
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),
+  retryKillsweep: (taskId, killsweepId) =>
+    req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/retry`),
   finding: (id) => req("GET", `/api/findings/${id}`),
   reportAssistantStream: (id, message, onEvent) =>
     streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent),

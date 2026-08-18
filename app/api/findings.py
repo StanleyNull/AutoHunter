@@ -22,6 +22,7 @@ from app.settings_service import llm_client_for_task
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 from app.events import bus
+from app.killsweep_status import killsweep_retryable
 from app.llm.client import LLMClient, LLMError
 from app.tools.executor import ToolExecutor
 
@@ -423,12 +424,14 @@ async def restore_archived(finding_id: str, session: AsyncSession = Depends(get_
 
 
 @router.get("/tasks/{task_id}/killsweeps")
-async def killsweep_list(task_id: str, only_hits: bool = True,
+async def killsweep_list(task_id: str, only_hits: bool = False,
+                         include_invalid: bool = False,
                          search: Optional[str] = Query(None, alias="q"),
                          session: AsyncSession = Depends(get_session)):
-    """通杀列：人工复审通过后由通杀 Hunter 产出的可通杀候选。
+    """通杀列：人工复审通过后，无论是否命中同款站、是否分析失败，都会进入此列。
 
-    默认只返回 is_killsweep=true 的命中项，避免把不可通杀分析噪音摆到主列表里。
+    only_hits=true 时只返回判定可通杀的命中项（旧行为）。
+    默认隐藏人工标记无效的记录。
     """
     q = (
         select(Killsweep, Finding.title)
@@ -437,7 +440,19 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
     )
     if only_hits:
         q = q.where(Killsweep.is_killsweep == True)  # noqa: E712
-    q = q.order_by(Killsweep.verified.desc(), Killsweep.asset_count.desc(), Killsweep.created_at.desc())
+    if not include_invalid:
+        q = q.where(Killsweep.status != "invalid")
+    q = q.order_by(
+        case(
+            (Killsweep.status == "analyzing", 0),
+            (Killsweep.status == "failed", 1),
+            (Killsweep.status == "cancelled", 2),
+            else_=3,
+        ),
+        Killsweep.is_killsweep.desc(),
+        Killsweep.verified.desc(),
+        Killsweep.created_at.desc(),
+    )
     rows = (await session.execute(q)).all()
     out = []
     for k, origin_title in rows:
@@ -454,12 +469,14 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
             "asset_count": k.asset_count,
             "edu_count": k.edu_count,
             "is_killsweep": k.is_killsweep,
+            "has_sites": bool(k.is_killsweep and ((k.affected_table or []) or k.verified_url)),
             "confidence": k.confidence,
             "verified_url": k.verified_url,
             "verified": k.verified,
             "affected_table": k.affected_table or [],
             "notes": k.notes,
             "status": k.status,
+            "retryable": killsweep_retryable(k.status, bool(k.is_killsweep)),
             "created_at": to_cst_iso(k.created_at),
             "updated_at": to_cst_iso(k.updated_at),
         }
@@ -486,13 +503,12 @@ async def invalidate_killsweep(task_id: str, killsweep_id: str,
                                session: AsyncSession = Depends(get_session)):
     """人工把通杀候选标记为无效。
 
-    默认通杀列表只返回 is_killsweep=true，因此置 false 后会立刻从主列表消失；
-    原始记录保留在 DB 里，便于后续审计或人工回捞。
+    默认通杀列表隐藏 status=invalid 的记录；原始记录保留在 DB 里，便于后续审计或人工回捞。
     """
     k = await session.get(Killsweep, killsweep_id)
     if not k or k.task_id != task_id:
         raise HTTPException(404, "通杀记录不存在")
-    if k.status == "invalid" or not k.is_killsweep:
+    if k.status == "invalid":
         return {"ok": True, "id": k.id, "status": k.status or "invalid", "already_invalid": True}
     reason = ((req.reason if req else "") or "人工标记无效").strip()[:500]
     now = _now()
@@ -520,6 +536,42 @@ async def invalidate_killsweep(task_id: str, killsweep_id: str,
         "ts": datetime.now(timezone.utc).isoformat(),
     })
     return {"ok": True, "id": k.id, "status": k.status}
+
+
+@router.post("/tasks/{task_id}/killsweeps/{killsweep_id}/retry")
+async def retry_killsweep(task_id: str, killsweep_id: str,
+                          session: AsyncSession = Depends(get_session)):
+    """重启通杀 Hunter：LLM/中转站抖动失败后，不必把复审改回 pending。"""
+    k = await session.get(Killsweep, killsweep_id)
+    if not k or k.task_id != task_id:
+        raise HTTPException(404, "通杀记录不存在")
+    if not killsweep_retryable(k.status, bool(k.is_killsweep)):
+        if k.status == "invalid":
+            raise HTTPException(400, "已标记无效的通杀记录不能重启")
+        raise HTTPException(400, "已有通杀命中，无需重启")
+    finding_id = (k.origin_finding_id or "").strip()
+    if not finding_id:
+        raise HTTPException(400, "缺少源漏洞，无法重启")
+    f = await session.get(Finding, finding_id)
+    if not f or f.task_id != task_id:
+        raise HTTPException(404, "源漏洞不存在")
+    from app.orchestrator import manager
+    runner = manager._runners.get(task_id)
+    if runner and finding_id in runner._killsweep_inflight:
+        raise HTTPException(409, "通杀正在运行，请稍后再试")
+    started = await manager.trigger_killsweep(task_id, finding_id)
+    if not started:
+        raise HTTPException(409, "通杀正在运行，请稍后再试")
+    session.add(TaskEvent(
+        task_id=task_id,
+        agent="killsweep",
+        kind="killsweep_retry",
+        level="info",
+        message=f"手动重启通杀分析：{k.product_name or k.vuln_summary or finding_id}",
+        payload={"killsweep_id": k.id, "finding_id": finding_id},
+    ))
+    await session.commit()
+    return {"ok": True, "id": k.id, "finding_id": finding_id, "status": "analyzing"}
 
 
 class ReportAssistantRequest(BaseModel):
