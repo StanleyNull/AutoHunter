@@ -42,6 +42,7 @@
 | <img src="https://avatars.githubusercontent.com/u/102737018?v=4&s=64" width="40" height="40" alt="DmcforSpc" /> | [@DmcforSpc](https://github.com/DmcforSpc) | Kimi Code 端点 temperature 兼容 |
 | <img src="https://avatars.githubusercontent.com/u/78614185?v=4&s=64" width="40" height="40" alt="moliyu1101" /> | [@moliyu1101](https://github.com/moliyu1101) | 黑洞 DNS 防护 · worker 并发位超时 |
 | <img src="https://avatars.githubusercontent.com/u/90189362?v=4&s=64" width="40" height="40" alt="Saide-sec" /> | [@Saide-sec](https://github.com/Saide-sec) | 看板分析 · 命令面板 |
+| <img src="https://avatars.githubusercontent.com/u/110716280?v=4&s=64" width="40" height="40" alt="tf748i5gf5t" /> | [@tf748i5gf5t](https://github.com/tf748i5gf5t) | 审核写证明事件参数冲突修复 |
 
 <!-- 新贡献者请在上一行表格末尾追加，保持格式一致 -->
 

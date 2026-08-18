@@ -105,6 +105,17 @@
   </tr>
 </table>
 
+<table>
+  <tr>
+    <td align="center" width="100">
+      <a href="https://github.com/tf748i5gf5t">
+        <img src="https://avatars.githubusercontent.com/u/110716280?v=4&s=128" width="72" height="72" alt="tf748i5gf5t" /><br />
+        <sub><b>tf748i5gf5t</b></sub>
+      </a><br /><sup>Reviewer Fix</sup>
+    </td>
+  </tr>
+</table>
+
 </div>
 
 <br>
