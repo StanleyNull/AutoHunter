@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from app.agents.reviewer import _maybe_accept_write_proof, _maybe_deepen_ignored
+from app.agents.reviewer import Reviewer, _maybe_accept_write_proof, _maybe_deepen_ignored
 from app.agents.write_proof import (
     KIND_AUTHZ_DIFF,
     KIND_SENTINEL,
@@ -128,6 +129,34 @@ class WriteProofTest(unittest.TestCase):
         self.assertTrue(_maybe_accept_write_proof(finding, review))
         self.assertEqual(review.verdict.value, "accepted")
         self.assertFalse(_maybe_deepen_ignored(finding, review, "edusrc"))
+
+    def test_reviewer_emits_write_kind_when_promoting_sentinel(self):
+        finding = _finding(
+            title="未授权可增删改自己的测试工单",
+            target_url="https://example.edu.cn/api/ticket/delete",
+            description="自建哨兵 SRC_TEST_a1b2 后旁路查询可见，删除后查询已消失。",
+            poc="curl -X DELETE https://example.edu.cn/api/ticket/delete?id=88",
+            evidence={"notes": "SRC_TEST_a1b2 删除后查询不存在，前后对比已齐"},
+        )
+        events = []
+        reviewer = Reviewer(
+            llm=object(),
+            on_event=lambda kind, data: events.append((kind, data)),
+            enable_reproduce=False,
+        )
+
+        with patch.object(
+            reviewer,
+            "_llm_review",
+            return_value=_ignored_review(ignore_reasons=["未破坏真实数据"]),
+        ):
+            review = reviewer.review(finding)
+
+        self.assertEqual(review.verdict.value, "accepted")
+        auto_event = next(data for kind, data in events if kind == "review_auto_accept_write")
+        self.assertEqual(auto_event["write_kind"], KIND_SENTINEL)
+        self.assertNotIn("kind", auto_event)
+        self.assertIn("review_done", [kind for kind, _ in events])
 
     def test_reviewer_does_not_promote_zero_effect(self):
         finding = _finding(
