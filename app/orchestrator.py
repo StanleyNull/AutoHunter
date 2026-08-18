@@ -3109,7 +3109,7 @@ class TaskRunner:
             await session.commit()
 
     async def trigger_killsweep(self, task_id: str, finding_id: str) -> bool:
-        """人工复审通过后启动通杀分析；finding 级 inflight 去重，避免重复点击。"""
+        """启动通杀分析（复审通过或通杀列手动重启）；finding 级 inflight 去重，避免重复点击。"""
         if finding_id in self._killsweep_inflight:
             return False
         self._killsweep_inflight.add(finding_id)
@@ -3666,7 +3666,7 @@ class OrchestratorManager:
         }
 
     async def trigger_killsweep(self, task_id: str, finding_id: str) -> bool:
-        """人工复审通过后触发通杀 Hunter。
+        """触发通杀 Hunter（复审通过或通杀列手动重启）。
 
         任务即使当前不在 running，也允许做一次离线通杀分析；这里创建轻量 runner
         只承载该后台任务，不自动启动主挖掘循环。

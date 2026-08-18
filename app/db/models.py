@@ -222,7 +222,7 @@ class Killsweep(Base):
     # 既用于前端展示，也会进入 worker 查重上下文，避免同学校同通杀洞反复提交。
     affected_table: Mapped[list] = mapped_column(JSON, default=list)
     notes: Mapped[str] = mapped_column(Text, default="")                 # 分析结论/批量建议
-    # analyzing / done / failed
+    # analyzing / done / failed / cancelled / invalid
     status: Mapped[str] = mapped_column(String(20), default="analyzing", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

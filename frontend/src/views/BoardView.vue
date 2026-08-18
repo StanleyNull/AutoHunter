@@ -962,19 +962,9 @@ async function invalidateKillsweep(k) {
     invalidatingKillsweepId.value = null;
   }
 }
-function ksStatusLabel(k) {
-  if (k.status === "analyzing") return "分析中";
-  if (k.status === "failed") return "启动失败";
-  if (k.status === "cancelled") return "已取消";
-  if (k.status === "invalid") return "已无效";
-  if (k.is_killsweep || k.has_sites) return k.verified ? "有通杀站·已验证" : "有通杀站";
-  return "无通杀站";
-}
 function ksCanRetry(k) {
   if (readonly.value) return false;
-  if (k.status === "invalid") return false;
-  if (k.status === "done" && (k.is_killsweep || k.has_sites)) return false;
-  return true;
+  return !!k.retryable;
 }
 async function retryKillsweep(k) {
   if (readonly.value || retryingKillsweepId.value) return;
