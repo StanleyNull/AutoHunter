@@ -845,6 +845,7 @@ async function runCleanup() {
           <div v-if="llmMode === 'single'" class="settings-grid llm-config-pane">
             <label class="full">base_url
               <input v-model="form.base_url" required placeholder="https://api.deepseek.com/v1" @input="invalidateSingleKey" />
+              <small class="muted">Coding Plan 填官方根地址即可（智谱 <code>…/api/coding/paas/v4</code>、方舟 <code>…/api/coding/v3</code>），不要再加 /v1。无版本号的根会自动补 /v1。</small>
             </label>
             <label class="full">api_key
               <input v-model="form.api_key" type="password"
@@ -941,6 +942,7 @@ async function runCleanup() {
                 </label>
                 <label class="wide">base_url
                   <input v-model="selectedLlm.base_url" placeholder="https://api.deepseek.com/v1" @input="invalidateProviderKey(selectedLlm)" />
+                  <small class="muted">Coding Plan 填官方根地址，不要再加 /v1。</small>
                 </label>
                 <label>api_key
                   <input

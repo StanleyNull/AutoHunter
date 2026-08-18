@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dto import SettingsUpdateRequest
 from app.config import LLMConfig
 from app.db.session import get_session
-from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent
+from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent, llm_request_url
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
 from app.settings_service import (
@@ -123,21 +123,6 @@ def _safe_error(value: object, *secrets: str) -> str:
             text = text.replace(str(secret), "<masked>")
     text = _NAMED_SECRET_RE.sub(r"\1<masked>", text)
     return _TEST_SECRET_RE.sub("<masked>", text)[:500]
-
-
-def _api_root(base_url: str) -> str:
-    base = str(base_url or "").strip().rstrip("/")
-    lowered = base.lower()
-    for suffix in ("/chat/completions", "/messages"):
-        if lowered.endswith(suffix):
-            return base[: -len(suffix)].rstrip("/")
-    return base
-
-
-def _chat_url(base_url: str, protocol: str) -> str:
-    base = _api_root(base_url)
-    path = "messages" if protocol == "anthropic_messages" else "chat/completions"
-    return f"{base}/{path}" if base.lower().endswith("/v1") else f"{base}/v1/{path}"
 
 
 def _test_configs(body: LLMTestRequest) -> list[tuple[str, LLMConfig]]:
@@ -258,7 +243,7 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
     if protocol == "auto":
         lowered = provider.base_url.lower()
         protocol = "anthropic_messages" if "anthropic" in lowered or "/messages" in lowered else "openai_chat"
-    url = _chat_url(provider.base_url, protocol)
+    url = llm_request_url(provider.base_url, protocol)
     result = {
         "name": name,
         "ok": False,

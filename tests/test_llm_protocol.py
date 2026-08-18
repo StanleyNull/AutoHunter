@@ -60,3 +60,44 @@ def test_protocol_switch_ignores_model_and_param_errors():
     c3 = _client()
     assert c3._maybe_switch_protocol(
         Exception("404 not found: unknown path /chat/completions")) is True
+
+
+def test_coding_plan_v4_does_not_insert_extra_v1():
+    from app.llm.client import llm_models_url, llm_request_url, _ensure_versioned_api_root
+
+    glm = "https://open.bigmodel.cn/api/coding/paas/v4"
+    assert llm_request_url(glm, "openai_chat") == f"{glm}/chat/completions"
+    assert llm_request_url(glm + "/", "openai_chat") == f"{glm}/chat/completions"
+    assert llm_request_url(glm + "/chat/completions", "openai_chat") == f"{glm}/chat/completions"
+    assert llm_models_url(glm) == f"{glm}/models"
+    assert _ensure_versioned_api_root(glm) == glm
+    assert _client(base_url=glm)._messages_url() == f"{glm}/messages"
+
+
+def test_ark_and_kimi_coding_roots():
+    from app.llm.client import llm_request_url
+
+    ark = "https://ark.cn-beijing.volces.com/api/coding/v3"
+    assert llm_request_url(ark, "openai_chat") == f"{ark}/chat/completions"
+    kimi = "https://api.kimi.com/coding/v1"
+    assert llm_request_url(kimi, "openai_chat") == f"{kimi}/chat/completions"
+
+
+def test_unversioned_root_still_gets_v1():
+    from app.llm.client import llm_models_url, llm_request_url, _ensure_versioned_api_root
+
+    assert llm_request_url("https://api.deepseek.com", "openai_chat") == (
+        "https://api.deepseek.com/v1/chat/completions"
+    )
+    assert _ensure_versioned_api_root("https://api.deepseek.com") == "https://api.deepseek.com/v1"
+    assert llm_models_url("https://api.deepseek.com") == "https://api.deepseek.com/v1/models"
+    assert llm_request_url("https://api.anthropic.com", "anthropic_messages") == (
+        "https://api.anthropic.com/v1/messages"
+    )
+    assert llm_request_url("https://open.bigmodel.cn/api/anthropic", "anthropic_messages") == (
+        "https://open.bigmodel.cn/api/anthropic/v1/messages"
+    )
+    assert llm_request_url("https://api.openai.com/v1", "openai_chat") == (
+        "https://api.openai.com/v1/chat/completions"
+    )
+

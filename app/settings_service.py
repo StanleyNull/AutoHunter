@@ -771,7 +771,8 @@ async def list_available_models(
         return {"ok": False, "error": "未配置模型 base_url", "models": []}
     if not key:
         return {"ok": False, "error": "未配置 API Key，无法拉取模型列表", "models": []}
-    url = base if base.endswith("/models") else f"{base}/models"
+    from app.llm.client import llm_models_url
+    url = llm_models_url(base)
     from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 
     try:
