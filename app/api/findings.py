@@ -16,7 +16,7 @@ from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
-from app.agents.deepen import apply_deepen
+from app.agents.deepen import apply_deepen, deepen_cap_for
 from app.agents.write_proof import looks_like_write_op
 from app.settings_service import llm_client_for_task
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
@@ -1206,7 +1206,9 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
         raise HTTPException(404, "漏洞不存在")
     r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
     tgt = await session.get(Target, f.target_id)
-    ok, suffix = apply_deepen(session, f, tgt, directive, source="user")
+    task_row = await session.get(Task, f.task_id) if f.task_id else None
+    ok, suffix = apply_deepen(session, f, tgt, directive, source="user",
+                              cap=deepen_cap_for(task_row))
     if not ok:
         # 深挖失败：回滚一切改动，绝不把 user_status 污染成 deepening，
         # 否则该漏洞会从复审/驳回列表消失又进不了深挖，变成查不到的"幽灵数据"。

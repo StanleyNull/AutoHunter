@@ -208,7 +208,7 @@ watch(hasRunning, () => syncPoller());
                 :title="`${t.pending_user_review} 个漏洞待复审`">{{ t.pending_user_review }}</span>
           <div class="task-card-meta">
             <span class="badge" :class="t.status">{{ STATUS_LABEL[t.status] || t.status }}</span>
-            <span class="meta">{{ taskModeLabel(t) }} · {{ targetSourceLabel(t) }} · 并发 {{ t.concurrency }}</span>
+            <span class="meta">{{ taskModeLabel(t) }} · {{ targetSourceLabel(t) }} · 并发 {{ t.concurrency }} · 深挖 ×{{ t.deepen_cap ?? 2 }}</span>
           </div>
           <div class="meta task-query">{{ taskScopeText(t) }}</div>
         </div>

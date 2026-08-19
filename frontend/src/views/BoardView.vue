@@ -1329,6 +1329,7 @@ function parseEventTs(ts) {
           <span v-if="task.target_source !== 'manual' && task.target_source !== 'site'" class="engine-badge">{{ engineName }}</span>
           <span>{{ missionScopeText }}</span>
           <span>并发 {{ task.concurrency }}</span>
+          <span>深挖 ×{{ task.deepen_cap ?? 2 }}</span>
           <span>{{ runState.hint }}</span>
         </div>
         <div class="mission-runtime">

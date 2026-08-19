@@ -66,6 +66,7 @@ const form = reactive({
   max_pages: 20,
   page_size: 100,
   concurrency: 3,
+  deepen_cap: 2,
   skip_site_recon: false,
 });
 const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions } =
@@ -148,6 +149,7 @@ function fill(task) {
   form.page_size = fofaCfg.page_size ?? 100;
   form.skip_site_recon = !!fofaCfg.skip_site_recon;
   form.concurrency = task.concurrency || 3;
+  form.deepen_cap = task.deepen_cap ?? 2;
   loadAuthBindings(task);
 
   const providers = Array.isArray(modelCfg.providers) ? modelCfg.providers : [];
@@ -269,6 +271,7 @@ async function save() {
     auth_bindings: showAuthBindings.value ? exportAuthBindings() : [],
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
+    deepen_cap: Math.max(0, Math.min(parseInt(form.deepen_cap) || 0, 10)),
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   });
@@ -293,6 +296,7 @@ async function save() {
       <div class="settings-grid">
         <label>任务名称 <input v-model="form.name" required /></label>
         <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
+        <label>深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
         <label>任务模式
           <select v-model="form.src_type">
             <option value="edusrc">EduSRC（教育行业）</option>

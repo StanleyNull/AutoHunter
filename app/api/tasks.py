@@ -37,6 +37,7 @@ from app.settings_service import (
     resolve_worker_prompt_version,
     secret_ref,
 )
+from app.agents.deepen import clamp_deepen_cap
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -278,6 +279,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         id=t.id, name=_observer_task_name(t.name, t.id) if observer else t.name, status=t.status, src_type=t.src_type,
         vuln_types=t.vuln_types or [], target_source=t.target_source,
         engine=t.engine or "", fofa_query="" if observer else t.fofa_query, concurrency=t.concurrency,
+        deepen_cap=clamp_deepen_cap(getattr(t, "deepen_cap", None)),
         src_rules="" if observer else (t.src_rules or ""),
         manual_targets=[] if observer else (t.manual_targets or []),
         auth_bindings=_public_auth_bindings(t, observer=observer),
@@ -429,6 +431,7 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         auth_bindings=_dump_auth_bindings(req.auth_bindings),
         model_config_json=model_config,
         fofa_config=fofa_cfg, concurrency=_clamp_task_concurrency(req.concurrency),
+        deepen_cap=clamp_deepen_cap(req.deepen_cap),
         status="created",
     )
     session.add(task)
@@ -621,6 +624,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         task.auth_bindings = _dump_auth_bindings(req.auth_bindings)
     if req.concurrency is not None:
         task.concurrency = _clamp_task_concurrency(req.concurrency)
+    if req.deepen_cap is not None:
+        task.deepen_cap = clamp_deepen_cap(req.deepen_cap)
 
     old_query = task.fofa_query or ""
     if req.fofa_query is not None:

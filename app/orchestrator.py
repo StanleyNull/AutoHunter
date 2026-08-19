@@ -27,7 +27,7 @@ from app.agents import playbook_router
 from app.agents import prefilter
 from app.agents import site_collab
 from app.agents import target_cluster
-from app.agents.deepen import DEEPEN_CAP  # 单 target 深挖上限（人工+AI 合计，防死循环）
+from app.agents.deepen import deepen_cap_for  # 任务级深挖上限（人工+AI+lead 合计，防死循环）
 from app.agents.prompts import is_enterprise_src, should_escalate
 from app.agents.reviewer import Reviewer
 from app.agents.worker import Worker
@@ -2627,11 +2627,13 @@ class TaskRunner:
                 tgt.dead_reason = ""
             elif verdict == Verdict.no_vuln.value:
                 # 自动深挖回火：worker 突破了入口但没打穿，给了 deepen_lead → 带定向指令再派一轮
-                # （复用 deepen_count + DEEPEN_CAP 防死循环；优先于收敛/重试/dead）。
+                # （复用 deepen_count + 任务 deepen_cap 防死循环；优先于收敛/重试/dead）。
                 deepen_lead = (result.get("deepen_lead") or "").strip()
                 no_vuln_retry_reason = self._no_vuln_retry_reason(tgt)
+                task_row = await session.get(Task, task_id)
+                cap = deepen_cap_for(task_row)
                 if (_is_actionable_worker_deepen_lead(deepen_lead) and verdict == Verdict.no_vuln.value
-                        and tgt.deepen_count < DEEPEN_CAP):
+                        and tgt.deepen_count < cap):
                     _prev_dctx = tgt.deepen_context or {}
                     _prev_origin_fid = _prev_dctx.get("from_finding_id") or ""
                     _prev_origin_src = _prev_dctx.get("source") or ""
@@ -3042,10 +3044,12 @@ class TaskRunner:
 
     async def _apply_deepen(self, session: AsyncSession, finding: Finding, rv: dict) -> str:
         """审核打回深挖：复用共享回炉逻辑（与人工复审「继续深挖」同一套）。"""
-        from app.agents.deepen import apply_deepen
+        from app.agents.deepen import apply_deepen, deepen_cap_for
         tgt = await session.get(Target, finding.target_id)
+        task_row = await session.get(Task, finding.task_id) if finding.task_id else None
         _ok, suffix = apply_deepen(session, finding, tgt,
-                                   rv.get("deepen_directive") or "", source="ai")
+                                   rv.get("deepen_directive") or "", source="ai",
+                                   cap=deepen_cap_for(task_row))
         return suffix
 
     async def _killsweep_row_for_finding(self, session: AsyncSession, finding_id: str) -> Killsweep | None:

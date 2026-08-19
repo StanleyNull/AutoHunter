@@ -21,7 +21,7 @@ const form = reactive({
   // inherit | single | pool
   model_mode: "inherit",
   base_url: "", api_key: "", key_ref: "", model: "", protocol: "auto", prompt_version: "legacy",
-  fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3,
+  fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3, deepen_cap: 2,
   skip_site_recon: false,
   skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
 });
@@ -210,6 +210,7 @@ async function submit() {
     auth_bindings: showAuthBindings.value ? exportAuthBindings() : [],
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
+    deepen_cap: Math.max(0, Math.min(parseInt(form.deepen_cap) || 0, 10)),
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   };
@@ -232,6 +233,7 @@ onMounted(async () => {
     if (!form.intent_mode) form.intent_mode = s.fofa?.default_intent_mode || "";
     if (!form.fofa_base_url) form.fofa_base_url = s.fofa?.base_url || "";
     form.concurrency = s.defaults?.concurrency ?? form.concurrency;
+    form.deepen_cap = s.defaults?.deepen_cap ?? form.deepen_cap;
     inherited.base_url = form.base_url;
     inherited.model = form.model;
     inherited.protocol = form.protocol;
@@ -242,6 +244,7 @@ onMounted(async () => {
     inherited.max_pages = Number(form.max_pages);
     inherited.intent_mode = form.intent_mode;
     inherited.concurrency = Number(form.concurrency);
+    inherited.deepen_cap = Number(form.deepen_cap);
   } catch {}
 });
 </script>
@@ -407,6 +410,8 @@ onMounted(async () => {
           当前引擎不是 FOFA：Key 请用系统设置里的「各引擎 API Key」，高级区不再重复填。
         </p>
         <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
+        <label>深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
+        <p class="field-hint">同一目标被打回深挖的最大次数（人工 + AI 审核 + 自动 deepen_lead 合计）。默认 2，范围 0–10；0 表示关闭回炉。</p>
       </details>
       <label>SRC 规则（可选，叠加在内置标准上，不替换）
         <textarea v-model="form.src_rules" rows="3" placeholder="例：本校不收弱口令；重点收越权与未授权。"></textarea>

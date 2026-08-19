@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import LLMConfig
+from app.agents.deepen import clamp_deepen_cap
 from app.agents.prompts import normalize_worker_prompt_version
 from app.db.models import SystemSettings, Task, to_cst_iso
 from app.db.session import SessionLocal
@@ -232,6 +233,7 @@ def _env_engines() -> dict[str, Any]:
 def _env_defaults() -> dict[str, Any]:
     return {
         "concurrency": 3,
+        "deepen_cap": 2,
         "skip_score_threshold": float(os.environ.get("SKIP_SCORE_THRESHOLD", "-10")),
         "worker_prompt_version": normalize_worker_prompt_version(os.environ.get("WORKER_PROMPT_VERSION", "legacy")),
         "engine": os.environ.get("SEARCH_ENGINE", get_default_engine()),
@@ -515,6 +517,7 @@ def public_settings_view() -> dict[str, Any]:
         "engines": engines_view,
         "defaults": {
             "concurrency": int(defaults.get("concurrency") or 3),
+            "deepen_cap": clamp_deepen_cap(defaults.get("deepen_cap")),
             "skip_score_threshold": float(defaults.get("skip_score_threshold", -10)),
             "worker_prompt_version": normalize_worker_prompt_version(defaults.get("worker_prompt_version")),
             "engine": defaults.get("engine", get_default_engine()),
@@ -637,6 +640,8 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
                     defaults[k] = max(1, min(int(v), 32))
                 except (TypeError, ValueError):
                     continue
+            elif k == "deepen_cap":
+                defaults[k] = clamp_deepen_cap(v)
             else:
                 defaults[k] = v
         row.defaults = defaults
