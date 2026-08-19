@@ -290,7 +290,8 @@ async function save() {
         <button type="button" class="icon-btn" @click="emit('close')">×</button>
       </header>
 
-      <div class="settings-grid">
+      <div class="task-edit-body">
+        <div class="settings-grid">
         <label>任务名称 <input v-model="form.name" required /></label>
         <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
         <label>任务模式
@@ -443,6 +444,8 @@ async function save() {
       <p class="field-hint">
         已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'EduSRC' }}标准。这里只追加本任务额外要求；留空则只用内置标准。与内置冲突时按更严的执行，不能放宽红线。
       </p>
+
+      </div>
 
       <footer>
         <button type="button" @click="emit('close')">取消</button>
