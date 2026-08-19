@@ -267,7 +267,11 @@ async function bootstrapTask() {
     initialLoading.value = false;
     const extras = [loadBoard()];
     if (isListTab(tab.value)) extras.push(loadTabData(tab.value));
-    await Promise.all(extras);
+    try {
+      await Promise.all(extras);
+    } catch {
+      /* 任务壳已出；看板失败不阻断 WS，避免活态停更 */
+    }
     wsIntentionalClose = false;
     connectWs();
   } finally {

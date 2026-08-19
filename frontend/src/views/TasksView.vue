@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onActivated, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onActivated, onDeactivated, onMounted, onUnmounted, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyToken } from "../api.js";
 import TaskEditModal from "../components/TaskEditModal.vue";
@@ -143,6 +143,11 @@ onMounted(async () => {
 });
 onActivated(() => {
   if (tasks.value.length) load({ background: true });
+  syncPoller();
+});
+onDeactivated(() => {
+  clearInterval(pollTimer);
+  pollTimer = null;
 });
 onUnmounted(() => {
   clearInterval(pollTimer);
