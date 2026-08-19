@@ -9,6 +9,7 @@ import HardTargetsView from "./views/HardTargetsView.vue";
 import IntelView from "./views/IntelView.vue";
 import VulnsView from "./views/VulnsView.vue";
 import RuntimeLogsView from "./views/RuntimeLogsView.vue";
+import AnalyticsView from "./views/AnalyticsView.vue";
 import { authReadyRef, authRoleRef, loadAuthRole } from "./api.js";
 import "./style.css";
 
@@ -22,6 +23,7 @@ const router = createRouter({
     { path: "/vulns", component: VulnsView },
     { path: "/runtime-logs", component: RuntimeLogsView },
     { path: "/settings", component: SettingsView },
+    { path: "/analytics", component: AnalyticsView },
     { path: "/task/:id", component: BoardView, props: true },
   ],
 });

@@ -50,6 +50,11 @@ function taskScopeText(t) {
 }
 
 const hasRunning = computed(() => tasks.value.some((t) => t.status === "running"));
+const runningCount = computed(() => tasks.value.filter((t) => t.status === "running").length);
+
+function openSearch() {
+  window.dispatchEvent(new CustomEvent("autohunter-open-search"));
+}
 
 function syncPoller() {
   clearInterval(pollTimer);
@@ -152,25 +157,64 @@ watch(hasRunning, () => syncPoller());
 <template>
   <section class="view tasks-view" :class="{ 'is-refreshing': refreshing }">
     <div v-if="refreshing && !initialLoading" class="view-progress" aria-hidden="true"><i></i></div>
-    <header class="page-head">
-      <div>
-        <h2>任务列表</h2>
-        <p class="page-sub">点击进入指挥台，查看实时看板与复审队列</p>
+
+    <!-- ══ HERO：居中搜索入口 ══ -->
+    <div class="tasks-hero">
+      <div class="tasks-hero-brand">
+        <span class="tasks-hero-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <circle cx="12" cy="12" r="4"/>
+            <line x1="12" y1="2" x2="12" y2="6"/>
+            <line x1="12" y1="18" x2="12" y2="22"/>
+            <line x1="2" y1="12" x2="6" y2="12"/>
+            <line x1="18" y1="12" x2="22" y2="12"/>
+          </svg>
+        </span>
+        <h1 class="tasks-hero-title">AutoHunter</h1>
+        <p class="tasks-hero-sub">SRC · 24×7 全自动漏洞挖掘平台</p>
       </div>
-      <div class="head-actions">
-        <router-link v-if="authRoleRef !== 'observer'" class="head-action vuln-entry" to="/vulns">
-          全局漏洞库
-        </router-link>
-        <router-link class="head-action" to="/hard-targets">全局硬骨头库</router-link>
-        <router-link v-if="authRoleRef !== 'observer'" class="head-action intel-entry" to="/intel">
-          <span class="ie-dot" aria-hidden="true"></span>全局情报库
-        </router-link>
-        <router-link v-if="authRoleRef !== 'observer'" class="head-action" to="/runtime-logs">
-          运行异常
-        </router-link>
+
+      <!-- 大型居中搜索栏 -->
+      <button type="button" class="tasks-search-bar" @click="openSearch" aria-label="打开搜索">
+        <svg class="tasks-search-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <span class="tasks-search-placeholder">搜索任务、命令、漏洞…</span>
+        <kbd class="tasks-search-kbd">⌘ K</kbd>
+      </button>
+
+      <!-- 实时统计小药丸 -->
+      <div class="tasks-hero-stats" v-if="!initialLoading">
+        <span v-if="runningCount > 0" class="stat-pill stat-pill-running">
+          <span class="stat-live-dot" aria-hidden="true"></span>
+          <b>{{ runningCount }}</b> 运行中
+        </span>
+        <span class="stat-pill">
+          共 <b>{{ tasks.length }}</b> 个任务
+        </span>
       </div>
-    </header>
-    <div v-if="initialLoading" class="task-list">
+
+      <!-- 快捷操作 -->
+      <div class="tasks-hero-actions">
+        <router-link v-if="authRoleRef === 'full'" class="hero-btn-primary" to="/create">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 2v12M2 8h12"/></svg>
+          新建任务
+        </router-link>
+        <router-link class="hero-btn-ghost" to="/analytics">分析仪表盘</router-link>
+        <router-link v-if="authRoleRef !== 'observer'" class="hero-btn-ghost" to="/vulns">漏洞库</router-link>
+        <router-link class="hero-btn-ghost" to="/hard-targets">硬骨头</router-link>
+        <router-link v-if="authRoleRef !== 'observer'" class="hero-btn-ghost" to="/intel">情报库</router-link>
+      </div>
+    </div>
+
+    <!-- ══ 任务列表区段 ══ -->
+    <div class="tasks-list-section">
+      <div v-if="tasks.length || !initialLoading" class="tasks-list-head">
+        <span class="tasks-list-label">最近任务</span>
+        <span v-if="tasks.length" class="tasks-list-count">{{ tasks.length }} 个</span>
+      </div>
+      <div v-if="initialLoading" class="task-list">
       <div v-for="n in 4" :key="n" class="task-card skeleton-task" aria-hidden="true">
         <div class="task-card-main">
           <div class="tc-title"><span class="sk-bar sk-title"></span></div>
@@ -247,6 +291,7 @@ watch(hasRunning, () => syncPoller());
           </button>
         </div>
       </div>
+    </div>
     </div>
   </section>
 </template>
