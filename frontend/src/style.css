@@ -347,9 +347,18 @@ nav { display: flex; gap: 2px; }
 main {
   max-width: 1360px; margin: 0 auto;
   padding: 30px 34px calc(42px + env(safe-area-inset-bottom, 0px));
+  min-height: calc(100dvh - 220px);
 }
-.view { animation: fade .2s ease; }
+/* 切页不要从 opacity:0 淡入：主线程/接口稍慢时会像白屏。位移即可。 */
+.view { animation: view-enter .16s ease; }
+@keyframes view-enter {
+  from { transform: translateY(4px); }
+  to { transform: none; }
+}
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .view { animation: none; }
+}
 .page-head { margin-bottom: 20px; }
 .page-head.split,
 .tasks-view .page-head {

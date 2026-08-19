@@ -10,6 +10,13 @@ import {
   submitTokenModal,
 } from "./api.js";
 const route = useRoute();
+const KEEP_ALIVE_VIEWS = [
+  "TasksView",
+  "VulnsView",
+  "IntelView",
+  "HardTargetsView",
+  "RuntimeLogsView",
+];
 
 const theme = ref("dark");
 const showTokenModal = ref(false);
@@ -142,7 +149,11 @@ onUnmounted(() => {
     </nav>
   </header>
   <main>
-    <router-view />
+    <router-view v-slot="{ Component }">
+      <keep-alive :include="KEEP_ALIVE_VIEWS" :max="6">
+        <component :is="Component" />
+      </keep-alive>
+    </router-view>
   </main>
 
   <footer class="app-credit" aria-label="署名">

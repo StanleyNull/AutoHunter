@@ -1,7 +1,9 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { api } from "../api.js";
 import { fmtLocalTime } from "../format.js";
+
+defineOptions({ name: "RuntimeLogsView" });
 
 const stats = ref({ total: 0, errors: 0, warns: 0, by_agent: {} });
 const rows = ref([]);
@@ -84,6 +86,9 @@ watch(searchDraft, (v) => {
 });
 
 onMounted(reload);
+onActivated(() => {
+  if (rows.value.length) reload();
+});
 </script>
 
 <template>

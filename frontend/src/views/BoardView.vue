@@ -7,6 +7,8 @@ import { fmtLocalTime } from "../format.js";
 import ReportDrawer from "../components/ReportDrawer.vue";
 import TaskEditModal from "../components/TaskEditModal.vue";
 
+defineOptions({ name: "BoardView" });
+
 const props = defineProps({ id: String });
 const task = ref(null);
 const tab = ref("board");          // board | review | submit | killsweep | rejected | archived
@@ -41,7 +43,8 @@ const expandedEventKeys = ref(new Set());
 const streamDetailLoading = ref({});
 const eventLogRef = ref(null);
 const readonly = computed(() => authRoleRef.value !== "full");
-const initialLoading = ref(false);
+const initialLoading = ref(true);
+const boardReady = ref(false);
 const refreshing = ref(false);
 const loadedTaskId = ref("");
 const submitHasMore = ref(false);
@@ -235,6 +238,7 @@ function resetTaskState(full = true) {
   events.value = [];
   liveWorkers.value = [];
   liveEscalations.value = [];
+  boardReady.value = false;
   liveTraceByTarget.value = {};
   expandedEventKeys.value = new Set();
   streamDetailLoading.value = {};
@@ -250,16 +254,20 @@ function resetTaskState(full = true) {
 async function bootstrapTask() {
   if (!props.id) return;
   const switching = loadedTaskId.value && loadedTaskId.value !== props.id;
-  if (!task.value) initialLoading.value = true;
-  else if (switching) refreshing.value = true;
+  if (!task.value || switching) initialLoading.value = true;
+  else refreshing.value = true;
 
   closeWs(true);
   resetTaskState(!task.value || switching);
   loadedTaskId.value = props.id;
 
   try {
-    await Promise.all([loadTask(), loadBoard()]);
-    if (isListTab(tab.value)) await loadTabData(tab.value);
+    // 先出任务壳（标题/指标），看板 worker/活动流后到，避免被 /board 拖成白屏。
+    await loadTask();
+    initialLoading.value = false;
+    const extras = [loadBoard()];
+    if (isListTab(tab.value)) extras.push(loadTabData(tab.value));
+    await Promise.all(extras);
     wsIntentionalClose = false;
     connectWs();
   } finally {
@@ -631,24 +639,28 @@ function phaseStateText(state) {
 
 async function loadBoard() {
   const id = props.id;
-  const b = await api.board(id);
-  if (id !== props.id) return;
-  liveWorkers.value = b.live_workers || [];
-  liveEscalations.value = b.live_escalations || [];
-  siteCollab.value = b.site_collab || null;
-  if (task.value) {
-    if (b.task_status) task.value.status = b.task_status;
-    if (b.stats) task.value.stats = b.stats;
-    if (b.fofa_config) task.value.fofa_config = b.fofa_config;
-    if (b.model_config_data) task.value.model_config_data = b.model_config_data;
-    if (b.llm_usage) task.value.llm_usage = b.llm_usage;
-  }
-  if (!events.value.length && b.events?.length) {
-    const existingByKey = new Map(events.value.map((e) => [streamEventStableKey(e), e]));
-    events.value = b.events
-      .filter(isImportantEvent)
-      .map((e) => normalizeTimedEvent(e, existingByKey))
-      .filter(Boolean);
+  try {
+    const b = await api.board(id);
+    if (id !== props.id) return;
+    liveWorkers.value = b.live_workers || [];
+    liveEscalations.value = b.live_escalations || [];
+    siteCollab.value = b.site_collab || null;
+    if (task.value) {
+      if (b.task_status) task.value.status = b.task_status;
+      if (b.stats) task.value.stats = b.stats;
+      if (b.fofa_config) task.value.fofa_config = b.fofa_config;
+      if (b.model_config_data) task.value.model_config_data = b.model_config_data;
+      if (b.llm_usage) task.value.llm_usage = b.llm_usage;
+    }
+    if (!events.value.length && b.events?.length) {
+      const existingByKey = new Map(events.value.map((e) => [streamEventStableKey(e), e]));
+      events.value = b.events
+        .filter(isImportantEvent)
+        .map((e) => normalizeTimedEvent(e, existingByKey))
+        .filter(Boolean);
+    }
+  } finally {
+    if (id === props.id) boardReady.value = true;
   }
 }
 
@@ -1512,7 +1524,10 @@ function parseEventTs(ts) {
           <small>点击卡片查看轨迹</small>
           <i class="cnt">{{ liveWorkers.length }}</i>
         </div>
-        <div v-if="!liveWorkers.length" class="empty sm">暂无运行中的 worker</div>
+        <div v-if="!boardReady" class="board-hydrate" aria-hidden="true">
+          <div v-for="n in 3" :key="n" class="skeleton-worker"></div>
+        </div>
+        <div v-else-if="!liveWorkers.length" class="empty sm">暂无运行中的 worker</div>
         <div v-for="w in liveWorkers" :key="w.target_id" class="worker-card clickable"
           @click="openWorkerTrace(w)" title="查看执行轨迹 / 注入指令">
           <div class="wc-top">
@@ -1566,7 +1581,10 @@ function parseEventTs(ts) {
           <small>点击带目标的行展开细节</small>
         </div>
         <div ref="eventLogRef" class="event-log">
-          <div v-if="!events.length" class="empty sm">等待事件…</div>
+          <div v-if="!boardReady && !events.length" class="board-hydrate" aria-hidden="true">
+            <div v-for="n in 6" :key="n" class="skeleton-line"></div>
+          </div>
+          <div v-else-if="!events.length" class="empty sm">等待事件…</div>
           <template v-for="(ev, i) in events" :key="eventExpandKey(ev, i)">
             <div
               :class="[evClass(ev), { expandable: canExpandEvent(ev), open: isEventExpanded(eventExpandKey(ev, i)) }]"
@@ -1846,5 +1864,6 @@ function parseEventTs(ts) {
 
     <div v-if="toastMsg" class="toast">{{ toastMsg }}</div>
     </template>
+    <div v-else class="empty">任务不存在或加载失败，请返回任务列表重试</div>
   </section>
 </template>

@@ -1,8 +1,10 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onActivated, onMounted, onUnmounted, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyToken } from "../api.js";
 import TaskEditModal from "../components/TaskEditModal.vue";
+
+defineOptions({ name: "TasksView" });
 
 const tasks = ref([]);
 const initialLoading = ref(true);
@@ -138,6 +140,9 @@ function onSaved() {
 onMounted(async () => {
   if (!authReadyRef.value) await loadAuthRole();
   await load();
+});
+onActivated(() => {
+  if (tasks.value.length) load({ background: true });
 });
 onUnmounted(() => {
   clearInterval(pollTimer);
