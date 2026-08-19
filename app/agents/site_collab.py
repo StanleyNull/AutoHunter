@@ -344,6 +344,45 @@ def _route_meta(source: str) -> SiteRoute | None:
     return route_for_source(source)
 
 
+def _collapse_cards(cards: list[dict]) -> list[dict]:
+    """同名路线合并成一张卡，避免侦察/主题深挖把页面撑爆。"""
+    grouped: dict[str, dict] = {}
+    order: list[str] = []
+    leftover: list[dict] = []
+    for card in cards:
+        if card.get("is_aggregate"):
+            leftover.append(card)
+            continue
+        key = str(card.get("label") or card.get("source") or "").strip() or "路线"
+        status = str(card.get("status") or "done")
+        findings = int(card.get("findings") or 0)
+        deepen = int(card.get("deepen_count") or 0)
+        item = grouped.get(key)
+        if item is None:
+            order.append(key)
+            grouped[key] = {
+                "source": card.get("source") or key,
+                "label": card.get("label") or key,
+                "focus": card.get("focus") or "",
+                "status": status,
+                "verdict": card.get("verdict") or "",
+                "findings": findings,
+                "deepen_count": deepen,
+                "count": 1,
+                "running": int(status == "running"),
+                "queued": int(status == "queued"),
+                "done": int(status == "done"),
+            }
+            continue
+        item["count"] += 1
+        item["findings"] += findings
+        item["deepen_count"] += deepen
+        item[status] = int(item.get(status) or 0) + 1
+        if status == "running" or (status == "queued" and item["status"] != "running"):
+            item["status"] = status
+    return [grouped[key] for key in order] + leftover
+
+
 def build_collab_overview(rows: list[dict]) -> dict | None:
     """把该任务的 site 路线聚合成前端可直接渲染的「协作态势」结构。
 
@@ -399,24 +438,32 @@ def build_collab_overview(rows: list[dict]) -> dict | None:
         agg_status = "running" if focus_agg["running"] else ("queued" if focus_agg["queued"] else "done")
         phase_buckets[2].append({
             "source": "site_focus",
-            "label": f"定向 API 追打 ×{focus_agg['total']}",
+            "label": "定向 API 追打",
             "focus": FOCUSED_ROUTE.focus,
             "status": agg_status,
             "verdict": "",
             "findings": focus_agg["findings"],
             "deepen_count": 0,
             "is_aggregate": True,
+            "count": focus_agg["total"],
+            "running": focus_agg["running"],
+            "queued": focus_agg["queued"],
+            "done": focus_agg["done"],
             "aggregate": focus_agg,
         })
+
+    for phase, cards in phase_buckets.items():
+        phase_buckets[phase] = _collapse_cards(cards)
 
     # 每阶段状态：有 running→active；全 done→done；有 queued 但没 running→pending；空→idle
     phases_out = []
     for meta in PHASES:
         cards = phase_buckets[meta["phase"]]
-        running = sum(1 for c in cards if c["status"] == "running")
-        queued = sum(1 for c in cards if c["status"] == "queued")
-        done = sum(1 for c in cards if c["status"] == "done")
-        findings = sum(c["findings"] for c in cards)
+        running = sum(int(c.get("running") or (1 if c.get("status") == "running" else 0)) for c in cards)
+        queued = sum(int(c.get("queued") or (1 if c.get("status") == "queued" else 0)) for c in cards)
+        done = sum(int(c.get("done") or (1 if c.get("status") == "done" else 0)) for c in cards)
+        findings = sum(int(c.get("findings") or 0) for c in cards)
+        raw_total = running + queued + done
         if not cards:
             pstate = "idle"
         elif running:
@@ -429,7 +476,7 @@ def build_collab_overview(rows: list[dict]) -> dict | None:
             **meta,
             "state": pstate,
             "routes": cards,
-            "counts": {"total": len(cards), "running": running,
+            "counts": {"total": raw_total, "running": running,
                        "queued": queued, "done": done, "findings": findings},
         })
 
@@ -443,9 +490,9 @@ def build_collab_overview(rows: list[dict]) -> dict | None:
             if p["state"] == "done":
                 current = p["phase"]
 
-    total_routes = sum(p["counts"]["total"] for p in phases_out)
-    total_findings = sum(p["counts"]["findings"] for p in phases_out)
-    total_running = sum(p["counts"]["running"] for p in phases_out)
+    total_routes = len(site_rows)
+    total_findings = sum(int(r.get("findings") or 0) for r in site_rows)
+    total_running = sum(1 for r in site_rows if _status_of(r) == "running")
 
     return {
         "current_phase": current,

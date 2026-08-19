@@ -640,6 +640,60 @@ function authBadgeClass(w) {
 function phaseStateText(state) {
   return { active: "进行中", pending: "排队中", done: "已完成", idle: "未开始" }[state] || "";
 }
+function collabRouteCount(r) {
+  const n = Number(r?.count);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+function collabRouteLabel(r) {
+  return String(r?.label || "").replace(/\s*[×xX]\s*\d+\s*$/, "").trim() || r?.label || "路线";
+}
+function groupedCollabRoutes(routes) {
+  if (!Array.isArray(routes) || !routes.length) return [];
+  const map = new Map();
+  const leftover = [];
+  for (const r of routes) {
+    const label = collabRouteLabel(r);
+    const status = r?.status || "done";
+    const findings = Number(r?.findings) || 0;
+    const count = collabRouteCount(r);
+    const running = Number(r?.running) || (status === "running" ? count : 0);
+    const queued = Number(r?.queued) || (status === "queued" ? count : 0);
+    const done = Number(r?.done) || (status === "done" ? count : 0);
+    if (r?.is_aggregate) {
+      leftover.push({ ...r, label, count, findings, running, queued, done });
+      continue;
+    }
+    const existing = map.get(label);
+    if (!existing) {
+      map.set(label, { ...r, label, count, findings, running, queued, done });
+      continue;
+    }
+    existing.count += count;
+    existing.findings += findings;
+    existing.running += running;
+    existing.queued += queued;
+    existing.done += done;
+    if (status === "running" || (status === "queued" && existing.status !== "running")) {
+      existing.status = status;
+    }
+  }
+  return [...map.values(), ...leftover];
+}
+function collabRouteTitle(r) {
+  const bits = [];
+  if (collabRouteCount(r) > 1) {
+    bits.push(`共 ${r.count} 条`);
+    if (r.running) bits.push(`${r.running} 进行中`);
+    if (r.queued) bits.push(`${r.queued} 排队`);
+    if (r.done) bits.push(`${r.done} 完成`);
+  }
+  return [r.focus || r.label, bits.join(" · ")].filter(Boolean).join("\n");
+}
+const collabPhases = computed(() => {
+  const phases = siteCollab.value?.phases;
+  if (!Array.isArray(phases)) return [];
+  return phases.map((p) => ({ ...p, routes: groupedCollabRoutes(p.routes) }));
+});
 
 async function loadBoard() {
   const id = props.id;
@@ -1397,32 +1451,34 @@ function parseEventTs(ts) {
       </header>
       <div class="collab-flow">
         <div
-          v-for="(p, pi) in siteCollab.phases"
+          v-for="(p, pi) in collabPhases"
           :key="p.key"
           class="collab-phase"
           :class="[`state-${p.state}`, { current: p.phase === siteCollab.current_phase }]"
         >
           <div class="phase-rail">
             <span class="phase-dot"></span>
-            <span v-if="pi < siteCollab.phases.length - 1" class="phase-line"></span>
+            <span v-if="pi < collabPhases.length - 1" class="phase-line"></span>
           </div>
           <div class="phase-body">
             <div class="phase-head">
               <span class="phase-step">阶段 {{ p.phase + 1 }}</span>
               <b>{{ p.label }}</b>
               <span class="phase-state-tag" :class="`st-${p.state}`">{{ phaseStateText(p.state) }}</span>
+              <span v-if="p.counts?.total" class="phase-n">{{ p.counts.total }} 条</span>
             </div>
             <p class="phase-desc">{{ p.desc }}</p>
             <div v-if="p.routes.length" class="phase-routes">
               <div
                 v-for="r in p.routes"
-                :key="r.source"
+                :key="`${r.source}:${r.label}`"
                 class="route-chip"
                 :class="`rc-${r.status}`"
-                :title="r.focus"
+                :title="collabRouteTitle(r)"
               >
                 <span class="route-status-dot"></span>
-                <span class="route-label">{{ r.label }}</span>
+                <span class="route-label">{{ collabRouteLabel(r) }}</span>
+                <span v-if="collabRouteCount(r) > 1" class="route-count">×{{ collabRouteCount(r) }}</span>
                 <span v-if="r.findings" class="route-hit">{{ r.findings }}</span>
               </div>
             </div>
