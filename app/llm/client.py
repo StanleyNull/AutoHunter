@@ -1186,6 +1186,44 @@ class LLMClient:
             )
         raise RuntimeError("没有可用的 LLM 端点")
 
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """流式对话：逐 token yield 内容片段（用于大厅 wumi 聊天）。
+
+        - OpenAI 兼容分支：`stream=True` 逐 chunk 取 delta.content。
+        - Anthropic Messages 分支 / 流式失败：降级为一次非流式 `chat()` 整段 yield，
+          保证可用（聊天体验可接受）。
+        - 不做整轮重试（已流出的 token 无法撤销）；异常由调用方兜底。
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": int(max_tokens or os.environ.get("LLM_MAX_TOKENS", "4096")),
+        }
+        # Anthropic Messages 协议暂不做逐 token 流式 → 整段一次返回
+        if self._messages_protocol:
+            msg = self.chat(messages, temperature=temperature, max_tokens=max_tokens)
+            content = getattr(msg, "content", None) or ""
+            if content:
+                yield str(content)
+            return
+        try:
+            stream = self.client.chat.completions.create(**kwargs, stream=True)
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception:
+            # 流式失败（协议/TLS/网络）→ 降级一次非流式整段返回
+            msg = self.chat(messages, temperature=temperature, max_tokens=max_tokens)
+            content = getattr(msg, "content", None) or ""
+            if content:
+                yield str(content)
+
     def clear_sticky_provider(self) -> None:
         """清掉粘性端点，下次 chat 重新按健康度/权重选端点（worker 软重试用）。"""
         self._sticky_provider_ref = ""

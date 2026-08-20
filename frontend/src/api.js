@@ -156,20 +156,21 @@ async function req(method, url, body, retriedAuth = false, overrideToken = "") {
 
 /**
  * 消费一个 SSE 流式接口。onEvent 收到每个解析出的事件对象。
+ * signal 可选（AbortController），用于前端停止生成（大厅 wumi 聊天用）。
  * 返回 Promise，在流结束时 resolve。
  */
-async function streamSSE(url, body, onEvent, retriedAuth = false) {
+async function streamSSE(url, body, onEvent, retriedAuth = false, signal = null) {
   const headers = { "Content-Type": "application/json" };
   const token = apiToken();
   if (token) headers["X-Autohunter-Token"] = token;
-  const res = await fetch(base + url, { method: "POST", headers, body: JSON.stringify(body) });
+  const res = await fetch(base + url, { method: "POST", headers, body: JSON.stringify(body), signal });
 
   if (res.status === 401 && !retriedAuth) {
     const newToken = await openTokenModal("auth");
     if (newToken) {
       setApiToken(newToken);
       await loadAuthRole();
-      return streamSSE(url, body, onEvent, true);
+      return streamSSE(url, body, onEvent, true, signal);
     }
   }
   if (res.status === 403) throw new Error("当前令牌不允许此操作");
@@ -326,6 +327,16 @@ export const api = {
   // 一键更新
   checkUpdate: () => req("GET", "/api/update/check"),
   runUpdate: () => req("POST", "/api/update/run"),
+  // 大厅 wumi 聊天
+  chatSessions: () => req("GET", "/api/chat/sessions"),
+  chatCreateSession: (title) => req("POST", "/api/chat/sessions", { title }),
+  chatMessages: (id) => req("GET", `/api/chat/sessions/${id}/messages`),
+  chatDeleteSession: (id) => req("DELETE", `/api/chat/sessions/${id}`),
+  chatStream: (id, message, onEvent) => {
+    const controller = new AbortController();
+    const promise = streamSSE(`/api/chat/sessions/${id}/messages`, { message }, onEvent, false, controller.signal);
+    return { promise, abort: () => controller.abort() };
+  },
 };
 
 export function wsUrl(taskId) {

@@ -9,13 +9,15 @@ import HardTargetsView from "./views/HardTargetsView.vue";
 import IntelView from "./views/IntelView.vue";
 import VulnsView from "./views/VulnsView.vue";
 import RuntimeLogsView from "./views/RuntimeLogsView.vue";
+import HallView from "./views/HallView.vue";
 import { authReadyRef, authRoleRef, loadAuthRole } from "./api.js";
 import "./style.css";
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: "/", component: TasksView },
+    { path: "/", component: HallView },
+    { path: "/tasks", component: TasksView },
     { path: "/create", component: CreateView },
     { path: "/hard-targets", component: HardTargetsView },
     { path: "/intel", component: IntelView },

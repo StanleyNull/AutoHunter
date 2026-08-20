@@ -1,5 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
-
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
 /* ============================================================
    AutoHunter — 作战终端 / product register
    克制配色：tinted neutrals + 单一 accent。颜色只用于操作与状态。
@@ -10,43 +9,56 @@
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;
-  /* 中性层（带极轻冷色调，承载背景/面板/边框） */
-  --bg:        oklch(20% 0.012 255);   /* 内容底 */
-  --surface:   oklch(24% 0.013 255);   /* 面板 */
-  --surface-2: oklch(28% 0.014 255);   /* 抬升面板/输入 */
-  --surface-3: oklch(31% 0.015 255);   /* hover / active */
-  --nav:       oklch(22% 0.013 255);   /* 第二中性层：侧栏/工具条 */
-  --border:    oklch(34% 0.014 255);
-  --border-soft: oklch(29% 0.013 255);
+  /* 二代 · Konuri Maki —— 夜空靛蓝 × 暖金（取自已定壁纸：深靛紫 #544797 / 暖金 #f8e7af / 米白 #f9f2e8 / 藏青 #27274d） */
+  --bg:        #141321;   /* 深靛夜 */
+  --surface:   #1c1a30;   /* 面板 */
+  --surface-2: #232140;   /* 抬升面板/输入 */
+  --surface-3: #2d2a52;   /* hover / active */
+  --nav:       #181629;   /* 第二中性层：侧栏/工具条 */
 
-  /* 文字阶（确保对比度：正文 ≥4.5:1） */
-  --ink:    oklch(95% 0.006 255);   /* 主文字 */
-  --ink-2:  oklch(82% 0.008 255);   /* 次级标题 */
-  --muted:  oklch(70% 0.012 255);   /* 弱化文字（仍达 4.5:1） */
-  --faint:  oklch(58% 0.012 255);   /* 极弱：仅元信息/时间戳 */
+  --border:     #36315f;
+  --border-soft: #282548;
 
-  /* 单一品牌 accent：只用于主操作 / 当前选中 / 焦点 */
-  --accent:     oklch(70% 0.14 235);
-  --accent-ink: oklch(96% 0.02 235);
-  --accent-bg:  oklch(70% 0.14 235 / 0.14);
-  --on-accent:  oklch(22% 0.02 255);
+  /* 文字阶（米白主文字，对比度 ≥4.5:1） */
+  --ink:    #f7f2e9;   /* 主文字 */
+  --ink-2:  #dcd3c2;   /* 次级标题 */
+  --muted:  #a8a1c4;   /* 弱化文字 */
+  --faint:  #7c75a1;   /* 极弱：元信息/时间戳 */
+
+  /* 品牌 accent：暖金 —— 只用于主操作 / 当前选中 / 焦点 */
+  --accent:     #e9c46a;
+  --accent-ink: #f4e2ae;
+  --accent-bg:  rgba(233, 196, 106, 0.14);
+  --on-accent:  #221a2e;
 
   /* 语义状态色（冷静、可区分；状态另有文字/图标冗余） */
-  --ok:    oklch(72% 0.15 155);   /* 成功/发现 */
-  --warn:  oklch(78% 0.14 75);    /* 警告/超时 */
-  --danger:oklch(68% 0.17 25);    /* 错误/严重 */
-  --info:  oklch(72% 0.12 235);   /* 信息/运行 */
+  --ok:    #5ed6a0;   /* 成功/发现 */
+  --warn:  #eda45a;   /* 警告/超时 */
+  --danger:#f06d6d;   /* 错误/严重 */
+  --info:  #9d93e8;   /* 信息/运行（香堇紫） */
 
-  --ok-bg:    oklch(72% 0.15 155 / 0.14);
-  --warn-bg:  oklch(78% 0.14 75 / 0.14);
-  --danger-bg:oklch(68% 0.17 25 / 0.14);
-  --info-bg:  oklch(72% 0.12 235 / 0.14);
+  --ok-bg:    rgba(94, 214, 160, 0.14);
+  --warn-bg:  rgba(237, 164, 90, 0.14);
+  --danger-bg:rgba(240, 109, 109, 0.14);
+  --info-bg:  rgba(157, 147, 232, 0.14);
 
-  --shadow:    0 1px 2px oklch(0% 0 0 / 0.4), 0 4px 16px oklch(0% 0 0 / 0.28);
-  --shadow-lg: 0 8px 40px oklch(0% 0 0 / 0.5);
-  --line: oklch(72% 0.12 235 / 0.08);
-  --radius: 10px;
-  --radius-sm: 7px;
+  --shadow:    0 1px 2px rgba(0, 0, 0, .45), 0 10px 30px rgba(0, 0, 0, .38);
+  --shadow-lg: 0 24px 70px rgba(0, 0, 0, .58);
+  --line: rgba(233, 196, 106, 0.10);
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  /* 二代增强：玻璃面板 + 品牌渐变 */
+  --glass:      rgba(24, 22, 41, 0.72);
+  --glass-2:    rgba(30, 28, 52, 0.66);
+  --gold-grad:  linear-gradient(120deg, #f6dc92 0%, #e9c46a 45%, #c69d52 100%);
+  --hairline:   rgba(233, 196, 106, 0.16);
+
+  /* 聊天气泡：用户=透明淡白；AI=淡白粉半透明 */
+  --user-bubble:    rgba(255, 255, 255, 0.10);
+  --user-bubble-bd: rgba(255, 255, 255, 0.16);
+  --ai-bubble:      rgba(255, 220, 235, 0.14);
+  --ai-bubble-bd:   rgba(255, 214, 230, 0.22);
 
   /* 语义 z-index 阶 */
   --z-sticky: 30;
@@ -57,38 +69,77 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg:        oklch(98.5% 0.003 255);
-  --surface:   oklch(100% 0 0);
-  --surface-2: oklch(97% 0.004 255);
-  --surface-3: oklch(94.5% 0.006 255);
-  --nav:       oklch(96.5% 0.005 255);
-  --border:    oklch(90% 0.006 255);
-  --border-soft: oklch(93.5% 0.005 255);
+  --bg:        #f3efe6;   /* 米白夜 */
+  --surface:   #fffdf6;
+  --surface-2: #f1eadc;
+  --surface-3: #e6decc;
+  --nav:       #f8f4ea;
 
-  --ink:    oklch(28% 0.012 255);
-  --ink-2:  oklch(38% 0.012 255);
-  --muted:  oklch(48% 0.012 255);
-  --faint:  oklch(58% 0.012 255);
+  --border:    #d9cfbc;
+  --border-soft: #e6ddcb;
 
-  --accent:     oklch(54% 0.16 250);
-  --accent-ink: oklch(50% 0.17 250);
-  --accent-bg:  oklch(54% 0.16 250 / 0.10);
-  --on-accent:  oklch(99% 0 0);
+  --ink:    #29243a;
+  --ink-2:  #4a435c;
+  --muted:  #6e6585;
+  --faint:  #938ba6;
 
-  --ok:    oklch(54% 0.15 150);
-  --warn:  oklch(60% 0.14 65);
-  --danger:oklch(55% 0.19 25);
-  --info:  oklch(54% 0.14 250);
+  --accent:     #b4832c;
+  --accent-ink: #8c6418;
+  --accent-bg:  rgba(180, 131, 44, 0.12);
+  --on-accent:  #fff9ea;
 
-  --ok-bg:    oklch(54% 0.15 150 / 0.10);
-  --warn-bg:  oklch(60% 0.14 65 / 0.10);
-  --danger-bg:oklch(55% 0.19 25 / 0.10);
-  --info-bg:  oklch(54% 0.14 250 / 0.10);
+  --ok:    #2f9e6d;
+  --warn:  #c07a2c;
+  --danger:#c95454;
+  --info:  #6a5fc9;
 
-  --shadow:    0 1px 2px oklch(0% 0 0 / 0.06), 0 4px 16px oklch(0% 0 0 / 0.08);
-  --shadow-lg: 0 8px 40px oklch(0% 0 0 / 0.14);
-  --line: oklch(54% 0.14 250 / 0.08);
+  --ok-bg:    rgba(47, 158, 109, 0.12);
+  --warn-bg:  rgba(192, 122, 44, 0.12);
+  --danger-bg:rgba(201, 84, 84, 0.12);
+  --info-bg:  rgba(106, 95, 201, 0.12);
+
+  --shadow:    0 1px 2px rgba(41, 36, 58, .06), 0 8px 24px rgba(41, 36, 58, .09);
+  --shadow-lg: 0 20px 50px rgba(41, 36, 58, .16);
+  --line: rgba(180, 131, 44, 0.10);
+
+  --glass:      rgba(253, 250, 242, 0.80);
+  --glass-2:    rgba(255, 253, 246, 0.72);
+  --gold-grad:  linear-gradient(120deg, #d9ab4e 0%, #b4832c 55%, #8a6216 100%);
+  --hairline:   rgba(180, 131, 44, 0.22);
+
+  /* 聊天气泡：用户=透明淡白；AI=淡白粉半透明 */
+  --user-bubble:    rgba(255, 255, 255, 0.62);
+  --user-bubble-bd: rgba(255, 255, 255, 0.95);
+  --ai-bubble:      rgba(255, 216, 229, 0.55);
+  --ai-bubble-bd:   rgba(244, 186, 207, 0.55);
 }
+
+/* 壁纸（固定层，最底） */
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -2;
+  background: url("/konuri-bg.jpg") center / cover no-repeat;
+}
+/* 氛围层：暗幕 + 极光呼吸 + 细网格 + 颗粒 */
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E"),
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px),
+    var(--veil);
+  background-size: 140px 140px, 46px 46px, 46px 46px, cover;
+  background-position: 0 0, 0 0, 0 0, 0 0;
+  mask-image: linear-gradient(180deg, black, rgba(0,0,0,.85) 72%, rgba(0,0,0,.7));
+  animation: veil-drift 26s ease-in-out infinite alternate;
+}
+@keyframes veil-drift {
+  0%   { background-position: 0 0, 0 0, 0 0, 0 0; }
+  100% { background-position: 40px 26px, 0 0, 0 0, 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body::after { animation: none; }
+}
+
 
 * { box-sizing: border-box; }
 html {
@@ -3608,3 +3659,180 @@ main {
 }
 .engine-key-head i { font-style: normal; font-size: 12px; opacity: 0.65; }
 .engine-key-head i.on { color: var(--ok, #16a34a); opacity: 1; }
+
+/* ===== 以下为二代移植：wumi 大厅 / 工具面板 / 投稿弹窗 / 模态背景 ===== */
+.modal-mask {
+  position: fixed; inset: 0; z-index: var(--z-drawer);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: oklch(0% 0 0 / 0.58);
+}
+
+.modal-mask, .token-modal-backdrop, .task-edit-backdrop, .drawer-mask {
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  background: rgba(8, 7, 16, 0.58);
+}
+:root[data-theme="light"] .modal-mask,
+:root[data-theme="light"] .token-modal-backdrop,
+:root[data-theme="light"] .task-edit-backdrop,
+:root[data-theme="light"] .drawer-mask {
+  background: rgba(41, 36, 58, 0.40);
+}
+.hall-view {
+  display: flex; height: calc(100vh - 205px); min-height: 420px;
+  overflow: hidden;
+}
+.hall-config {
+  width: 320px; flex: none; overflow-y: auto;
+  background: var(--nav); border-right: 1px solid var(--border-soft);
+  padding: 14px 12px 16px; display: flex; flex-direction: column; gap: 8px;
+  min-height: 0;
+}
+.cp-panel {
+  border: 1px solid var(--border-soft); border-radius: 10px;
+  background: var(--surface); overflow: hidden;
+}
+.cp-panel summary {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; cursor: pointer; list-style: none;
+}
+.cp-panel summary::-webkit-details-marker { display: none; }
+.cp-title { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.cp-count { margin-left: auto; font-size: 11px; color: var(--faint); }
+.cp-body { padding: 0 12px 12px; display: grid; gap: 8px; }
+.cp-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.cp-model-name { font-weight: 600; color: var(--ink); font-family: var(--font-mono, monospace); }
+.cp-link { color: var(--accent-ink); cursor: pointer; font-size: 12px; }
+.cp-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12.5px; color: var(--ink-2); cursor: pointer;
+}
+.cp-toggle input { width: auto; accent-color: var(--accent); }
+.cp-empty { margin: 0; font-size: 12px; color: var(--faint); }
+.cp-add {
+  border: 1px dashed var(--border); border-radius: 8px; background: transparent;
+  color: var(--muted); padding: 7px 0; font-size: 12px; cursor: pointer;
+}
+.cp-add:hover { color: var(--accent-ink); border-color: var(--accent); background: var(--accent-bg); }
+.cp-footer { margin: 2px 4px 0; font-size: 11px; color: var(--faint); }
+
+.hall-chat-area {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  background: var(--bg);
+}
+.hall-chat-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 22px; border-bottom: 1px solid var(--border-soft);
+  font-size: 14px; font-weight: 600; color: var(--ink-2);
+}
+.hall-model-badge {
+  flex: none; font-size: 11px; font-weight: 500; color: var(--faint);
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  border-radius: 999px; padding: 2px 9px;
+}
+.hall-session-select { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.hall-select {
+  width: auto; min-width: 140px; max-width: 220px; height: 30px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--ink); font-size: 12.5px; padding: 0 8px;
+}
+.hall-newbtn {
+  height: 30px; padding: 0 12px; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--ink-2); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.hall-newbtn:hover { color: var(--accent-ink); border-color: var(--accent); }
+.hall-delbtn {
+  height: 30px; width: 32px; border-radius: 8px;
+  background: transparent; border: 1px solid transparent;
+  color: var(--faint); font-size: 13px; cursor: pointer;
+}
+.hall-delbtn:hover { color: var(--danger); background: var(--danger-bg); }
+
+.hall-welcome {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; text-align: center; padding: 40px;
+}
+.hall-welcome h1 { margin: 0; font-size: 24px; letter-spacing: .02em; }
+.hall-welcome-sub { margin: 0; font-size: 13px; color: var(--muted); opacity: .55; letter-spacing: .04em; }
+
+.hall-chat {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 26px 28px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+.hall-chat-empty { text-align: center; color: var(--faint); font-size: 13px; padding-top: 60px; }
+.hall-msg { display: flex; gap: 12px; align-items: flex-start; }
+.hall-msg.user { flex-direction: row-reverse; }
+.hall-avatar {
+  width: 32px; height: 32px; border-radius: 50%; flex: none;
+  object-fit: cover; display: block;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  box-shadow: 0 0 0 2px var(--hairline);
+}
+.hall-bubble {
+  max-width: 72%; padding: 11px 15px; border-radius: 16px;
+  font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+}
+.hall-msg.assistant .hall-bubble {
+  background: var(--ai-bubble); border: 1px solid var(--ai-bubble-bd);
+  backdrop-filter: blur(6px);
+  border-top-left-radius: 5px; color: var(--ink);
+}
+.hall-msg.user .hall-bubble {
+  background: var(--user-bubble); border: 1px solid var(--user-bubble-bd);
+  backdrop-filter: blur(6px);
+  color: var(--ink);
+  border-top-right-radius: 5px; font-weight: 500;
+}
+.hall-bubble.streaming { border-color: var(--accent); }
+.hall-typing { color: var(--faint); }
+
+.hall-input-wrap { padding: 14px 22px 18px; border-top: 1px solid var(--border-soft); }
+.hall-config-hint {
+  margin-bottom: 10px; padding: 9px 14px; border-radius: 10px;
+  background: var(--warn-bg); color: var(--warn); font-size: 13px;
+}
+.hall-config-hint a { color: var(--accent-ink); cursor: pointer; font-weight: 600; }
+.hall-input {
+  display: flex; gap: 10px; align-items: flex-end;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 16px; padding: 10px 12px;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+.hall-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.hall-input textarea {
+  flex: 1; border: none; background: transparent; resize: none;
+  padding: 5px 2px; max-height: 140px; font: inherit; color: var(--ink);
+}
+.hall-input textarea:focus { outline: none; box-shadow: none; background: transparent; }
+.hall-send {
+  width: 34px; height: 34px; border-radius: 50%; flex: none;
+  background: var(--gold-grad); color: var(--on-accent); border: none;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.hall-send:hover:not(:disabled) { filter: brightness(1.08); }
+.hall-send:disabled { opacity: .45; cursor: not-allowed; }
+.hall-send.stop { background: var(--surface-3); color: var(--ink); border: 1px solid var(--border); }
+.hall-send.stop:hover { background: var(--danger-bg); color: var(--danger); }
+.hall-input-hint { margin: 8px 4px 0; color: var(--faint); font-size: 11.5px; }
+
+.donate-modal { max-width: 420px; }
+.donate-head { display: flex; align-items: center; gap: 10px; }
+.donate-head h3 { margin: 0 0 8px; font-size: 17px; }
+.donate-tag {
+  font-size: 11px; color: var(--warn); background: var(--warn-bg);
+  border-radius: 999px; padding: 2px 10px; margin-bottom: 8px;
+}
+.donate-text {
+  margin: 0 0 18px; font-size: 13.5px; line-height: 2; color: var(--ink-2);
+  white-space: normal; word-break: break-word;
+}
+.donate-actions { display: flex; justify-content: flex-end; }
+
+@media (max-width: 720px) {
+  .hall-view { flex-direction: column; height: auto; }
+  .hall-config { width: auto; max-height: 180px; border-right: none; border-bottom: 1px solid var(--border-soft); }
+  .hall-chat-area { height: 54vh; min-height: 340px; }
+  .hall-bubble { max-width: 86%; }
+}
+

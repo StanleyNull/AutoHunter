@@ -8,6 +8,22 @@ import LlmPoolEditor from "../components/LlmPoolEditor.vue";
 
 const router = useRouter();
 const adv = ref(false);
+// 免责声明：新建挖掘任务前强制确认一次（勾选"不再提醒"后记住，单用户键）
+const showDisclaimer = ref(false);
+const neverAgain = ref(false);
+const DISCLAIMER_KEY = "ah-disclaimer-agreed";
+function maybeShowDisclaimer() {
+  if (localStorage.getItem(DISCLAIMER_KEY) === "1") return;
+  showDisclaimer.value = true;
+}
+function confirmDisclaimer() {
+  showDisclaimer.value = false;
+  if (neverAgain.value) localStorage.setItem(DISCLAIMER_KEY, "1");
+}
+function cancelDisclaimer() {
+  showDisclaimer.value = false;
+  router.push("/"); // 不接受免责声明 → 返回大厅
+}
 const form = reactive({
   name: "",
   src_type: "edusrc",
@@ -246,6 +262,7 @@ onMounted(async () => {
     inherited.concurrency = Number(form.concurrency);
     inherited.deepen_cap = Number(form.deepen_cap);
   } catch {}
+  maybeShowDisclaimer();
 });
 </script>
 
@@ -421,5 +438,59 @@ onMounted(async () => {
       </p>
       <button type="submit" class="primary" :disabled="submitting">{{ submitting ? "创建中…" : "创建任务" }}</button>
     </form>
+
+    <!-- 免责声明弹窗：新建挖掘任务前强制确认 -->
+    <div v-if="showDisclaimer" class="disclaimer-mask" @click.self="cancelDisclaimer">
+      <div class="disclaimer-modal" role="dialog" aria-modal="true" aria-labelledby="disclaimer-title">
+        <h3 id="disclaimer-title">⚠️ 免责声明</h3>
+        <p class="disclaimer-warn">
+          本工具仅用于<strong>授权安全测试</strong>与<strong>网络安全教学演示</strong>，<strong>禁止未授权探测与非法渗透</strong>。
+        </p>
+        <p>
+          使用者自行承担全部使用责任，作者不对任何违规使用后果负责。
+        </p>
+        <label class="disclaimer-remember">
+          <input type="checkbox" v-model="neverAgain" />
+          我已阅读并同意，以后不再提醒
+        </label>
+        <div class="disclaimer-actions">
+          <button type="button" class="ghost" @click="cancelDisclaimer">暂不使用</button>
+          <button type="button" class="primary" @click="confirmDisclaimer">同意并继续</button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
+
+<style scoped>
+.disclaimer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(10, 8, 20, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.disclaimer-modal {
+  max-width: 460px;
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.disclaimer-modal h3 { margin: 0 0 12px; font-size: 18px; }
+.disclaimer-warn { font-weight: 600; }
+.disclaimer-modal p { margin: 8px 0; line-height: 1.7; }
+.disclaimer-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+  font-size: 13px;
+}
+.disclaimer-actions { display: flex; gap: 10px; justify-content: flex-end; }
+</style>

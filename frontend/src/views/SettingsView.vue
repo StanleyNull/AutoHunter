@@ -131,6 +131,10 @@ const form = reactive({
   deepen_cap: 2,
   skip_score_threshold: -10,
   worker_prompt_version: "legacy",
+  xq_base_url: "",
+  xq_api_key: "",
+  xq_model: "",
+  xq_api_key_set: false,
 });
 
 const engineKeysSetCount = computed(() =>
@@ -567,6 +571,10 @@ async function load() {
     form.deepen_cap = s.defaults?.deepen_cap ?? 2;
     form.skip_score_threshold = s.defaults?.skip_score_threshold ?? -10;
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
+    form.xq_base_url = s.xiaoqi?.base_url || "";
+    form.xq_model = s.xiaoqi?.model || "";
+    form.xq_api_key = "";
+    form.xq_api_key_set = s.xiaoqi?.api_key_set;
     autoSaveStatus.value = "idle";
     autoSaveError.value = "";
   } finally {
@@ -642,8 +650,13 @@ async function save({ silent = false } = {}) {
         worker_prompt_version: form.worker_prompt_version,
         engine: form.default_engine || "fofa",
       },
+      xiaoqi: {
+        base_url: form.xq_base_url,
+        model: form.xq_model,
+      },
     };
     if (secretReady(form.api_key)) body.llm.api_key = form.api_key.trim();
+    if (secretReady(form.xq_api_key)) body.xiaoqi.api_key = form.xq_api_key.trim();
     for (const [name, eng] of Object.entries(form.engines || {})) {
       const patch = { base_url: eng.base_url || "" };
       if (secretReady(eng.key)) patch.key = eng.key.trim();
@@ -670,6 +683,8 @@ async function save({ silent = false } = {}) {
     meta.value = { updated_at: s.updated_at };
     form.api_key = "";
     form.fofa_key = "";
+    form.xq_api_key = "";
+    form.xq_api_key_set = s.xiaoqi?.api_key_set;
     form.api_key_set = s.llm?.api_key_set;
     form.key_ref = s.llm?.key_ref || "";
     llmMode.value = s.llm?.mode === "pool" ? "pool" : "single";
@@ -1166,6 +1181,24 @@ async function runCleanup() {
               <input v-model="form.skip_score_threshold" type="number" step="1" />
             </label>
             <p class="field-hint full">Collector 评分低于此值的目标直接跳过，避免 worker 消耗在垃圾资产上。</p>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-block">
+          <legend>
+            <span>wumi · 大厅 AI</span>
+            <small>大厅聊天的独立模型通道（与挖洞 LLM 分开）</small>
+          </legend>
+          <div class="settings-grid">
+            <label class="full">wumi base_url
+              <input v-model="form.xq_base_url" placeholder="https://api.deepseek.com/v1" />
+            </label>
+            <label class="full">wumi api_key
+              <input v-model="form.xq_api_key" type="password"
+                :placeholder="form.xq_api_key_set ? '已配置，留空不修改' : 'sk-...'" />
+            </label>
+            <label class="full">模型名 <input v-model="form.xq_model" placeholder="deepseek-chat" /></label>
+            <p class="field-hint full">大厅里 wumi 用这里的模型跟你聊天。留空不填则大厅无法使用。</p>
           </div>
         </fieldset>
 

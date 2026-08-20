@@ -33,7 +33,7 @@ from app.agent_runtime import (
     REVIEW_MAX_CONCURRENCY,
     WORKER_MAX_CONCURRENCY,
 )
-from app.api import backup, findings, intel, runtime_logs, settings, stream, tasks, update, vulns
+from app.api import backup, chat, findings, intel, runtime_logs, settings, stream, tasks, update, vulns
 from app.backup import run_periodic_backup
 from app.db.session import init_db
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
@@ -211,6 +211,7 @@ app.include_router(intel.router)
 app.include_router(runtime_logs.router)
 app.include_router(vulns.router)
 app.include_router(update.router)
+app.include_router(chat.router)
 
 
 @app.get("/health")
@@ -271,3 +272,9 @@ async def index():
     if INDEX_FILE.exists():
         return FileResponse(str(INDEX_FILE))
     return {"msg": "前端未构建，请运行 vite build 或使用 Docker 镜像"}
+
+
+# 前端静态资源兜底：托管 dist 根目录（konuri-bg.jpg 壁纸等 public 资源）。
+# 须挂在所有 API 路由与 index 路由之后，避免抢占 /api/*。
+if WEB_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

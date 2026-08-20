@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import LLMConfig
 from app.agents.deepen import clamp_deepen_cap
 from app.agents.prompts import normalize_worker_prompt_version
+from app.chat_prompts import WUMI_DEFAULT_PROMPT
 from app.db.models import SystemSettings, Task, to_cst_iso
 from app.db.session import SessionLocal
 from app.engines import get_engine, list_engines, get_default_engine
@@ -21,7 +22,7 @@ SETTINGS_ID = "global"
 LLM_MODES = {"single", "pool"}
 LLM_PROTOCOLS = {"auto", "openai_chat", "anthropic_messages"}
 
-_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}}
+_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}, "xiaoqi": {}}
 
 
 # 统一脱敏占位：不再泄露密钥首尾字符，避免降低离线爆破成本。
@@ -240,6 +241,17 @@ def _env_defaults() -> dict[str, Any]:
     }
 
 
+def _xiaoqi_defaults() -> dict[str, Any]:
+    """大厅 AI（wumi）独立模型通道：base_url/模型给合理默认，api_key 必须用户自己填。"""
+    return {
+        "base_url": os.environ.get("XIAOQI_BASE_URL", "https://api.deepseek.com/v1"),
+        "api_key": os.environ.get("XIAOQI_API_KEY", ""),
+        "model": os.environ.get("XIAOQI_MODEL", "deepseek-chat"),
+        "temperature": float(os.environ.get("XIAOQI_TEMPERATURE", "0.7")),
+        "system_prompt": WUMI_DEFAULT_PROMPT,
+    }
+
+
 def _merge_section(stored: dict, env: dict) -> dict[str, Any]:
     out = dict(env)
     for k, v in (stored or {}).items():
@@ -270,6 +282,7 @@ def effective_settings() -> dict[str, Any]:
         "fofa": _merge_section(_cache.get("fofa"), _env_fofa()),
         "engines": _merge_section(_cache.get("engines"), _env_engines()),
         "defaults": _merge_section(_cache.get("defaults"), _env_defaults()),
+        "xiaoqi": _merge_section(_cache.get("xiaoqi"), _xiaoqi_defaults()),
     }
 
 
@@ -522,6 +535,13 @@ def public_settings_view() -> dict[str, Any]:
             "worker_prompt_version": normalize_worker_prompt_version(defaults.get("worker_prompt_version")),
             "engine": defaults.get("engine", get_default_engine()),
         },
+        "xiaoqi": {
+            "base_url": eff["xiaoqi"].get("base_url") or "https://api.deepseek.com/v1",
+            "model": eff["xiaoqi"].get("model") or "deepseek-chat",
+            "temperature": float(eff["xiaoqi"].get("temperature") or 0.7),
+            "api_key": mask_secret(eff["xiaoqi"].get("api_key") or ""),
+            "api_key_set": bool(eff["xiaoqi"].get("api_key")),
+        },
         "available_engines": list_engines(),
         "updated_at": _cache.get("updated_at"),
     }
@@ -540,6 +560,7 @@ async def refresh_cache(session: AsyncSession) -> SystemSettings:
         "fofa": dict(row.fofa or {}),
         "engines": dict(row.engines or {}),
         "defaults": dict(row.defaults or {}),
+        "xiaoqi": dict(row.xiaoqi or {}),
         "updated_at": to_cst_iso(row.updated_at),
     }
     return row
@@ -646,6 +667,20 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
                 defaults[k] = v
         row.defaults = defaults
 
+    # 大厅 AI（wumi）独立模型通道
+    if "xiaoqi" in payload and payload["xiaoqi"]:
+        xq = dict(row.xiaoqi or {})
+        for k, v in payload["xiaoqi"].items():
+            if k == "api_key":
+                if not str(v or "").strip() or is_masked_secret(v):
+                    continue
+                xq[k] = v
+            elif k == "system_prompt":
+                continue  # 人设私密：不允许通过 API 修改/覆盖
+            elif v is not None:
+                xq[k] = v
+        row.xiaoqi = xq
+
     await session.commit()
     await session.refresh(row)
     await refresh_cache(session)
@@ -690,6 +725,31 @@ def llm_client_for_task_optional(
         )
     except Exception:
         return None
+
+
+# ── 大厅 AI（wumi）独立模型通道 ────────────────────────────────
+
+def resolve_xiaoqi_config() -> LLMConfig:
+    """大厅 AI（wumi）独立配置。api_key 为空时由调用方提示去设置页填写。"""
+    eff = effective_settings()["xiaoqi"]
+    return LLMConfig(
+        base_url=eff.get("base_url") or "https://api.deepseek.com/v1",
+        api_key=eff.get("api_key") or "",
+        model=eff.get("model") or "deepseek-chat",
+        temperature=float(eff.get("temperature") or 0.7),
+    )
+
+
+def xiaoqi_system_prompt() -> str:
+    """wumi 系统提示词（用户可覆盖，默认用内置人设）。"""
+    return effective_settings()["xiaoqi"].get("system_prompt") or WUMI_DEFAULT_PROMPT
+
+
+def llm_client_for_xiaoqi():
+    """构造大厅 wumi 聊天的 LLMClient（单配置）。无 key 抛 RuntimeError（调用方已先校验）。"""
+    from app.llm.client import LLMClient
+
+    return LLMClient(config=resolve_xiaoqi_config(), usage_key="xiaoqi")
 
 
 def _llm_key_candidates() -> list[tuple[str, str, str, str]]:

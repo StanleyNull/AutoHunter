@@ -33,12 +33,17 @@ ARG TARGETARCH
 RUN set -eux; \
     NUCLEI_VER=3.3.7; HTTPX_VER=1.6.9; \
     cd /tmp; \
-    wget -q "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_${TARGETARCH}.zip" -O nuclei.zip; \
-    wget -q "https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VER}/httpx_${HTTPX_VER}_linux_${TARGETARCH}.zip" -O httpx.zip; \
+    (wget -q -T 30 "https://ghfast.top/https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_${TARGETARCH}.zip" -O nuclei.zip 2>/dev/null && echo "nuclei: ghfast.top") || \
+    (wget -q -T 30 "https://ghproxy.com/https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_${TARGETARCH}.zip" -O nuclei.zip 2>/dev/null && echo "nuclei: ghproxy") || \
+    (wget -q -T 30 "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_${TARGETARCH}.zip" -O nuclei.zip 2>/dev/null && echo "nuclei: github direct") || \
+    echo "WARNING: nuclei download failed"; \
+    (wget -q -T 30 "https://ghfast.top/https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VER}/httpx_${HTTPX_VER}_linux_${TARGETARCH}.zip" -O httpx.zip 2>/dev/null && echo "httpx: ghfast.top") || \
+    (wget -q -T 30 "https://ghproxy.com/https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VER}/httpx_${HTTPX_VER}_linux_${TARGETARCH}.zip" -O httpx.zip 2>/dev/null && echo "httpx: ghproxy") || \
+    (wget -q -T 30 "https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VER}/httpx_${HTTPX_VER}_linux_${TARGETARCH}.zip" -O httpx.zip 2>/dev/null && echo "httpx: github direct") || \
+    echo "WARNING: httpx download failed"; \
     apt-get update && apt-get install -y --no-install-recommends unzip; \
-    unzip -o nuclei.zip nuclei -d /usr/local/bin/; \
-    unzip -o httpx.zip httpx -d /usr/local/bin/; \
-    chmod +x /usr/local/bin/nuclei /usr/local/bin/httpx; \
+    (if [ -f nuclei.zip ] && unzip -tq nuclei.zip 2>/dev/null; then unzip -o nuclei.zip nuclei -d /usr/local/bin/ && chmod +x /usr/local/bin/nuclei && echo "nuclei installed"; else echo "WARNING: nuclei zip invalid, skipped"; fi); \
+    (if [ -f httpx.zip ] && unzip -tq httpx.zip 2>/dev/null; then unzip -o httpx.zip httpx -d /usr/local/bin/ && chmod +x /usr/local/bin/httpx && echo "httpx installed"; else echo "WARNING: httpx zip invalid, skipped"; fi); \
     rm -f /tmp/*.zip; \
     apt-get purge -y unzip; rm -rf /var/lib/apt/lists/*
 

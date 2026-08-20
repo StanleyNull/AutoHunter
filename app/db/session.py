@@ -77,6 +77,7 @@ _MIGRATIONS = [
     ("findings", "llm_base_url", "VARCHAR(300) DEFAULT ''"),
     ("killsweeps", "affected_table", "JSON DEFAULT '[]'"),
     ("system_settings", "engines", "JSON DEFAULT '{}'"),
+    ("system_settings", "xiaoqi", "JSON DEFAULT '{}'"),
     ("tasks", "engine", "VARCHAR(20) DEFAULT ''"),
     ("tasks", "auth_bindings", "JSON"),
     ("targets", "auth_context", "JSON"),

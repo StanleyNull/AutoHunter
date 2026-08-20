@@ -286,4 +286,28 @@ class SystemSettings(Base):
     fofa: Mapped[dict] = mapped_column(JSON, default=dict)      # key/max_pages/page_size/default_intent_mode
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
+    xiaoqi: Mapped[dict] = mapped_column(JSON, default=dict)    # 大厅 wumi 聊天独立模型通道
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class ChatSession(Base):
+    """大厅 wumi 聊天会话（单用户，user_id 恒为 local）。"""
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    title: Mapped[str] = mapped_column(String(200), default="新对话")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class ChatMessage(Base):
+    """大厅 wumi 聊天消息（单用户）。"""
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(ForeignKey("chat_sessions.id"), index=True)
+    user_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    role: Mapped[str] = mapped_column(String(10), default="user")  # user / assistant
+    content: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)

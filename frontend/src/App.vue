@@ -135,6 +135,10 @@ onUnmounted(() => {
     </div>
     <nav class="topbar-nav desktop-only-nav" aria-label="主导航">
       <router-link to="/" class="navbtn" :class="{ active: route.path === '/' }">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="3.2"/></svg></span>
+        <span>大厅</span>
+      </router-link>
+      <router-link to="/tasks" class="navbtn" :class="{ active: route.path === '/tasks' }">
         <span class="nav-icon"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="18" width="18" height="3" rx="1"/></svg></span>
         <span>任务</span>
       </router-link>
@@ -164,6 +168,10 @@ onUnmounted(() => {
 
   <nav class="bottom-nav mobile-only-nav" aria-label="主导航">
     <router-link to="/" class="bottom-nav-item" :class="{ active: route.path === '/' }">
+      <span class="bottom-nav-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="3.2"/></svg></span>
+      <span class="bottom-nav-label">大厅</span>
+    </router-link>
+    <router-link to="/tasks" class="bottom-nav-item" :class="{ active: route.path === '/tasks' }">
       <span class="bottom-nav-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="18" width="18" height="3" rx="1"/></svg></span>
       <span class="bottom-nav-label">任务</span>
     </router-link>
