@@ -116,13 +116,31 @@ _NAMED_SECRET_RE = re.compile(
 )
 
 
-def _safe_error(value: object, *secrets: str) -> str:
+def _safe_error(value: object, *secrets: str, limit: int = 500) -> str:
     text = " ".join(str(value or "").split())
     for secret in secrets:
         if secret:
             text = text.replace(str(secret), "<masked>")
     text = _NAMED_SECRET_RE.sub(r"\1<masked>", text)
-    return _TEST_SECRET_RE.sub("<masked>", text)[:500]
+    return _TEST_SECRET_RE.sub("<masked>", text)[:limit]
+
+
+def _llm_test_error_copy(result: dict) -> str:
+    lines = [
+        f"ok={result.get('ok')}",
+        f"name={result.get('name') or '-'}",
+        f"model={result.get('model') or '-'}",
+        f"base_url={result.get('base_url') or '-'}",
+        f"protocol={result.get('protocol') or '-'}",
+        f"status_code={result.get('status_code') or 0}",
+        f"latency_ms={result.get('latency_ms') or 0}",
+        f"tool_calling={result.get('tool_calling') or '-'}",
+    ]
+    if result.get("error"):
+        lines.append(f"error={result['error']}")
+    if result.get("reply"):
+        lines.append(f"reply={result['reply']}")
+    return "\n".join(lines)
 
 
 def _test_configs(body: LLMTestRequest) -> list[tuple[str, LLMConfig]]:
@@ -259,11 +277,13 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
     }
     if not provider.api_key:
         result["error"] = "未配置 API Key"
+        result["error_copy"] = _llm_test_error_copy(result)
         return result
     try:
         assert_safe_outbound_url(url)
     except SsrfBlocked as exc:
         result["error"] = f"base_url 不被允许：{exc}"
+        result["error_copy"] = _llm_test_error_copy(result)
         return result
 
     headers = {
@@ -295,9 +315,13 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
         result["latency_ms"] = int((time.perf_counter() - started) * 1000)
         result["status_code"] = response.status_code
         if response.status_code >= 400:
-            result["error"] = _safe_error(
-                f"HTTP {response.status_code}: {response.text[:300]}", provider.api_key
+            raw = _safe_error(
+                f"HTTP {response.status_code}: {response.text[:2000]}",
+                provider.api_key,
+                limit=2000,
             )
+            result["error"] = raw[:500]
+            result["error_copy"] = _llm_test_error_copy({**result, "error": raw})
             # 连接测试是管理员手动探测，只返回结果、不写生产熔断器（避免污染在跑 worker 的端点健康）。
             return result
         data = response.json()
@@ -313,11 +337,14 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
         result.update(ok=True, reply=reply[:80])
         # 连通性 OK 后再探一次工具调用能力（额外一次小请求，仅测试按钮触发，不碰挖洞）。
         result["tool_calling"] = await _probe_tool_calling(url, headers, provider.model, protocol)
+        result["error_copy"] = _llm_test_error_copy(result)
         # 测试成功不清生产熔断器（否则会抹掉真实 cooldown，让 worker 立即冲击刚被限流的端点）。
         return result
     except Exception as exc:
         result["latency_ms"] = int((time.perf_counter() - started) * 1000)
-        result["error"] = _safe_error(exc, provider.api_key)
+        raw = _safe_error(exc, provider.api_key, limit=2000)
+        result["error"] = raw[:500]
+        result["error_copy"] = _llm_test_error_copy({**result, "error": raw})
         # 同上：手动测试失败不累加生产熔断计数。
         return result
 
@@ -327,9 +354,14 @@ async def test_llm(body: LLMTestRequest, session: AsyncSession = Depends(get_ses
     await refresh_cache(session)
     providers = _test_configs(body)
     if not providers:
-        return {"ok": False, "results": [], "error": "未配置可用 LLM 端点"}
+        return {"ok": False, "results": [], "error": "未配置可用 LLM 端点", "error_copy": "ok=false\nerror=未配置可用 LLM 端点"}
     results = [await _test_llm_one(name, provider) for name, provider in providers]
-    return {"ok": all(item["ok"] for item in results), "results": results}
+    copy_parts = [item.get("error_copy") or _llm_test_error_copy(item) for item in results]
+    return {
+        "ok": all(item["ok"] for item in results),
+        "results": results,
+        "error_copy": "\n\n".join(copy_parts),
+    }
 
 
 @router.put("")

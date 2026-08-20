@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
+import { copyText, formatLlmTestCopy } from "../clipboard.js";
 
 const loading = ref(true);
 const saving = ref(false);
@@ -346,6 +347,7 @@ function resultText(item) {
   if (item.protocol) parts.push(item.protocol);
   if (item.model) parts.push(item.model);
   if (item.latency_ms) parts.push(`${item.latency_ms}ms`);
+  if (item.status_code) parts.push(`HTTP ${item.status_code}`);
   if (item.ok && item.reply) parts.push(`reply: ${item.reply}`);
   if (item.ok && item.tool_calling) {
     const tc = {
@@ -357,6 +359,12 @@ function resultText(item) {
   }
   if (!item.ok && item.error) parts.push(item.error);
   return parts.filter(Boolean).join(" · ");
+}
+
+async function copyLlmTest(item) {
+  const text = item ? formatLlmTestCopy({ ok: item.ok, results: [item], error_copy: item.error_copy }) : formatLlmTestCopy(llmTest.value || {});
+  const ok = await copyText(text);
+  toast(ok ? "已复制 LLM 错误信息" : "复制失败，请手动选中");
 }
 
 function applyLlmHealthResults(results = []) {
@@ -1069,12 +1077,20 @@ async function runCleanup() {
           </div>
 
           <div v-if="llmTest" class="settings-test-result" :class="{ ok: llmTest.ok }">
-            <b>{{ llmTest.ok ? "LLM 可用" : "LLM 不可用" }}</b>
+            <div class="settings-test-head">
+              <b>{{ llmTest.ok ? "LLM 可用" : "LLM 不可用" }}</b>
+              <button type="button" class="mini-action" @click="copyLlmTest()">复制错误信息</button>
+            </div>
             <p v-if="llmTest.error">{{ llmTest.error }}</p>
+            <pre v-if="!llmTest.ok && (llmTest.error_copy || llmTest.error)" class="settings-test-raw">{{ llmTest.error_copy || llmTest.error }}</pre>
             <ul v-if="llmTest.results?.length">
               <li v-for="item in llmTest.results" :key="`${item.name}-${item.base_url}`" :class="{ ok: item.ok }">
-                <strong>{{ item.ok ? "通过" : "失败" }} · {{ item.name || "single" }}</strong>
+                <div class="settings-test-item-head">
+                  <strong>{{ item.ok ? "通过" : "失败" }} · {{ item.name || "single" }}</strong>
+                  <button type="button" class="mini-action" @click="copyLlmTest(item)">复制</button>
+                </div>
                 <small>{{ resultText(item) }}</small>
+                <pre v-if="!item.ok && (item.error_copy || item.error)" class="settings-test-raw">{{ item.error_copy || item.error }}</pre>
               </li>
             </ul>
           </div>

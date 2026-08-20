@@ -24,7 +24,7 @@ from app.agents.write_proof import HARMLESS_PROTOCOL, weak_write_block_reason
 from app.agents import auth_bootstrap
 from app.config import worker_config
 from app import dedup
-from app.llm.client import LLMClient, LLMError
+from app.llm.client import LLMClient, LLMError, llm_error_event_fields
 from app.schemas import Finding, Verdict, WorkerResult
 from app.tools.executor import ToolExecutor
 from app.tools.schemas import (
@@ -306,7 +306,8 @@ class Worker:
                 msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
                 consecutive_llm_failures = 0
             except Exception as e:
-                self._emit("llm_error", error=str(e))
+                fields = llm_error_event_fields(e)
+                self._emit("llm_error", **fields)
                 failure_kind = e.kind if isinstance(e, LLMError) else ""
                 retry_after = e.retry_after if isinstance(e, LLMError) else 0
                 if self._should_soft_retry_llm(e) and consecutive_llm_failures < _WORKER_LLM_SOFT_RETRIES:
@@ -325,6 +326,9 @@ class Worker:
                         failure_kind=failure_kind or "unknown",
                         wait_seconds=wait_s,
                         error=str(e)[:240],
+                        error_copy=fields.get("error_copy") or str(e),
+                        detail=fields.get("detail") or "",
+                        diagnostic=fields.get("diagnostic") or "",
                     )
                     # 不消耗轮次预算：基础设施抖动不应吃掉挖掘配额
                     rounds = max(0, rounds - 1)
@@ -1028,6 +1032,8 @@ class Worker:
                 verdict="error",
                 failure_kind=failure_kind,
                 summary=reason[:300],
+                error=reason[:500],
+                error_copy=reason,
             )
             return
         verdict = "found" if self.findings else "no_vuln"

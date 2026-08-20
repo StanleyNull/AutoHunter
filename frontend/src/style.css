@@ -2061,6 +2061,42 @@ main {
 .ev-agent { min-width: 44px; font-weight: 600; flex: none; }
 .ev-msg { color: var(--ink-2); min-width: 0; flex: 1; word-break: break-word; }
 .ev-time { color: var(--faint); flex: none; font-size: 11px; }
+.ev-copy {
+  flex: none;
+  margin: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.ev-copy:hover { color: var(--ink); border-color: var(--accent); }
+
+.settings-test-head,
+.settings-test-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.settings-test-raw {
+  margin: 0;
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  color: var(--ink-2);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
 
 /* 各 agent 配色（克制，区分而非炫彩） */
 .ag-orchestrator { color: var(--accent-ink); }

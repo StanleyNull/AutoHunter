@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
-import { copyText } from "../clipboard.js";
+import { copyText, formatLlmErrorCopy, isLlmErrorEvent } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
 import { fmtLocalTime } from "../format.js";
 import ReportDrawer from "../components/ReportDrawer.vue";
@@ -522,10 +522,10 @@ function fmtEvent(ev) {
     case "killsweep_invalid": return `通杀记录已标记无效：${d.product || ""}`;
     case "killsweep_retry": return `手动重启通杀分析：${d.product || d.title || ""}`;
     case "llm_error": return `⚠ LLM 调用失败: ${d.error || ""}`;
-    case "llm_soft_retry": return `LLM 软重试 ${d.attempt || "?"}/${d.max_attempts || "?"}（${d.kind || "retry"}，等 ${d.wait_seconds || 0}s）: ${(d.error || "").slice(0, 120)}`;
-    case "llm_interrupt": return `LLM 中断收尾${d.has_resume ? "（已保存进度）" : ""}: ${(d.error || "").slice(0, 120)}`;
+    case "llm_soft_retry": return `LLM 软重试 ${d.attempt || "?"}/${d.max_attempts || "?"}（${d.kind || d.failure_kind || "retry"}，等 ${d.wait_seconds || 0}s）: ${(d.error || "").slice(0, 180)}`;
+    case "llm_interrupt": return `LLM 中断收尾${d.has_resume ? "（已保存进度）" : ""}: ${(d.error || "").slice(0, 180)}`;
     case "worker_resume": return `断点续挖：恢复笔记 ${d.notes_len || 0} 字 / cookie ${(d.cookies || []).length} / 头 ${(d.headers || []).length}`;
-    case "llm_provider_failed": return `LLM 端点失败: ${d.model || ""} @ ${d.base_url || ""} (${d.error_kind || "failed"})`;
+    case "llm_provider_failed": return `LLM 端点失败: ${d.model || ""} @ ${d.base_url || ""} (${d.error_kind || "failed"})${d.error ? ` · ${d.error}` : ""}`;
     case "tool_exception": return `工具异常: ${d.tool || ""} ${(d.error || "").slice(0, 80)}`;
     case "tool_http": return `HTTP ${d.method || "GET"} ${d.url || ""}`;
     case "tool_shell": return `$ ${(d.command || "").slice(0, 160)}`;
@@ -614,6 +614,11 @@ const _CAT_ICON = {
   warn: "!", phase: "○", auth: "◈", action: "›", muted: "·", neutral: "·",
 };
 function evIcon(cat) { return _CAT_ICON[cat] || "·"; }
+
+async function copyLlmEvent(ev) {
+  const ok = await copyText(formatLlmErrorCopy(ev));
+  toast(ok ? "已复制 LLM 错误信息" : "复制失败，请手动选中");
+}
 // 稳定唯一 key：优先用入库时分配的 _uid（保证唯一且跨刷新稳定），
 // 这样 TransitionGroup 只对真正新增的那条做进入动画，绝不会因重复内容撞 key。
 function evKey(ev) {
@@ -1657,6 +1662,13 @@ function parseEventTs(ts) {
               <span class="ev-icon" :class="`ag-${ev.agent}`">{{ AGENT_ICON[ev.agent] || "•" }}</span>
               <span class="ev-agent" :class="`ag-${ev.agent}`">{{ AGENT_LABEL[ev.agent] || ev.agent }}</span>
               <span class="ev-msg">{{ ev._text }}</span>
+              <button
+                v-if="isLlmErrorEvent(ev)"
+                type="button"
+                class="ev-copy"
+                title="复制 LLM 真实错误"
+                @click.stop="copyLlmEvent(ev)"
+              >复制</button>
               <span class="ev-time">{{ evTime(ev) }}</span>
             </div>
             <div
@@ -1675,6 +1687,13 @@ function parseEventTs(ts) {
                 <span class="ev-detail-round" v-if="d.round">R{{ d.round }}</span>
                 <span class="ev-detail-kind">{{ d.kind }}</span>
                 <span class="ev-detail-msg">{{ d._text || d.message || d.kind }}</span>
+                <button
+                  v-if="isLlmErrorEvent(d)"
+                  type="button"
+                  class="ev-copy"
+                  title="复制 LLM 真实错误"
+                  @click.stop="copyLlmEvent(d)"
+                >复制</button>
                 <span class="ev-detail-time">{{ evTime(d) }}</span>
               </div>
             </div>
@@ -1911,6 +1930,13 @@ function parseEventTs(ts) {
                 <div class="trace-body">
                   <span class="trace-msg">{{ ev._text || ev.message || ev.kind }}</span>
                   <span class="trace-kind">{{ ev.kind }}</span>
+                  <button
+                    v-if="isLlmErrorEvent(ev)"
+                    type="button"
+                    class="ev-copy"
+                    title="复制 LLM 真实错误"
+                    @click.stop="copyLlmEvent(ev)"
+                  >复制错误</button>
                 </div>
                 <span class="trace-time">
                   <span v-if="ev.round" class="trace-round">R{{ ev.round }}</span>{{ evTime(ev) }}

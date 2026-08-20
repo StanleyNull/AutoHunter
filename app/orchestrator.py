@@ -107,6 +107,7 @@ _WORKER_TRACE_KINDS = frozenset({
     "auth_status", "finish_blocked",
 })
 _TRACE_TEXT_KEYS = ("text", "command", "url", "error", "message", "reason", "query", "summary")
+_TRACE_LONG_KEYS = ("error_copy", "diagnostic", "detail")
 # 单 target 超时兜底。
 # WORKER_WALL_TIMEOUT 保持向后兼容：现在作为「无活动空闲超时」默认值。
 # 活跃 worker 可继续运行到 WORKER_MAX_WALL_TIMEOUT，避免深挖正在推进时被 30min 一刀切。
@@ -455,7 +456,9 @@ class TaskRunner:
         for k, v in (payload or {}).items():
             if k in ("finding",):
                 continue
-            if k in _TRACE_TEXT_KEYS and isinstance(v, str):
+            if k in _TRACE_LONG_KEYS and isinstance(v, str):
+                out[k] = v[:2000]
+            elif k in _TRACE_TEXT_KEYS and isinstance(v, str):
                 out[k] = v[:500]
             elif isinstance(v, str) and len(v) > 300:
                 out[k] = v[:300]

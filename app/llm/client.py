@@ -252,6 +252,37 @@ class LLMError(RuntimeError):
         # 前端/事件流只展示短文案；完整 diagnostic 留给后端日志
         return super().__str__()
 
+    def copy_text(self) -> str:
+        """给用户一键复制的完整错误（已脱敏），含 kind/status/上游原文。"""
+        lines = [
+            f"kind={self.kind}",
+            f"status={self.status if self.status is not None else '-'}",
+            f"code={self.code or '-'}",
+            f"message={super().__str__()}",
+        ]
+        if self.detail:
+            lines.append(f"detail={self.detail}")
+        if self.retry_after:
+            lines.append(f"retry_after={self.retry_after}")
+        return "\n".join(lines)
+
+
+def llm_error_event_fields(error: Exception) -> dict[str, Any]:
+    """事件流/复制按钮用的 LLM 错误字段，短文案 + 可复制原文分开。"""
+    if isinstance(error, LLMError):
+        return {
+            "error": str(error),
+            "error_kind": error.kind,
+            "status": error.status,
+            "code": error.code or "",
+            "detail": error.detail or "",
+            "diagnostic": error.diagnostic(),
+            "error_copy": error.copy_text(),
+            "retry_after": error.retry_after,
+        }
+    text = str(error)
+    return {"error": text, "error_copy": text}
+
 
 def _sanitize_error_detail(text: str, limit: int = 1200) -> str:
     text = _SECRET_RE.sub("<masked>", text or "")
@@ -1176,12 +1207,16 @@ class LLMClient:
         if not self.on_provider_failure:
             return
         try:
+            fields = llm_error_event_fields(error)
             self.on_provider_failure({
                 "base_url": self.config.base_url,
                 "model": self.config.model,
-                "kind": getattr(error, "kind", ""),
-                "status": getattr(error, "status", None),
+                "kind": fields.get("error_kind") or getattr(error, "kind", ""),
+                "status": fields.get("status"),
                 "error": _sanitize_error_detail(str(error), 500),
+                "detail": fields.get("detail") or "",
+                "diagnostic": fields.get("diagnostic") or "",
+                "error_copy": fields.get("error_copy") or str(error),
                 "provider_status": state.get("status"),
                 "transition": state.get("transition"),
                 "consecutive_failures": state.get("consecutive_failures", 0),
