@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import worker_config
+from app.memory import drop_tree_cache, trim_process_memory
 
 logger = logging.getLogger("autohunter.workdir_cleanup")
 
@@ -239,6 +240,9 @@ def cleanup_workdir(
             logger.warning("清理工作目录失败 %s: %s", entry.name, exc)
 
     result["freed_human"] = _human_size(result["freed_bytes"])
+    if not dry_run and root is not None:
+        drop_tree_cache(root)
+        trim_process_memory()
     logger.info(
         "工作目录清理完成: 扫描 %d, 删除 %d, 跳过活跃 %d, 失败 %d, 释放 %s%s",
         result["scanned_dirs"],

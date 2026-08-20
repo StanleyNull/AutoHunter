@@ -41,8 +41,10 @@ def test_compact_messages_caches_summary(monkeypatch):
     # 内部字段绝不泄漏进发给 LLM 的 clean 副本
     assert "_summary" not in out1[0]
     assert "_round" not in out1[0] and "_tool" not in out1[0]
-    # 缓存写在原始消息上，跨轮复用
+    # 缓存写在原始消息上，跨轮复用；越窗后原始大 body 也替换成摘要以释放内存
     assert msgs[0].get("_summary")
+    assert msgs[0]["content"] == msgs[0]["_summary"]
+    assert len(msgs[0]["content"]) < 6000
 
 
 def test_compact_messages_not_windowed_unchanged():

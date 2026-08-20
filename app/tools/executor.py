@@ -19,6 +19,7 @@ import httpx
 
 from app.agents.prefilter import capped_resolution
 from app.config import worker_config
+from app.memory import drop_file_cache, drop_tree_cache, trim_process_memory
 from app.tools.decoder import decode_transform as _decode_transform
 from app.tools.guard import CommandBlocked, NeedsConfirm, check_command, check_http_request
 from app.tools.js_analyzer import analyze_javascript as analyze_js_text
@@ -168,6 +169,8 @@ class ToolExecutor:
         for proc in list(self._active_procs):
             self._kill_process_group(proc)
         self.close_http_client()
+        drop_tree_cache(self.work_dir, cap=80)
+        trim_process_memory()
 
     # ---- run_shell ----
     def run_shell(
@@ -323,6 +326,7 @@ class ToolExecutor:
         log_file = self.work_dir / f"shell_{self._log_seq}.log"
         try:
             log_file.write_bytes(data)  # 与 write_text(encoding="utf-8") 字节数一致，便于精确计数
+            drop_file_cache(log_file)
         except Exception:
             return None
         self._workdir_bytes += len(data)
