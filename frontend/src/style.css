@@ -48,6 +48,8 @@
   --line: oklch(72% 0.12 var(--accent-h) / 0.08);
   --radius: 10px;
   --radius-sm: 7px;
+  --select-ring: 0 0 0 3px var(--accent-bg);
+  --select-border: color-mix(in oklch, var(--accent) 52%, var(--border));
 
   --wallpaper-dim: 0.28;
   --wallpaper-fit: cover;
@@ -220,7 +222,7 @@ input, select, textarea {
 input::placeholder, textarea::placeholder { color: var(--muted); }
 input:focus, select:focus, textarea:focus {
   outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-bg);
+  box-shadow: var(--select-ring);
 }
 a { color: var(--accent-ink); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -881,8 +883,8 @@ main {
 .create-chips button:hover { border-color: var(--faint); color: var(--ink); background: var(--surface); }
 .create-chips button.on {
   color: var(--ink); background: var(--surface);
-  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
-  box-shadow: 0 0 0 3px var(--accent-bg);
+  border-color: var(--select-border);
+  box-shadow: var(--select-ring);
 }
 .create-source {
   display: grid;
@@ -897,8 +899,8 @@ main {
 .create-source button:hover { border-color: var(--faint); background: var(--surface-2); }
 .create-source button.on {
   background: color-mix(in oklch, var(--accent-bg) 55%, var(--surface));
-  border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
-  box-shadow: 0 0 0 3px var(--accent-bg);
+  border-color: var(--select-border);
+  box-shadow: var(--select-ring);
 }
 .create-source b { display: block; color: var(--ink); font-size: 13.5px; font-weight: 600; }
 .create-source small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.4; font-weight: 500; }
@@ -1175,9 +1177,10 @@ main {
   color: var(--ink);
 }
 .settings-nav button.active {
-  background: var(--accent-bg);
-  color: var(--accent-ink);
-  border-color: color-mix(in oklch, var(--accent) 35%, transparent);
+  background: color-mix(in oklch, var(--accent-bg) 55%, var(--surface));
+  color: var(--ink);
+  border-color: var(--select-border);
+  box-shadow: var(--select-ring);
 }
 .settings-nav small {
   color: var(--faint);
@@ -1215,7 +1218,7 @@ main {
 }
 .appearance-swatches .appearance-swatch.active {
   border-color: var(--ink);
-  box-shadow: 0 0 0 3px var(--accent-bg);
+  box-shadow: var(--select-ring);
 }
 .appearance-swatches input[type="color"] {
   width: 36px; height: 36px; min-width: 36px; max-width: 36px;
@@ -1290,7 +1293,7 @@ main {
 .settings-block:hover { border-color: color-mix(in oklch, var(--accent) 30%, var(--border)); }
 .settings-block:focus-within {
   border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
-  box-shadow: var(--shadow), 0 0 0 3px var(--accent-bg);
+  box-shadow: var(--shadow), var(--select-ring);
 }
 .settings-block legend span::before {
   content: ""; display: inline-block;
@@ -1369,7 +1372,7 @@ main {
   grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
   width: min(420px, 100%);
   margin-bottom: 16px;
-  padding: 3px;
+  padding: 4px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--bg);
@@ -1386,9 +1389,9 @@ main {
   color: var(--ink);
 }
 .llm-mode-switch button.active {
-  background: var(--surface);
+  background: color-mix(in oklch, var(--accent-bg) 55%, var(--surface));
   color: var(--ink);
-  box-shadow: var(--shadow);
+  box-shadow: var(--select-ring);
 }
 .llm-config-pane {
   padding-top: 2px;
@@ -1450,8 +1453,9 @@ main {
   background: var(--surface);
 }
 .provider-selector-row.active {
-  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+  border-color: var(--select-border);
   background: color-mix(in oklch, var(--accent-bg) 35%, var(--surface));
+  box-shadow: var(--select-ring);
 }
 .provider-selector-row.disabled {
   opacity: .58;
@@ -2198,7 +2202,7 @@ main {
   transition: color .15s, border-color .15s, background-color .15s;
 }
 .tabs button:hover { color: var(--ink); background: var(--surface-2); }
-.tabs button.active { color: var(--ink); background: var(--accent-bg); border-color: color-mix(in oklch, var(--accent) 40%, transparent); }
+.tabs button.active { color: var(--ink); background: color-mix(in oklch, var(--accent-bg) 55%, var(--surface)); border-color: var(--select-border); box-shadow: var(--select-ring); }
 .tabs button i {
   background: var(--accent-bg); color: var(--accent-ink); border-radius: 6px;
   padding: 1px 7px; font-style: normal; font-size: 11px; margin-left: 6px;
@@ -3398,8 +3402,9 @@ main {
   }
   .board-mobile-switch button.active {
     color: var(--ink);
-    background: var(--accent-bg);
-    border-color: color-mix(in oklch, var(--accent) 35%, transparent);
+    background: color-mix(in oklch, var(--accent-bg) 55%, var(--surface));
+    border-color: var(--select-border);
+    box-shadow: var(--select-ring);
   }
   .board-mobile-switch button i {
     font-style: normal;
@@ -3701,7 +3706,7 @@ main {
   cursor: pointer; transition: border-color .15s, transform .12s, background .15s;
 }
 .dash-card:not(.hero):hover { transform: translateY(-2px); border-color: var(--faint); }
-.dash-card[data-active="true"] { border-color: var(--accent); background: var(--accent-bg); }
+.dash-card[data-active="true"] { border-color: var(--select-border); background: color-mix(in oklch, var(--accent-bg) 55%, var(--surface)); box-shadow: var(--select-ring); }
 .dash-card.hero {
   cursor: default;
   background: linear-gradient(135deg, var(--accent-bg), var(--surface));
@@ -3731,7 +3736,7 @@ main {
   border-radius: 6px; cursor: pointer; font-size: 13px; transition: all .12s;
 }
 .kind-tab:hover { color: var(--ink); }
-.kind-tab.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.kind-tab.on { background: color-mix(in oklch, var(--accent-bg) 55%, var(--surface)); color: var(--ink); box-shadow: var(--select-ring); }
 .intel-toolbar .search-box { flex: 1; min-width: 200px; }
 .intel-toolbar .btn-ghost,
 .intel-toolbar .btn-danger {
