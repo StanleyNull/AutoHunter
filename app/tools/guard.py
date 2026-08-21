@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 # 会自毁运行环境的命令模式（大小写不敏感）。仅拦这些，不拦攻击。
 _SELF_DESTRUCT_PATTERNS = [
@@ -69,14 +70,107 @@ _ENTERPRISE_DANGER_PATTERNS = [
 
 _ENTERPRISE_COMPILED = [(re.compile(p, re.IGNORECASE), msg) for p, msg in _ENTERPRISE_DANGER_PATTERNS]
 
+# 全模式：疑似对目标造成不可逆损害时先暂停，让模型反思确认后再执行（Issue #30）。
+# 不永久硬拦。不拦：IDOR 的 DELETE /api/x?id=…、自建 SRC_TEST_ 哨兵、布尔/延时 SQLi。
+# 自毁本机/容器、企业生产红线仍硬拦。
+_DESTRUCTIVE_ALWAYS = [
+    (r"\b(drop|truncate)\s+(table|database|schema)\b",
+     "禁止 DROP/TRUNCATE：用布尔/延时/读单条证明注入，不要删库。"),
+    (r"\bsqlmap\b.*--(dump-all|os-shell|file-write|sql-shell)",
+     "禁止 sqlmap 拖全库/os-shell/写文件：读少量样本即可。"),
+    (r"\b(flushall|flushdb)\b",
+     "禁止 Redis FLUSHALL/FLUSHDB。"),
+    (r"(cache[^/\s]{0,24}(clear|flush|purge|clean|invalidate)|"
+     r"(clear|flush|purge|clean|invalidate)[^/\s]{0,16}cache|"
+     r"/cache/(clear|flush|purge|clean)|clearCache|flushCache|purgeCache)",
+     "禁止清缓存：会让站点短暂不可用。证明接口存在即可。"),
+    (r"\bdelete\s+from\b(?![^\n]{0,80}src_test_)",
+     "禁止 DELETE FROM 真实表：只删自己建的 SRC_TEST_ 哨兵，或对不存在 ID 做授权探测。"),
+]
+
+_DESTRUCTIVE_ALWAYS_COMPILED = [
+    (re.compile(p, re.IGNORECASE | re.DOTALL), msg) for p, msg in _DESTRUCTIVE_ALWAYS
+]
+
+# PUT/覆盖已有文档类下载（不含 SRC_TEST_ 文件名）
+_OVERWRITE_FILE = re.compile(
+    r"\b(put|post)\b.{0,200}(download|attachment|/files?/|/uploads?/|/static/).{0,80}"
+    r"\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z)(\b|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_SRC_TEST = re.compile(r"src_test_", re.IGNORECASE)
+
 
 class CommandBlocked(Exception):
     pass
 
 
-def check_command(cmd: str, enterprise: bool = False) -> None:
-    """命中自毁模式则抛 CommandBlocked，否则放行。
-    enterprise=True 时额外拦截对企业生产环境的破坏性/不可逆操作。"""
+class NeedsConfirm(Exception):
+    """疑似破坏性操作：本次不执行，等模型反思后带确认再跑。"""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _truthy(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, (int, float)) and value == 1:
+        return True
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def destructive_warning(text: str) -> str | None:
+    blob = text or ""
+    if not blob.strip():
+        return None
+    for pat, msg in _DESTRUCTIVE_ALWAYS_COMPILED:
+        if pat.search(blob):
+            return msg
+    if _OVERWRITE_FILE.search(blob) and not _SRC_TEST.search(blob):
+        return "覆盖站点已有下载文件可能改不回。上传请用 SRC_TEST_ 前缀的无害探针。"
+    return None
+
+
+def _maybe_need_confirm(
+    warning: str | None,
+    confirm_destructive: Any = False,
+    confirm_reason: str = "",
+) -> None:
+    if not warning:
+        return
+    if not _truthy(confirm_destructive):
+        raise NeedsConfirm(warning)
+    if not str(confirm_reason or "").strip():
+        raise NeedsConfirm(warning + " 请填写 confirm_reason：为何这是无害验证。")
+
+
+def check_http_request(
+    method: str = "GET",
+    url: str = "",
+    data: str | None = None,
+    json_body: Any = None,
+    confirm_destructive: Any = False,
+    confirm_reason: str = "",
+) -> None:
+    parts = [method or "", url or "", data or ""]
+    if json_body is not None:
+        parts.append(str(json_body))
+    _maybe_need_confirm(
+        destructive_warning("\n".join(parts)),
+        confirm_destructive,
+        confirm_reason,
+    )
+
+
+def check_command(
+    cmd: str,
+    enterprise: bool = False,
+    confirm_destructive: Any = False,
+    confirm_reason: str = "",
+) -> None:
+    """命中自毁模式则抛 CommandBlocked。疑似破坏目标则 NeedsConfirm。"""
     for pat in _COMPILED:
         if pat.search(cmd):
             hint = ""
@@ -88,6 +182,7 @@ def check_command(cmd: str, enterprise: bool = False) -> None:
             raise CommandBlocked(
                 f"命令被安全防护拦截（疑似自毁运行环境，非攻击限制）：匹配模式 {pat.pattern}{hint}"
             )
+    _maybe_need_confirm(destructive_warning(cmd), confirm_destructive, confirm_reason)
     if enterprise:
         for pat, msg in _ENTERPRISE_COMPILED:
             if pat.search(cmd):

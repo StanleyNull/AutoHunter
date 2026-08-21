@@ -226,13 +226,19 @@ class KillsweepHunter:
                 url=url, method=args.get("method", "GET"),
                 headers=args.get("headers"), data=args.get("data"),
                 json_body=args.get("json_body"), follow_redirects=args.get("follow_redirects", False),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
             )
         if name == "run_shell":
             command = args.get("command")
             if not command:
                 return {"ok": False, "error": "run_shell 缺少 command"}
             self._emit("killsweep_shell", command=args.get("command", "")[:160])
-            return self.executor.run_shell(command, timeout=args.get("timeout"))
+            return self.executor.run_shell(
+                command, timeout=args.get("timeout"),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
+            )
         if name == "submit_killsweep":
             self._result = {
                 "is_generic_product": bool(args.get("is_generic_product", False)),

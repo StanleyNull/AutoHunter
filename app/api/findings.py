@@ -9,19 +9,20 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
-from app.agents.deepen import apply_deepen
+from app.agents.deepen import apply_deepen, deepen_cap_for
 from app.agents.write_proof import looks_like_write_op
 from app.settings_service import llm_client_for_task
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 from app.events import bus
+from app.killsweep_status import killsweep_retryable
 from app.llm.client import LLMClient, LLMError
 from app.tools.executor import ToolExecutor
 
@@ -32,17 +33,18 @@ def _now() -> datetime:
 router = APIRouter(prefix="/api", tags=["findings"])
 
 _ASSISTANT_WELCOME = (
-    "我可以回答这份报告的证据、危害、复现、修复问题。"
-    "你也可以让我再发一个请求或跑一个简短 curl 做补充验证。"
+    "我是这份漏洞的报告助手。可以直接点下面的快捷指令，或问证据够不够交、等级虚不虚、复现怎么写。"
+    "需要的话我也能再发一个请求做定向验证；润色后的标题/描述可以一键写进编辑器。"
 )
 _ASSISTANT_MSG_CAP = 100
 _ASSISTANT_WALL_TIMEOUT = float(os.environ.get("REPORT_ASSISTANT_WALL_TIMEOUT", "300"))
-_ASSISTANT_HISTORY_TURNS = int(os.environ.get("REPORT_ASSISTANT_HISTORY_TURNS", "6"))
-_ASSISTANT_HISTORY_CHARS = int(os.environ.get("REPORT_ASSISTANT_HISTORY_CHARS", "1000"))
+_ASSISTANT_HISTORY_TURNS = int(os.environ.get("REPORT_ASSISTANT_HISTORY_TURNS", "8"))
+_ASSISTANT_HISTORY_CHARS = int(os.environ.get("REPORT_ASSISTANT_HISTORY_CHARS", "1600"))
 _ASSISTANT_STATIC_PREFIX = (
-    "下一条消息是当前漏洞报告的裁剪上下文。已保留请求、响应、证据、攻击链和审核备注的关键头尾；"
-    "先基于上下文回答，只有用户明确要求复测时才调用工具。"
+    "下一条消息是当前漏洞报告的裁剪上下文。已保留请求、响应、证据、攻击链、人工改稿和审核备注；"
+    "先基于上下文回答。用户要润色报告时调用 propose_report_edits；只有明确要求复测时才用 http_request/run_shell。"
 )
+_ASSISTANT_SEVERITIES = ("严重", "高危", "中危", "低危")
 
 
 def _consume_future_exception(fut) -> None:
@@ -423,12 +425,14 @@ async def restore_archived(finding_id: str, session: AsyncSession = Depends(get_
 
 
 @router.get("/tasks/{task_id}/killsweeps")
-async def killsweep_list(task_id: str, only_hits: bool = True,
+async def killsweep_list(task_id: str, only_hits: bool = False,
+                         include_invalid: bool = False,
                          search: Optional[str] = Query(None, alias="q"),
                          session: AsyncSession = Depends(get_session)):
-    """通杀列：人工复审通过后由通杀 Hunter 产出的可通杀候选。
+    """通杀列：人工复审通过后，无论是否命中同款站、是否分析失败，都会进入此列。
 
-    默认只返回 is_killsweep=true 的命中项，避免把不可通杀分析噪音摆到主列表里。
+    only_hits=true 时只返回判定可通杀的命中项（旧行为）。
+    默认隐藏人工标记无效的记录。
     """
     q = (
         select(Killsweep, Finding.title)
@@ -437,7 +441,19 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
     )
     if only_hits:
         q = q.where(Killsweep.is_killsweep == True)  # noqa: E712
-    q = q.order_by(Killsweep.verified.desc(), Killsweep.asset_count.desc(), Killsweep.created_at.desc())
+    if not include_invalid:
+        q = q.where(Killsweep.status != "invalid")
+    q = q.order_by(
+        case(
+            (Killsweep.status == "analyzing", 0),
+            (Killsweep.status == "failed", 1),
+            (Killsweep.status == "cancelled", 2),
+            else_=3,
+        ),
+        Killsweep.is_killsweep.desc(),
+        Killsweep.verified.desc(),
+        Killsweep.created_at.desc(),
+    )
     rows = (await session.execute(q)).all()
     out = []
     for k, origin_title in rows:
@@ -454,12 +470,14 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
             "asset_count": k.asset_count,
             "edu_count": k.edu_count,
             "is_killsweep": k.is_killsweep,
+            "has_sites": bool(k.is_killsweep and ((k.affected_table or []) or k.verified_url)),
             "confidence": k.confidence,
             "verified_url": k.verified_url,
             "verified": k.verified,
             "affected_table": k.affected_table or [],
             "notes": k.notes,
             "status": k.status,
+            "retryable": killsweep_retryable(k.status, bool(k.is_killsweep)),
             "created_at": to_cst_iso(k.created_at),
             "updated_at": to_cst_iso(k.updated_at),
         }
@@ -486,13 +504,12 @@ async def invalidate_killsweep(task_id: str, killsweep_id: str,
                                session: AsyncSession = Depends(get_session)):
     """人工把通杀候选标记为无效。
 
-    默认通杀列表只返回 is_killsweep=true，因此置 false 后会立刻从主列表消失；
-    原始记录保留在 DB 里，便于后续审计或人工回捞。
+    默认通杀列表隐藏 status=invalid 的记录；原始记录保留在 DB 里，便于后续审计或人工回捞。
     """
     k = await session.get(Killsweep, killsweep_id)
     if not k or k.task_id != task_id:
         raise HTTPException(404, "通杀记录不存在")
-    if k.status == "invalid" or not k.is_killsweep:
+    if k.status == "invalid":
         return {"ok": True, "id": k.id, "status": k.status or "invalid", "already_invalid": True}
     reason = ((req.reason if req else "") or "人工标记无效").strip()[:500]
     now = _now()
@@ -522,6 +539,42 @@ async def invalidate_killsweep(task_id: str, killsweep_id: str,
     return {"ok": True, "id": k.id, "status": k.status}
 
 
+@router.post("/tasks/{task_id}/killsweeps/{killsweep_id}/retry")
+async def retry_killsweep(task_id: str, killsweep_id: str,
+                          session: AsyncSession = Depends(get_session)):
+    """重启通杀 Hunter：LLM/中转站抖动失败后，不必把复审改回 pending。"""
+    k = await session.get(Killsweep, killsweep_id)
+    if not k or k.task_id != task_id:
+        raise HTTPException(404, "通杀记录不存在")
+    if not killsweep_retryable(k.status, bool(k.is_killsweep)):
+        if k.status == "invalid":
+            raise HTTPException(400, "已标记无效的通杀记录不能重启")
+        raise HTTPException(400, "已有通杀命中，无需重启")
+    finding_id = (k.origin_finding_id or "").strip()
+    if not finding_id:
+        raise HTTPException(400, "缺少源漏洞，无法重启")
+    f = await session.get(Finding, finding_id)
+    if not f or f.task_id != task_id:
+        raise HTTPException(404, "源漏洞不存在")
+    from app.orchestrator import manager
+    runner = manager._runners.get(task_id)
+    if runner and finding_id in runner._killsweep_inflight:
+        raise HTTPException(409, "通杀正在运行，请稍后再试")
+    started = await manager.trigger_killsweep(task_id, finding_id)
+    if not started:
+        raise HTTPException(409, "通杀正在运行，请稍后再试")
+    session.add(TaskEvent(
+        task_id=task_id,
+        agent="killsweep",
+        kind="killsweep_retry",
+        level="info",
+        message=f"手动重启通杀分析：{k.product_name or k.vuln_summary or finding_id}",
+        payload={"killsweep_id": k.id, "finding_id": finding_id},
+    ))
+    await session.commit()
+    return {"ok": True, "id": k.id, "finding_id": finding_id, "status": "analyzing"}
+
+
 class ReportAssistantRequest(BaseModel):
     message: str
     history: list[dict] = []  # 兼容旧前端；优先使用 DB 持久化历史
@@ -542,6 +595,8 @@ REPORT_ASSISTANT_TOOLS = [
                     "data": {"type": "string"},
                     "json_body": {"type": "object"},
                     "follow_redirects": {"type": "boolean", "default": False},
+                    "confirm_destructive": {"type": "boolean", "default": False},
+                    "confirm_reason": {"type": "string"},
                 },
                 "required": ["url"],
             },
@@ -557,8 +612,32 @@ REPORT_ASSISTANT_TOOLS = [
                 "properties": {
                     "command": {"type": "string"},
                     "timeout": {"type": "integer", "default": 30},
+                    "confirm_destructive": {"type": "boolean", "default": False},
+                    "confirm_reason": {"type": "string"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_report_edits",
+            "description": (
+                "提出对当前报告字段的改稿，不会直接写入数据库。润色标题/描述/复现/PoC/影响范围/建议等级时必须调用。"
+                "前端可一键应用到编辑器。只填需要改的字段。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "affected_scope": {"type": "string"},
+                    "steps": {"type": "array", "items": {"type": "string"}},
+                    "poc": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["严重", "高危", "中危", "低危"]},
+                    "rationale": {"type": "string", "description": "改了什么、为什么这样改（给审核员看的短说明）"},
+                },
             },
         },
     },
@@ -569,28 +648,38 @@ def _llm_for_task(task: Task) -> LLMClient:
     return llm_client_for_task(task)
 
 
-def _assistant_context(f: Finding, r: Review | None) -> str:
+def _assistant_context(f: Finding, r: Review | None, task: Task | None = None) -> str:
     rv = r
+    edits = (rv.user_edits if rv else None) or {}
+    src_type = (getattr(task, "src_type", None) or "edusrc").strip() or "edusrc"
+    src_rules = (getattr(task, "src_rules", None) or "").strip()
+    title = edits.get("title") or f.title
+    description = edits.get("description") if edits.get("description") not in (None, "") else f.description
+    affected = edits.get("affected_scope") if edits.get("affected_scope") not in (None, "") else f.affected_scope
+    steps = edits.get("steps") if edits.get("steps") not in (None, "") else f.steps
+    poc = edits.get("poc") if edits.get("poc") not in (None, "") else f.poc
     return f"""# 当前漏洞报告完整上下文（你只围绕这一份报告工作）
-- 标题：{f.title}
+- SRC 类型：{src_type}
+- 任务附加规则：{_clip_text(src_rules or '（无）', 400)}
+- 标题：{title}
 - 类型：{f.vuln_type}
 - 目标 URL：{f.target_url}
 - 归属单位：{f.owner}
 - Worker 自评等级：{f.severity_claimed}
-- 审核结论：verdict={rv.verdict if rv else '-'} / 最终等级={rv.severity_final if rv else '-'} / 信度={rv.confidence if rv else '-'} / score={rv.score if rv else '-'}
+- 审核结论：verdict={rv.verdict if rv else '-'} / 最终等级={rv.severity_final if rv else '-'} / 人工等级={rv.user_severity if rv else '-'} / 信度={rv.confidence if rv else '-'} / score={rv.score if rv else '-'}
 - 是否复现：{rv.reproduced if rv else '-'} / 是否重复：{rv.is_duplicate if rv else '-'} / 是否在范围：{rv.in_scope if rv else '-'}
 
 ## 漏洞描述
-{_clip_text(f.description or '（无）', 1200)}
+{_clip_text(description or '（无）', 1200)}
 
 ## 影响范围
-{_clip_text(f.affected_scope or '（无）', 800)}
+{_clip_text(affected or '（无）', 800)}
 
 ## 复现步骤
-{_clip_json(f.steps or [], 1200)}
+{_clip_json(steps or [], 1200)}
 
 ## PoC
-{_clip_text(f.poc or '（无）', 1200)}
+{_clip_text(poc or '（无）', 1200)}
 
 ## 原始请求（取证包）
 {_clip_text(f.raw_request or '（无）', 1600)}
@@ -616,11 +705,18 @@ def _assistant_context(f: Finding, r: Review | None) -> str:
 
 
 _ASSISTANT_SYSTEM_PROMPT = (
-    "你是 AutoHunter 报告助手，只服务当前漏洞报告。基于上下文回答真实性、危害、复现、证据一致性、"
-    "误报、修复和 SRC 口径；上下文已有请求/响应/PoC/证据/攻击链，先回答，别轻易说信息不足。"
-    "仅当用户明确要求再发请求/curl/实测/看是否仍存在时，才用 http_request/run_shell 做少量定向验证；"
-    "禁止扫描、批量攻击、改密、改数据、破坏现场。工具后必须用中文说明状态码、关键响应、结论影响；"
-    "不能沉默或只说已完成。结论先行，简洁专业。"
+    "你是 AutoHunter 的漏洞报告助手，只服务当前这一份 finding。你同时是资深 SRC 审核员和报告编辑。\n"
+    "工作方式：\n"
+    "1. 先读上下文里的请求/响应/PoC/证据/攻击链。能回答就直接答，不要一上来调工具。\n"
+    "2. 结论先行：过审判断（能交 / 补证据再交 / 像误报）+ 一句理由，再写证据缺口和改稿建议。\n"
+    "3. 口径跟任务 SRC 类型走：edusrc 写清学校/系统/接口与可验证危害；enterprise 写清业务影响与利用门槛。\n"
+    "4. 用户要润色、改稿、重写标题/描述/复现/PoC 时，必须调用 propose_report_edits 给出可落地字段；"
+    "正文用中文说明改了什么。不要只口头说「建议改成…」却不调工具。\n"
+    "5. 仅当用户明确要求复测、看还在不在、或现有证据对不上时，才用 http_request/run_shell 做少量定向验证。"
+    "禁止扫描、爆破、改密、改数据、破坏现场。\n"
+    "6. 工具结果必须解读：状态码、关键响应片段、对结论的影响。禁止只说「已完成」。\n"
+    "7. 等级要校准：未授权读敏感数据/RCE/GetShell 才配严重；普通信息泄露不要抬到高危。\n"
+    "8. 用简洁中文 Markdown。最后用「下一步」列 1–3 条用户可以接着问的动作。"
 )
 
 
@@ -679,6 +775,9 @@ def _tool_call_summary(name: str, args: dict) -> str:
         return f"{method} {args.get('url', '')}".strip()
     if name == "run_shell":
         return (args.get("command") or "").strip()[:200]
+    if name == "propose_report_edits":
+        keys = [k for k in ("title", "description", "affected_scope", "steps", "poc", "severity") if args.get(k)]
+        return "改稿：" + ("、".join(keys) if keys else "字段草案")
     return name
 
 
@@ -686,6 +785,8 @@ def _tool_result_summary(name: str, result: dict) -> str:
     """把工具结果浓缩成一句关键信息，给前端实时展示。"""
     if not isinstance(result, dict):
         return str(result)[:200]
+    if result.get("needs_confirm"):
+        return f"需反思确认：{result.get('error', '')}"[:200]
     if result.get("blocked"):
         return f"已拦截：{result.get('error', '')}"[:200]
     if result.get("ok") is False:
@@ -701,14 +802,60 @@ def _tool_result_summary(name: str, result: dict) -> str:
         rc = result.get("return_code")
         extra = " · 超时" if result.get("timed_out") else ""
         return f"退出码 {rc if rc is not None else '?'} · 输出 {len(out)} 字节{extra}"
+    if name == "propose_report_edits":
+        if result.get("ok") is False:
+            return f"改稿未采纳：{result.get('error', '')}"[:200]
+        keys = list((result.get("edits") or {}).keys())
+        return "可一键应用：" + ("、".join(k for k in keys if k != "rationale") or "草案")
     return "完成"
 
 
-def _build_assistant_messages(f: Finding, r: Review | None, req: ReportAssistantRequest) -> list[dict]:
+def _normalize_proposed_edits(args: dict) -> dict:
+    """校验助手提出的改稿；空草案视为失败，避免前端出现空的一键应用。"""
+    if not isinstance(args, dict):
+        return {"ok": False, "error": "改稿参数无效"}
+    edits: dict = {}
+    title = str(args.get("title") or "").strip()
+    if title:
+        edits["title"] = title[:200]
+    description = str(args.get("description") or "").strip()
+    if description:
+        edits["description"] = description[:8000]
+    affected = str(args.get("affected_scope") or "").strip()
+    if affected:
+        edits["affected_scope"] = affected[:4000]
+    poc = str(args.get("poc") or "").strip()
+    if poc:
+        edits["poc"] = poc[:8000]
+    raw_steps = args.get("steps")
+    if isinstance(raw_steps, str):
+        raw_steps = [line.strip() for line in raw_steps.splitlines()]
+    if isinstance(raw_steps, list):
+        steps = [str(s).strip() for s in raw_steps if str(s).strip()]
+        if steps:
+            edits["steps"] = steps[:40]
+    severity = str(args.get("severity") or "").strip()
+    if severity in _ASSISTANT_SEVERITIES:
+        edits["severity"] = severity
+    rationale = str(args.get("rationale") or "").strip()
+    if rationale:
+        edits["rationale"] = rationale[:500]
+    payload = {k: v for k, v in edits.items() if k != "rationale"}
+    if not payload:
+        return {"ok": False, "error": "没有可应用的改稿字段"}
+    return {"ok": True, "edits": edits}
+
+
+def _build_assistant_messages(
+    f: Finding,
+    r: Review | None,
+    req: ReportAssistantRequest,
+    task: Task | None = None,
+) -> list[dict]:
     messages: list[dict] = [
         {"role": "system", "content": _ASSISTANT_SYSTEM_PROMPT},
         {"role": "user", "content": _ASSISTANT_STATIC_PREFIX},
-        {"role": "user", "content": _assistant_context(f, r)},
+        {"role": "user", "content": _assistant_context(f, r, task)},
     ]
     for h in (req.history or [])[-_ASSISTANT_HISTORY_TURNS:]:
         role = h.get("role")
@@ -754,7 +901,7 @@ def _run_report_assistant(
     try:
         llm = _llm_for_task(task)
         executor = ToolExecutor(f"report_assistant_{f.target_url or f.id}", cancel_event=cancel_event)
-        messages = _build_assistant_messages(f, r, req)
+        messages = _build_assistant_messages(f, r, req, task)
         return _run_report_assistant_loop(llm, executor, messages, tool_logs, cancel_event, _emit)
     except (LLMError, RuntimeError) as e:
         msg = _assistant_unavailable_message(e)
@@ -773,9 +920,10 @@ def _run_report_assistant_loop(
     cancel_event: threading.Event,
     emit,
 ) -> dict:
+    suggested_edits: dict | None = None
     for round_idx in range(_ASSISTANT_MAX_ROUNDS):
         if cancel_event.is_set():
-            return {"answer": "报告助手操作已超时或被取消。", "tool_logs": tool_logs}
+            return {"answer": "已停止。", "tool_logs": tool_logs, "suggested_edits": suggested_edits}
 
         # 最后一轮强制收口：不再给工具，逼模型基于已有信息给出文字结论，避免「执行完就沉默」。
         last_round = round_idx == _ASSISTANT_MAX_ROUNDS - 1
@@ -831,12 +979,12 @@ def _run_report_assistant_loop(
                 )
             if not answer:
                 answer = _fallback_answer(tool_logs)
-            emit({"type": "final", "text": answer})
-            return {"answer": answer, "tool_logs": tool_logs}
+            emit({"type": "final", "text": answer, "suggested_edits": suggested_edits})
+            return {"answer": answer, "tool_logs": tool_logs, "suggested_edits": suggested_edits}
 
         for tc in tool_calls:
             if cancel_event.is_set():
-                return {"answer": "报告助手操作已超时或被取消。", "tool_logs": tool_logs}
+                return {"answer": "已停止。", "tool_logs": tool_logs, "suggested_edits": suggested_edits}
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except Exception:
@@ -857,6 +1005,8 @@ def _run_report_assistant_loop(
                         headers=args.get("headers"), data=args.get("data"),
                         json_body=args.get("json_body"), follow_redirects=args.get("follow_redirects", False),
                         timeout=20,
+                        confirm_destructive=args.get("confirm_destructive", False),
+                        confirm_reason=args.get("confirm_reason") or "",
                     )
             elif tc.function.name == "run_shell":
                 command = _clean_shell_command(args.get("command") or "")
@@ -866,7 +1016,16 @@ def _run_report_assistant_loop(
                 if not command:
                     result = {"ok": False, "error": "run_shell 缺少 command"}
                 else:
-                    result = executor.run_shell(command, timeout=timeout)
+                    result = executor.run_shell(
+                        command, timeout=timeout,
+                        confirm_destructive=args.get("confirm_destructive", False),
+                        confirm_reason=args.get("confirm_reason") or "",
+                    )
+            elif tc.function.name == "propose_report_edits":
+                result = _normalize_proposed_edits(args)
+                if result.get("ok") and result.get("edits"):
+                    suggested_edits = result["edits"]
+                    emit({"type": "suggested_edits", "edits": suggested_edits})
             else:
                 result = {"ok": False, "error": f"未知工具: {tc.function.name}"}
             tool_logs.append({"tool": tc.function.name, "args": args, "result": result})
@@ -882,8 +1041,8 @@ def _run_report_assistant_loop(
                 })
 
     answer = _fallback_answer(tool_logs)
-    emit({"type": "final", "text": answer})
-    return {"answer": answer, "tool_logs": tool_logs}
+    emit({"type": "final", "text": answer, "suggested_edits": suggested_edits})
+    return {"answer": answer, "tool_logs": tool_logs, "suggested_edits": suggested_edits}
 
 
 def _fallback_answer(tool_logs: list[dict]) -> str:
@@ -970,6 +1129,7 @@ def _sse(event: dict) -> str:
 
 @router.post("/findings/{finding_id}/assistant/stream")
 async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
+                                  request: Request,
                                   session: AsyncSession = Depends(get_session)):
     """流式版报告助手：用 SSE 实时推送『分析 / 调用工具 / 工具结果 / 最终答复』每一步。"""
     msg = (req.message or "").strip()
@@ -1018,19 +1178,33 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
         final_answer = ""
         tool_count = 0
         timed_out = False
+        client_gone = False
+        suggested_edits = None
+        deadline = loop.time() + _ASSISTANT_WALL_TIMEOUT
         try:
             yield _sse({"type": "start"})
             while True:
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=_ASSISTANT_WALL_TIMEOUT)
-                except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    cancel_event.set()
+                    client_gone = True
+                    break
+                remain = deadline - loop.time()
+                if remain <= 0:
                     cancel_event.set()
                     timed_out = True
                     break
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=min(1.0, remain))
+                except asyncio.TimeoutError:
+                    continue
                 if ev.get("type") == "__done__":
                     break
                 if ev.get("type") == "final":
                     final_answer = ev.get("text") or final_answer
+                    if ev.get("suggested_edits"):
+                        suggested_edits = ev["suggested_edits"]
+                if ev.get("type") == "suggested_edits" and ev.get("edits"):
+                    suggested_edits = ev["edits"]
                 if ev.get("type") == "tool_call":
                     tool_count += 1
                 yield _sse(ev)
@@ -1040,6 +1214,7 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
                 result = await asyncio.wait_for(asyncio.shield(future), timeout=5)
                 final_answer = result.get("answer") or final_answer
                 tool_count = len(result.get("tool_logs") or []) or tool_count
+                suggested_edits = result.get("suggested_edits") or suggested_edits
             except (LLMError, RuntimeError) as e:
                 if not final_answer:
                     final_answer = _assistant_unavailable_message(e)
@@ -1051,6 +1226,8 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
                         final_answer = _assistant_unavailable_message(exc)
             if timed_out and not final_answer:
                 final_answer = f"报告助手执行超时（>{int(_ASSISTANT_WALL_TIMEOUT)}s），已触发底层工具清理。"
+            if client_gone and not final_answer:
+                final_answer = "已停止。"
             if not final_answer:
                 final_answer = "已完成。"
             suffix = f"\n\n（已执行 {tool_count} 个辅助动作）" if tool_count else ""
@@ -1065,7 +1242,12 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
                 await session.commit()
             except Exception:
                 await session.rollback()
-            yield _sse({"type": "done", "answer": stored, "tool_count": tool_count})
+            yield _sse({
+                "type": "done",
+                "answer": stored,
+                "tool_count": tool_count,
+                "suggested_edits": suggested_edits,
+            })
 
     return StreamingResponse(
         _gen(),
@@ -1142,7 +1324,9 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
         raise HTTPException(404, "漏洞不存在")
     r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
     tgt = await session.get(Target, f.target_id)
-    ok, suffix = apply_deepen(session, f, tgt, directive, source="user")
+    task_row = await session.get(Task, f.task_id) if f.task_id else None
+    ok, suffix = apply_deepen(session, f, tgt, directive, source="user",
+                              cap=deepen_cap_for(task_row))
     if not ok:
         # 深挖失败：回滚一切改动，绝不把 user_status 污染成 deepening，
         # 否则该漏洞会从复审/驳回列表消失又进不了深挖，变成查不到的"幽灵数据"。

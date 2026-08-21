@@ -36,10 +36,13 @@
 | <img src="https://avatars.githubusercontent.com/u/56070426?v=4&s=64" width="40" height="40" alt="2234223561" /> | [@2234223561](https://github.com/2234223561) | Agent 可见性与运行中可控 |
 | <img src="https://avatars.githubusercontent.com/u/121371300?v=4&s=64" width="40" height="40" alt="SD9ard3n" /> | [@SD9ard3n](https://github.com/SD9ard3n) | 模型端点池 |
 | <img src="https://avatars.githubusercontent.com/u/112743803?v=4&s=64" width="40" height="40" alt="YiKongk" /> | [@YiKongk](https://github.com/YiKongk) | 自定义 FOFA API |
-| <img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=64" width="40" height="40" alt="1diot9" /> | [@1diot9](https://github.com/1diot9) | Contributor |
+| <img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=64" width="40" height="40" alt="1diot9" /> | [@1diot9](https://github.com/1diot9) | 工作目录自动清理 |
 | <img src="https://avatars.githubusercontent.com/u/310190087?v=4&s=64" width="40" height="40" alt="qianchongceng0-cyber" /> | [@qianchongceng0-cyber](https://github.com/qianchongceng0-cyber) | Contributor |
 | <img src="https://avatars.githubusercontent.com/u/277248294?v=4&s=64" width="40" height="40" alt="jacketser" /> | [@jacketser](https://github.com/jacketser) | 编辑弹窗失焦修复 · 活动流时间线稳定 |
 | <img src="https://avatars.githubusercontent.com/u/102737018?v=4&s=64" width="40" height="40" alt="DmcforSpc" /> | [@DmcforSpc](https://github.com/DmcforSpc) | Kimi Code 端点 temperature 兼容 |
+| <img src="https://avatars.githubusercontent.com/u/78614185?v=4&s=64" width="40" height="40" alt="moliyu1101" /> | [@moliyu1101](https://github.com/moliyu1101) | 黑洞 DNS 防护 · worker 并发位超时 |
+| <img src="https://avatars.githubusercontent.com/u/90189362?v=4&s=64" width="40" height="40" alt="Saide-sec" /> | [@Saide-sec](https://github.com/Saide-sec) | 看板分析 · 命令面板 |
+| <img src="https://avatars.githubusercontent.com/u/110716280?v=4&s=64" width="40" height="40" alt="tf748i5gf5t" /> | [@tf748i5gf5t](https://github.com/tf748i5gf5t) | 审核写证明事件参数冲突修复 |
 
 <!-- 新贡献者请在上一行表格末尾追加，保持格式一致 -->
 

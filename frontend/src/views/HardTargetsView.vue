@@ -1,7 +1,9 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
+
+defineOptions({ name: "HardTargetsView" });
 
 const router = useRouter();
 const rows = ref([]);
@@ -83,6 +85,9 @@ watch(searchDraft, (v) => {
 });
 
 onMounted(load);
+onActivated(() => {
+  if (rows.value.length) load();
+});
 </script>
 
 <template>

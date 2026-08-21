@@ -201,6 +201,9 @@ def compact_messages(messages: list[dict[str, Any]], cur_round: int) -> list[dic
             if summ is None:
                 summ = summarize_tool_content(m.get("content", ""), tool)
                 m["_summary"] = summ
+            # 越窗后丢掉原始大 body，只留摘要，避免对话历史在进程里只增不减。
+            if m.get("content") != summ:
+                m["content"] = summ
             clean["content"] = summ
         out.append(clean)
     return out

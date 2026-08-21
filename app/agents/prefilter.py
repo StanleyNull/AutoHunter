@@ -23,7 +23,7 @@ import httpx
 # ---------------------------------------------------------------------------
 # 黑洞 DNS 防护：autodiscover 等记录常解析出几十个 IP（大量 IPv6 黑洞地址），
 # socket.create_connection 会逐个地址试到超时，单次探活可卡几分钟，进而把
-# 派发循环整批卡死。这里在探活期间把解析限制为 IPv4 前 2 个地址
+# 派发循环整批卡死。探活期间把解析限制为 IPv4 前 2 个地址
 # （引用计数式临时替换，多线程安全；IPv6-only 域名自动回退原始解析）。
 # ---------------------------------------------------------------------------
 _ORIG_GETADDRINFO = socket.getaddrinfo
@@ -55,7 +55,6 @@ def capped_resolution():
             _GA_DEPTH -= 1
             if _GA_DEPTH == 0:
                 socket.getaddrinfo = _ORIG_GETADDRINFO
-
 
 # CDN / 对象存储 / 静态托管 域名特征（命中即跳过）
 _CDN_MARKERS = (

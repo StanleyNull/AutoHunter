@@ -156,20 +156,21 @@ async function req(method, url, body, retriedAuth = false, overrideToken = "") {
 
 /**
  * 消费一个 SSE 流式接口。onEvent 收到每个解析出的事件对象。
+ * signal 可选（AbortController），用于停止报告助手生成。
  * 返回 Promise，在流结束时 resolve。
  */
-async function streamSSE(url, body, onEvent, retriedAuth = false) {
+async function streamSSE(url, body, onEvent, retriedAuth = false, signal = null) {
   const headers = { "Content-Type": "application/json" };
   const token = apiToken();
   if (token) headers["X-Autohunter-Token"] = token;
-  const res = await fetch(base + url, { method: "POST", headers, body: JSON.stringify(body) });
+  const res = await fetch(base + url, { method: "POST", headers, body: JSON.stringify(body), signal });
 
   if (res.status === 401 && !retriedAuth) {
     const newToken = await openTokenModal("auth");
     if (newToken) {
       setApiToken(newToken);
       await loadAuthRole();
-      return streamSSE(url, body, onEvent, true);
+      return streamSSE(url, body, onEvent, true, signal);
     }
   }
   if (res.status === 403) throw new Error("当前令牌不允许此操作");
@@ -209,6 +210,62 @@ function qs(params = {}) {
   return out ? `?${out}` : "";
 }
 
+async function downloadFile(method, url) {
+  const headers = {};
+  const token = apiToken();
+  if (token) headers["X-Autohunter-Token"] = token;
+  const res = await fetch(base + url, { method, headers });
+  if (res.status === 403) throw new Error("只读令牌不允许此操作");
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  const blob = await res.blob();
+  let filename = "autohunter-backup.tar.gz";
+  const cd = res.headers.get("content-disposition") || "";
+  const star = cd.match(/filename\*=UTF-8''([^;]+)/i);
+  const plain = cd.match(/filename=\"?([^\";]+)\"?/i);
+  if (star) filename = decodeURIComponent(star[1]);
+  else if (plain) filename = plain[1];
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 2000);
+}
+
+async function uploadUiWallpaper(file) {
+  const headers = {};
+  const token = apiToken();
+  if (token) headers["X-Autohunter-Token"] = token;
+  const body = new FormData();
+  body.append("file", file, file.name || "wallpaper.jpg");
+  const res = await fetch(base + "/api/settings/ui/wallpaper", { method: "POST", headers, body });
+  const text = await res.text();
+  if (res.status === 403) throw new Error("只读令牌不允许此操作");
+  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  try { return JSON.parse(text); }
+  catch { throw new Error(text || "上传失败"); }
+}
+
+async function uploadBackup(file, includeWork) {
+  const headers = {};
+  const token = apiToken();
+  if (token) headers["X-Autohunter-Token"] = token;
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch(base + `/api/backup/restore${qs({ include_work: includeWork })}`, {
+    method: "POST",
+    headers,
+    body,
+  });
+  const text = await res.text();
+  if (res.status === 403) throw new Error("只读令牌不允许此操作");
+  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  try { return JSON.parse(text); }
+  catch { return { ok: true, message: text }; }
+}
+
 export const api = {
   listTasks: () => req("GET", "/api/tasks"),
   createTask: (data) => req("POST", "/api/tasks", data),
@@ -237,9 +294,11 @@ export const api = {
   killsweeps: (id, q) => req("GET", `/api/tasks/${id}/killsweeps${qs({ q })}`),
   invalidateKillsweep: (taskId, killsweepId, reason) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/invalidate`, { reason }),
+  retryKillsweep: (taskId, killsweepId) =>
+    req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/retry`),
   finding: (id) => req("GET", `/api/findings/${id}`),
-  reportAssistantStream: (id, message, onEvent) =>
-    streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent),
+  reportAssistantStream: (id, message, onEvent, signal) =>
+    streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent, false, signal),
   userReview: (id, data) => req("PATCH", `/api/results/${id}`, data),
   deepen: (id, directive) => req("POST", `/api/results/${id}/deepen`, { directive }),
   getSettings: () => req("GET", "/api/settings"),
@@ -256,6 +315,15 @@ export const api = {
   workdirStats: () => req("GET", "/api/settings/workdir/stats"),
   workdirCleanup: (retentionDays, dryRun = true) =>
     req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: dryRun })}`),
+  backupStatus: () => req("GET", "/api/backup/status"),
+  backupSnapshot: () => req("POST", "/api/backup/snapshot"),
+  downloadBackupExport: (includeWork = false) =>
+    downloadFile("POST", `/api/backup/export${qs({ include_work: includeWork })}`),
+  downloadBackupSnapshot: (name) =>
+    downloadFile("GET", `/api/backup/snapshots/${encodeURIComponent(name)}`),
+  restoreBackup: (file, includeWork = false) => uploadBackup(file, includeWork),
+  uploadUiWallpaper: (file) => uploadUiWallpaper(file),
+  deleteUiWallpaper: () => req("DELETE", "/api/settings/ui/wallpaper"),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit) =>

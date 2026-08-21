@@ -1,6 +1,8 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 import { api, canWrite } from "../api.js";
+
+defineOptions({ name: "IntelView" });
 
 const stats = ref({ total: 0, by_kind: {}, verified: 0, reused: 0 });
 const rows = ref([]);
@@ -134,6 +136,9 @@ watch(searchDraft, (v) => {
 });
 
 onMounted(reload);
+onActivated(() => {
+  if (rows.value.length) reload();
+});
 </script>
 
 <template>

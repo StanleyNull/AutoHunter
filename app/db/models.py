@@ -59,6 +59,7 @@ class Task(Base):
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
+    deepen_cap: Mapped[int] = mapped_column(Integer, default=2)         # 单目标深挖回炉上限（人工+AI+lead）
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -222,7 +223,7 @@ class Killsweep(Base):
     # 既用于前端展示，也会进入 worker 查重上下文，避免同学校同通杀洞反复提交。
     affected_table: Mapped[list] = mapped_column(JSON, default=list)
     notes: Mapped[str] = mapped_column(Text, default="")                 # 分析结论/批量建议
-    # analyzing / done / failed
+    # analyzing / done / failed / cancelled / invalid
     status: Mapped[str] = mapped_column(String(20), default="analyzing", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
@@ -285,4 +286,5 @@ class SystemSettings(Base):
     fofa: Mapped[dict] = mapped_column(JSON, default=dict)      # key/max_pages/page_size/default_intent_mode
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
+    ui: Mapped[dict] = mapped_column(JSON, default=dict)        # 外观：主题色 / 背景图元数据
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

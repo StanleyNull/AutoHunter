@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 
 from app.engines.censys import _hit_row, _is_legacy_key
+from app.engines.hunter import extract_hunter_host
 from app.engines.quake import extract_quake_row
 from app.engines.translator import looks_like_fofa_syntax, looks_like_native_syntax
 
@@ -56,6 +57,38 @@ class CensysParseTests(unittest.TestCase):
         self.assertEqual(row[0], "www.example.edu.cn")
         self.assertEqual(row[2], "443")
         self.assertEqual(row[3], "Login")
+
+
+class HunterParseTests(unittest.TestCase):
+    def test_prefers_domain(self):
+        self.assertEqual(
+            extract_hunter_host({
+                "domain": "yyxt.example.edu.cn",
+                "url": "https://203.0.113.10",
+                "ip": "203.0.113.10",
+            }),
+            "yyxt.example.edu.cn",
+        )
+
+    def test_falls_back_to_url_host_when_domain_empty(self):
+        self.assertEqual(
+            extract_hunter_host({
+                "domain": "",
+                "url": "https://luqu.example.edu.cn",
+                "ip": "203.0.113.10",
+            }),
+            "luqu.example.edu.cn",
+        )
+
+    def test_falls_back_to_ip_when_only_ip_url(self):
+        self.assertEqual(
+            extract_hunter_host({
+                "domain": "",
+                "url": "https://203.0.113.10",
+                "ip": "203.0.113.10",
+            }),
+            "203.0.113.10",
+        )
 
 
 class NativeWrapGuardTests(unittest.TestCase):

@@ -2,10 +2,24 @@
 from __future__ import annotations
 
 import base64
+from urllib.parse import urlparse
 
 import httpx
 
 from app.engines.base import EngineResult, SearchEngine, register_engine
+
+
+def extract_hunter_host(item: dict) -> str:
+    """Hunter 很多条目 domain 为空，只给 url + ip。优先域名，其次 URL 主机，最后 IP。"""
+    domain = str(item.get("domain") or "").strip()
+    if domain:
+        return domain
+    url = str(item.get("url") or "").strip()
+    if url:
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+        if parsed.hostname:
+            return parsed.hostname
+    return str(item.get("ip") or "").strip()
 
 
 @register_engine
@@ -70,7 +84,7 @@ class HunterEngine(SearchEngine):
         items = payload.get("arr") or []
         results = []
         for item in items:
-            host = item.get("domain") or item.get("ip", "")
+            host = extract_hunter_host(item)
             results.append([
                 host,
                 item.get("ip", ""),

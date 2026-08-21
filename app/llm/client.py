@@ -65,6 +65,45 @@ def _api_root(base_url: str) -> str:
     return base
 
 
+_VERSIONED_API_ROOT_RE = re.compile(r"/v\d+$", re.IGNORECASE)
+
+
+def _is_versioned_api_root(base_url: str) -> bool:
+    """已经是带版本号的 API 根（/v1 /v3 /v4 …），不要再插一层 /v1。"""
+    return bool(_VERSIONED_API_ROOT_RE.search(str(base_url or "").rstrip("/")))
+
+
+def _ensure_versioned_api_root(base_url: str) -> str:
+    """OpenAI SDK 会在 base 后直接拼 /chat/completions，不再自动加 /v1。
+
+    DeepSeek 这类根地址补 /v1；智谱/方舟 Coding Plan 已是 /v4 /v3，原样保留。
+    """
+    root = _api_root(base_url)
+    if not root:
+        return ""
+    if _is_versioned_api_root(root):
+        return root
+    return f"{root}/v1"
+
+
+def llm_request_url(base_url: str, protocol: str) -> str:
+    """拼出 chat/completions 或 messages 的最终请求 URL。"""
+    root = _ensure_versioned_api_root(base_url)
+    proto = str(protocol or "").strip().lower()
+    path = "messages" if proto in {"anthropic_messages", "anthropic", "messages"} else "chat/completions"
+    return f"{root}/{path}" if root else ""
+
+
+def llm_models_url(base_url: str) -> str:
+    """OpenAI 兼容 GET /models。已带 /vN 的 Coding Plan 根不再插 /v1。"""
+    root = _api_root(base_url)
+    if not root:
+        return ""
+    if root.lower().endswith("/models"):
+        return root
+    return f"{_ensure_versioned_api_root(root)}/models"
+
+
 def _is_kimi_coding_endpoint(base_url: str) -> bool:
     """Kimi Code 专用端点（https://api.kimi.com/coding/v1，k3 等思考模型）。
 
@@ -212,6 +251,37 @@ class LLMError(RuntimeError):
     def __str__(self) -> str:
         # 前端/事件流只展示短文案；完整 diagnostic 留给后端日志
         return super().__str__()
+
+    def copy_text(self) -> str:
+        """给用户一键复制的完整错误（已脱敏），含 kind/status/上游原文。"""
+        lines = [
+            f"kind={self.kind}",
+            f"status={self.status if self.status is not None else '-'}",
+            f"code={self.code or '-'}",
+            f"message={super().__str__()}",
+        ]
+        if self.detail:
+            lines.append(f"detail={self.detail}")
+        if self.retry_after:
+            lines.append(f"retry_after={self.retry_after}")
+        return "\n".join(lines)
+
+
+def llm_error_event_fields(error: Exception) -> dict[str, Any]:
+    """事件流/复制按钮用的 LLM 错误字段，短文案 + 可复制原文分开。"""
+    if isinstance(error, LLMError):
+        return {
+            "error": str(error),
+            "error_kind": error.kind,
+            "status": error.status,
+            "code": error.code or "",
+            "detail": error.detail or "",
+            "diagnostic": error.diagnostic(),
+            "error_copy": error.copy_text(),
+            "retry_after": error.retry_after,
+        }
+    text = str(error)
+    return {"error": text, "error_copy": text}
 
 
 def _sanitize_error_detail(text: str, limit: int = 1200) -> str:
@@ -981,7 +1051,7 @@ class LLMClient:
         # 关闭 SDK 内置重试，自己控制重试节奏与日志；设请求超时兜住挂起。
         # default_headers 换 UA + 抹 x-stainless-*，绕过中转/WAF 对 SDK UA 的 403 封禁。
         return OpenAI(
-            base_url=_api_root(self.config.base_url), api_key=self.config.api_key,
+            base_url=_ensure_versioned_api_root(self.config.base_url), api_key=self.config.api_key,
             timeout=_REQUEST_TIMEOUT, max_retries=0,
             default_headers=_llm_default_headers(self.config.model, self.config.base_url),
             **({"http_client": http_client} if http_client else {}),
@@ -1137,12 +1207,16 @@ class LLMClient:
         if not self.on_provider_failure:
             return
         try:
+            fields = llm_error_event_fields(error)
             self.on_provider_failure({
                 "base_url": self.config.base_url,
                 "model": self.config.model,
-                "kind": getattr(error, "kind", ""),
-                "status": getattr(error, "status", None),
+                "kind": fields.get("error_kind") or getattr(error, "kind", ""),
+                "status": fields.get("status"),
                 "error": _sanitize_error_detail(str(error), 500),
+                "detail": fields.get("detail") or "",
+                "diagnostic": fields.get("diagnostic") or "",
+                "error_copy": fields.get("error_copy") or str(error),
                 "provider_status": state.get("status"),
                 "transition": state.get("transition"),
                 "consecutive_failures": state.get("consecutive_failures", 0),
@@ -1320,10 +1394,7 @@ class LLMClient:
         raise last_exc  # type: ignore[misc]
 
     def _messages_url(self) -> str:
-        base = _api_root(self.config.base_url)
-        if base.endswith("/v1"):
-            return f"{base}/messages"
-        return f"{base}/v1/messages"
+        return llm_request_url(self.config.base_url, "anthropic_messages")
 
     @staticmethod
     def _to_messages_tools(tools: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
