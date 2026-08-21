@@ -1073,9 +1073,9 @@ async function runCleanup() {
           <label class="full">色相
             <input type="range" min="0" max="360" :value="uiPrefs.accentHue" @input="setAccentHue($event.target.value)" />
           </label>
-          <label class="full">背景压暗
-            <input type="range" min="0.4" max="0.9" step="0.01" :value="uiPrefs.wallpaperDim" @input="persistUi({ wallpaperDim: Number($event.target.value) })" />
-            <small class="muted">值越大，背景越淡、字越好读</small>
+          <label class="full">背景压暗 {{ Math.round(uiPrefs.wallpaperDim * 100) }}%
+            <input type="range" min="0.08" max="0.62" step="0.01" :value="uiPrefs.wallpaperDim" @input="persistUi({ wallpaperDim: Number($event.target.value) })" />
+            <small class="muted">往左拖图更清楚，往右拖字更好读</small>
           </label>
           <div class="appearance-drop">
             <label class="full">背景图链接

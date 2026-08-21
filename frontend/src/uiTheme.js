@@ -19,7 +19,7 @@ export const DEFAULTS = {
   wallpaperKind: "none",
   wallpaperUrl: "",
   wallpaperFit: "cover",
-  wallpaperDim: 0.72,
+  wallpaperDim: 0.28,
 };
 
 let appliedSrc = "";
@@ -34,7 +34,8 @@ function min360(n) { return Math.max(0, Math.min(360, n)); }
 function clampDim(d) {
   const n = Number(d);
   if (!Number.isFinite(n)) return DEFAULTS.wallpaperDim;
-  return Math.max(0.35, Math.min(0.92, n));
+  if (n >= 0.65) return DEFAULTS.wallpaperDim;
+  return Math.max(0.08, Math.min(0.62, n));
 }
 
 export function prefsFromApi(ui = {}) {

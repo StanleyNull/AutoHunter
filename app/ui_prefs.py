@@ -23,7 +23,7 @@ DEFAULT_UI = {
     "wallpaperKind": "none",
     "wallpaperUrl": "",
     "wallpaperFit": "cover",
-    "wallpaperDim": 0.72,
+    "wallpaperDim": 0.28,
     "saved": False,
 }
 
@@ -95,7 +95,10 @@ def _clamp_dim(value: Any) -> float:
         n = float(value)
     except (TypeError, ValueError):
         return DEFAULT_UI["wallpaperDim"]
-    return max(0.35, min(0.92, n))
+    # 旧默认 0.72 会把图盖死，读出来改成能看见的值
+    if n >= 0.65:
+        n = DEFAULT_UI["wallpaperDim"]
+    return max(0.08, min(0.62, n))
 
 
 def _safe_url(value: Any) -> str:

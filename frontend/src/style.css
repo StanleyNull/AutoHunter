@@ -49,7 +49,7 @@
   --radius: 10px;
   --radius-sm: 7px;
 
-  --wallpaper-dim: 0.72;
+  --wallpaper-dim: 0.28;
   --wallpaper-fit: cover;
 
   /* 语义 z-index 阶 */
@@ -128,7 +128,7 @@ body::before {
 }
 
 .ah-wallpaper {
-  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background-position: center;
   background-repeat: no-repeat;
   background-size: var(--wallpaper-fit);
@@ -141,10 +141,37 @@ body::before {
   background: color-mix(in oklch, var(--bg) calc(var(--wallpaper-dim) * 100%), transparent);
 }
 html[data-wallpaper="on"] .ah-wallpaper { opacity: 1; }
+html[data-wallpaper="on"],
 html[data-wallpaper="on"] body {
+  background-color: transparent;
   background-image: none;
 }
-html[data-wallpaper="on"] body::before { opacity: .18; }
+html[data-wallpaper="on"] body::before {
+  z-index: 0;
+  opacity: .08;
+}
+html[data-wallpaper="on"] main,
+html[data-wallpaper="on"] .app-credit {
+  position: relative;
+  z-index: 1;
+}
+html[data-wallpaper="on"] .topbar {
+  background: color-mix(in oklch, var(--nav) 78%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+html[data-wallpaper="on"] {
+  --bg: oklch(20% 0.012 255 / 0.16);
+  --surface: oklch(24% 0.013 255 / 0.84);
+  --surface-2: oklch(28% 0.014 255 / 0.88);
+  --nav: oklch(22% 0.013 255 / 0.80);
+}
+html[data-wallpaper="on"][data-theme="light"] {
+  --bg: oklch(98.5% 0.003 255 / 0.18);
+  --surface: oklch(100% 0 0 / 0.86);
+  --surface-2: oklch(97% 0.004 255 / 0.90);
+  --nav: oklch(96.5% 0.005 255 / 0.84);
+}
 @media (prefers-reduced-motion: reduce) {
   .ah-wallpaper { transition: none; }
 }
