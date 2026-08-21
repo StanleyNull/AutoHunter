@@ -1195,20 +1195,36 @@ main {
 .appearance-swatches {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
-.appearance-swatch {
-  width: 36px; height: 36px; padding: 0; border-radius: 999px;
+.appearance-swatches .appearance-swatch {
+  width: 36px; height: 36px; min-width: 36px; padding: 0; flex: none;
+  border-radius: 999px;
   border: 2px solid var(--border);
-  background: oklch(62% 0.14 var(--swatch-h));
+  background: oklch(62% 0.14 var(--swatch-h, 235deg));
+  background-color: oklch(62% 0.14 var(--swatch-h, 235deg));
+  transition: border-color .15s ease, box-shadow .15s ease, filter .15s ease;
 }
-.appearance-swatch.active {
+.appearance-swatches .appearance-swatch:hover,
+.appearance-swatches .appearance-swatch:active {
+  background: oklch(66% 0.16 var(--swatch-h, 235deg));
+  background-color: oklch(66% 0.16 var(--swatch-h, 235deg));
+  border-color: var(--ink);
+  filter: brightness(1.06);
+}
+.appearance-swatches .appearance-swatch.active {
   border-color: var(--ink);
   box-shadow: 0 0 0 3px var(--accent-bg);
 }
 .appearance-swatches input[type="color"] {
-  width: 36px; height: 36px; padding: 0; border: 2px solid var(--border);
-  border-radius: 999px; background: transparent; cursor: pointer;
+  width: 36px; height: 36px; min-width: 36px; max-width: 36px;
+  flex: none; padding: 0; margin: 0;
+  border: 2px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
 }
 .appearance-preview {
   min-height: 120px;

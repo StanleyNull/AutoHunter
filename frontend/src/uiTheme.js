@@ -106,12 +106,8 @@ export function applyWallpaper(prefs) {
   } else if (prefs.wallpaperKind === "file") {
     src = prefs.wallpaperSrc || "/api/settings/ui/wallpaper";
   }
-  if (src !== appliedSrc) {
-    appliedSrc = src;
-    setWallpaperEl(src);
-  } else if (!src) {
-    setWallpaperEl("");
-  }
+  appliedSrc = src;
+  setWallpaperEl(src);
 }
 
 export async function applyUi(prefs) {
@@ -121,16 +117,16 @@ export async function applyUi(prefs) {
   return prefs;
 }
 
-export function hexToHue(hex) {
+export function hexToHue(hex, fallback = DEFAULTS.accentHue) {
   const m = String(hex || "").trim().match(/^#?([0-9a-f]{6})$/i);
-  if (!m) return DEFAULTS.accentHue;
+  if (!m) return fallback;
   const n = parseInt(m[1], 16);
   const r = ((n >> 16) & 255) / 255;
   const g = ((n >> 8) & 255) / 255;
   const b = (n & 255) / 255;
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
-  if (max === min) return 0;
+  if (max - min < 0.08) return fallback;
   const d = max - min;
   let h = 0;
   if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));

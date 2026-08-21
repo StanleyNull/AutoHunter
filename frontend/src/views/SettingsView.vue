@@ -744,6 +744,16 @@ const settingsTab = ref("appearance");
 const uiPrefs = ref(loadUiPrefs());
 const wallpaperBusy = ref(false);
 const wallpaperError = ref("");
+const wallpaperPreviewStyle = computed(() => {
+  const kind = uiPrefs.value.wallpaperKind;
+  const src = kind === "file"
+    ? (uiPrefs.value.wallpaperSrc || "/api/settings/ui/wallpaper")
+    : kind === "url"
+      ? (uiPrefs.value.wallpaperSrc || uiPrefs.value.wallpaperUrl || "")
+      : "";
+  if (!src || !/^https?:\/\//i.test(src) && !src.startsWith("/")) return {};
+  return { backgroundImage: `url(${JSON.stringify(src)})` };
+});
 let uiSaveTimer = null;
 
 async function syncUiToServer(prefs) {
@@ -765,6 +775,10 @@ async function persistUi(patch) {
 }
 function setAccentHue(h) {
   persistUi({ accentHue: Number(h) });
+}
+function onCustomAccent(ev) {
+  const next = hexToHue(ev.target.value, uiPrefs.value.accentHue);
+  setAccentHue(next);
 }
 function setThemeMode(t) {
   persistUi({ theme: t });
@@ -1035,12 +1049,13 @@ async function runCleanup() {
             <small>主题色与背景保存在本实例服务器，换电脑也能带上</small>
           </legend>
           <div class="appearance-row">
-            <label>明暗
+            <div class="create-field">
+              <span>明暗</span>
               <div class="llm-mode-switch" role="radiogroup" aria-label="明暗主题">
                 <button type="button" :class="{ active: uiPrefs.theme === 'dark' }" @click="setThemeMode('dark')">暗色</button>
                 <button type="button" :class="{ active: uiPrefs.theme === 'light' }" @click="setThemeMode('light')">亮色</button>
               </div>
-            </label>
+            </div>
             <label>铺满方式
               <select :value="uiPrefs.wallpaperFit" @change="persistUi({ wallpaperFit: $event.target.value })">
                 <option value="cover">铺满裁切</option>
@@ -1048,7 +1063,8 @@ async function runCleanup() {
               </select>
             </label>
           </div>
-          <label class="full">主题色
+          <div class="create-field full">
+            <span>主题色</span>
             <div class="appearance-swatches" role="list">
               <button
                 v-for="sw in ACCENT_PRESETS"
@@ -1056,7 +1072,7 @@ async function runCleanup() {
                 type="button"
                 class="appearance-swatch"
                 :class="{ active: Number(uiPrefs.accentHue) === sw.h }"
-                :style="{ '--swatch-h': sw.h }"
+                :style="{ '--swatch-h': sw.h + 'deg' }"
                 :title="sw.name"
                 :aria-label="sw.name"
                 @click="setAccentHue(sw.h)"
@@ -1065,11 +1081,12 @@ async function runCleanup() {
                 type="color"
                 :value="hueToHex(uiPrefs.accentHue)"
                 aria-label="自定义主题色"
-                @input="setAccentHue(hexToHue($event.target.value))"
+                title="自定义"
+                @change="onCustomAccent"
               />
             </div>
             <small class="muted">色相 {{ uiPrefs.accentHue }} · 按钮、选中态、焦点会跟着变</small>
-          </label>
+          </div>
           <label class="full">色相
             <input type="range" min="0" max="360" :value="uiPrefs.accentHue" @input="setAccentHue($event.target.value)" />
           </label>
@@ -1092,7 +1109,7 @@ async function runCleanup() {
             </div>
             <p v-if="wallpaperBusy" class="field-hint">正在压缩并保存图片…</p>
             <p v-if="wallpaperError" class="field-hint" style="color:var(--danger)">{{ wallpaperError }}</p>
-            <div class="appearance-preview" :style="uiPrefs.wallpaperKind === 'url' && uiPrefs.wallpaperUrl ? { backgroundImage: `url('${uiPrefs.wallpaperUrl}')` } : {}">
+            <div class="appearance-preview" :style="wallpaperPreviewStyle">
               {{ uiPrefs.wallpaperKind === 'none' ? '当前没有自定义背景' : (uiPrefs.wallpaperKind === 'file' ? '已使用本机图片' : '使用网络图片') }}
             </div>
           </div>

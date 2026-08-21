@@ -484,8 +484,8 @@ onMounted(async () => {
           <textarea id="src-rules" v-model="form.src_rules" rows="3" placeholder="例：本校不收弱口令；重点收越权与未授权。"></textarea>
         </section>
 
-        <details class="create-block create-adv" :open="adv">
-          <summary @click.prevent="adv = !adv">高级：模型、测绘分页、并发</summary>
+        <details class="create-block create-adv" :open="adv" @toggle="adv = $event.target.open">
+          <summary>高级：模型、测绘分页、并发</summary>
           <p class="create-mini">
             当前系统是{{ inherited.llm_mode === "pool" ? inherited.llm_provider_count + " 个模型端点" : "单模型" }}。
             「跟随系统」时，设置页改完下一轮生效。
