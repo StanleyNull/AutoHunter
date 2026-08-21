@@ -156,20 +156,21 @@ async function req(method, url, body, retriedAuth = false, overrideToken = "") {
 
 /**
  * 消费一个 SSE 流式接口。onEvent 收到每个解析出的事件对象。
+ * signal 可选（AbortController），用于停止报告助手生成。
  * 返回 Promise，在流结束时 resolve。
  */
-async function streamSSE(url, body, onEvent, retriedAuth = false) {
+async function streamSSE(url, body, onEvent, retriedAuth = false, signal = null) {
   const headers = { "Content-Type": "application/json" };
   const token = apiToken();
   if (token) headers["X-Autohunter-Token"] = token;
-  const res = await fetch(base + url, { method: "POST", headers, body: JSON.stringify(body) });
+  const res = await fetch(base + url, { method: "POST", headers, body: JSON.stringify(body), signal });
 
   if (res.status === 401 && !retriedAuth) {
     const newToken = await openTokenModal("auth");
     if (newToken) {
       setApiToken(newToken);
       await loadAuthRole();
-      return streamSSE(url, body, onEvent, true);
+      return streamSSE(url, body, onEvent, true, signal);
     }
   }
   if (res.status === 403) throw new Error("当前令牌不允许此操作");
@@ -282,8 +283,8 @@ export const api = {
   retryKillsweep: (taskId, killsweepId) =>
     req("POST", `/api/tasks/${taskId}/killsweeps/${killsweepId}/retry`),
   finding: (id) => req("GET", `/api/findings/${id}`),
-  reportAssistantStream: (id, message, onEvent) =>
-    streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent),
+  reportAssistantStream: (id, message, onEvent, signal) =>
+    streamSSE(`/api/findings/${id}/assistant/stream`, { message }, onEvent, false, signal),
   userReview: (id, data) => req("PATCH", `/api/results/${id}`, data),
   deepen: (id, directive) => req("POST", `/api/results/${id}/deepen`, { directive }),
   getSettings: () => req("GET", "/api/settings"),

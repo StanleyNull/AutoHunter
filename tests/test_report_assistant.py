@@ -110,6 +110,56 @@ class ReportAssistantTest(unittest.TestCase):
         finally:
             findings._llm_for_task = old_llm
 
+    def test_normalize_proposed_edits_keeps_usable_fields(self):
+        out = findings._normalize_proposed_edits({
+            "title": "  越权查看他人订单  ",
+            "severity": "超危",
+            "steps": ["登录", " ", "改 id"],
+            "rationale": "标题更像 SRC",
+        })
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["edits"]["title"], "越权查看他人订单")
+        self.assertNotIn("severity", out["edits"])
+        self.assertEqual(out["edits"]["steps"], ["登录", "改 id"])
+        self.assertEqual(out["edits"]["rationale"], "标题更像 SRC")
+
+    def test_normalize_proposed_edits_rejects_empty(self):
+        out = findings._normalize_proposed_edits({"rationale": "nothing"})
+        self.assertFalse(out["ok"])
+
+    def test_loop_emits_suggested_edits(self):
+        events = []
+
+        class FakeLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def chat(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    tc = SimpleNamespace(
+                        id="c1",
+                        function=SimpleNamespace(
+                            name="propose_report_edits",
+                            arguments='{"title":"SQL注入导致拖库","severity":"严重"}',
+                        ),
+                    )
+                    return SimpleNamespace(content="准备改稿", tool_calls=[tc])
+                return SimpleNamespace(content="结论：建议按改稿提交。", tool_calls=None)
+
+        result = findings._run_report_assistant_loop(
+            FakeLLM(),
+            executor=SimpleNamespace(),
+            messages=[{"role": "user", "content": "润色标题"}],
+            tool_logs=[],
+            cancel_event=threading.Event(),
+            emit=events.append,
+        )
+        self.assertEqual(result["suggested_edits"]["title"], "SQL注入导致拖库")
+        self.assertEqual(result["suggested_edits"]["severity"], "严重")
+        self.assertTrue(any(e.get("type") == "suggested_edits" for e in events))
+        self.assertIn("建议按改稿提交", result["answer"])
+
 
 if __name__ == "__main__":
     unittest.main()

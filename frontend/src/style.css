@@ -2694,11 +2694,41 @@ main {
 .ra-md th { background: var(--surface-2); color: var(--ink); }
 .ra-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; margin-top: 10px; align-items: end; }
 .ra-input textarea { resize: vertical; font-family: "IBM Plex Sans", sans-serif; min-height: 58px; }
+.ra-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.ra-chips button {
+  font-size: 12px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-2);
+}
+.ra-chips button:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--accent) 40%, var(--border));
+  color: var(--ink);
+}
+.ra-chips button:disabled { opacity: .5; cursor: not-allowed; }
+.ra-stop {
+  background: color-mix(in oklch, var(--danger) 14%, var(--surface-2));
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 32%, transparent);
+}
+.ra-suggest {
+  display: flex; justify-content: space-between; gap: 10px; align-items: center;
+  padding: 8px 10px; border-radius: 11px;
+  background: var(--accent-bg);
+  border: 1px solid color-mix(in oklch, var(--accent) 28%, transparent);
+}
+.ra-suggest b { display: block; font-size: 12px; color: var(--ink); }
+.ra-suggest small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; max-width: 42ch; }
+.ra-msg-actions { display: flex; gap: 6px; }
+.ra-msg-actions button {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border-soft); background: transparent; color: var(--muted);
+}
+.ra-hint { margin: 6px 0 0; color: var(--faint); font-size: 11px; }
 
 @media (max-width: 760px) {
   .report-brief, .report-facts { grid-template-columns: 1fr; }
   .report-brief-side { justify-items: start; }
   .ra-head, .ra-actions, .ra-input { display: grid; grid-template-columns: 1fr; }
+  .ra-suggest { flex-wrap: wrap; }
 }
 @media (max-width: 640px) {
   /* 顶部工具栏/复审栏按钮多，窄屏换行避免横向溢出（drawer≈94vw）。 */
