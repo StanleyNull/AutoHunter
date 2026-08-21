@@ -234,6 +234,20 @@ async function downloadFile(method, url) {
   setTimeout(() => URL.revokeObjectURL(href), 2000);
 }
 
+async function uploadUiWallpaper(file) {
+  const headers = {};
+  const token = apiToken();
+  if (token) headers["X-Autohunter-Token"] = token;
+  const body = new FormData();
+  body.append("file", file, file.name || "wallpaper.jpg");
+  const res = await fetch(base + "/api/settings/ui/wallpaper", { method: "POST", headers, body });
+  const text = await res.text();
+  if (res.status === 403) throw new Error("只读令牌不允许此操作");
+  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  try { return JSON.parse(text); }
+  catch { throw new Error(text || "上传失败"); }
+}
+
 async function uploadBackup(file, includeWork) {
   const headers = {};
   const token = apiToken();
@@ -308,6 +322,8 @@ export const api = {
   downloadBackupSnapshot: (name) =>
     downloadFile("GET", `/api/backup/snapshots/${encodeURIComponent(name)}`),
   restoreBackup: (file, includeWork = false) => uploadBackup(file, includeWork),
+  uploadUiWallpaper: (file) => uploadUiWallpaper(file),
+  deleteUiWallpaper: () => req("DELETE", "/api/settings/ui/wallpaper"),
   // 全局情报库
   intelStats: () => req("GET", "/api/intel/stats"),
   intelList: (kind, confidence, q, limit) =>

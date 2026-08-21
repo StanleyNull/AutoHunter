@@ -189,8 +189,19 @@ class DefaultsSettingsDTO(BaseModel):
     engine: Optional[str] = None
 
 
+class UiSettingsDTO(BaseModel):
+    theme: Optional[str] = None
+    accentHue: Optional[int] = None
+    wallpaperKind: Optional[str] = None
+    wallpaperUrl: Optional[str] = None
+    wallpaperFit: Optional[str] = None
+    wallpaperDim: Optional[float] = None
+    saved: Optional[bool] = None
+
+
 class SettingsUpdateRequest(BaseModel):
     llm: Optional[LLMSettingsDTO] = None
     fofa: Optional[FofaSettingsDTO] = None
     engines: Optional[dict[str, EngineSettingsDTO]] = None   # 按引擎名索引
     defaults: Optional[DefaultsSettingsDTO] = None
+    ui: Optional[UiSettingsDTO] = None

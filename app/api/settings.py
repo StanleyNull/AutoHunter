@@ -6,7 +6,8 @@ import functools
 import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,12 @@ from app.db.session import get_session
 from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent, llm_request_url
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
+from app.ui_prefs import (
+    MAX_WALLPAPER_BYTES,
+    current_wallpaper,
+    delete_wallpaper,
+    save_wallpaper_bytes,
+)
 from app.settings_service import (
     _clean_llm_providers,
     _preserve_provider_keys,
@@ -412,3 +419,45 @@ async def workdir_cleanup(
     return await loop.run_in_executor(
         None, functools.partial(cleanup_workdir, retention_days=retention_days, dry_run=dry_run)
     )
+
+
+@router.get("/ui/wallpaper")
+async def get_ui_wallpaper():
+    path = current_wallpaper()
+    if path is None:
+        raise HTTPException(status_code=404, detail="未设置背景图")
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(path.suffix.lower(), "image/jpeg")
+    return FileResponse(
+        path,
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.post("/ui/wallpaper")
+async def upload_ui_wallpaper(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+):
+    data = await file.read()
+    if len(data) > MAX_WALLPAPER_BYTES:
+        raise HTTPException(status_code=400, detail="图片超过 3MB")
+    try:
+        save_wallpaper_bytes(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await update_settings(session, {"ui": {"wallpaperKind": "file", "wallpaperUrl": "", "saved": True}})
+    return public_settings_view()
+
+
+@router.delete("/ui/wallpaper")
+async def remove_ui_wallpaper(session: AsyncSession = Depends(get_session)):
+    delete_wallpaper()
+    await update_settings(session, {"ui": {"wallpaperKind": "none", "wallpaperUrl": "", "saved": True}})
+    return public_settings_view()

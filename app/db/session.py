@@ -82,6 +82,7 @@ _MIGRATIONS = [
     ("targets", "auth_context", "JSON"),
     ("targets", "auth_status", "JSON"),
     ("tasks", "deepen_cap", "INTEGER DEFAULT 2"),
+    ("system_settings", "ui", "JSON DEFAULT '{}'"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。

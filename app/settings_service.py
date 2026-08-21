@@ -16,12 +16,13 @@ from app.db.models import SystemSettings, Task, to_cst_iso
 from app.db.session import SessionLocal
 from app.engines import get_engine, list_engines, get_default_engine
 from app.llm.health import provider_ref, snapshot as llm_health_snapshot
+from app.ui_prefs import normalize_ui, public_ui
 
 SETTINGS_ID = "global"
 LLM_MODES = {"single", "pool"}
 LLM_PROTOCOLS = {"auto", "openai_chat", "anthropic_messages"}
 
-_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}}
+_cache: dict[str, Any] = {"llm": {}, "fofa": {}, "engines": {}, "defaults": {}, "ui": {}}
 
 
 # 统一脱敏占位：不再泄露密钥首尾字符，避免降低离线爆破成本。
@@ -270,6 +271,7 @@ def effective_settings() -> dict[str, Any]:
         "fofa": _merge_section(_cache.get("fofa"), _env_fofa()),
         "engines": _merge_section(_cache.get("engines"), _env_engines()),
         "defaults": _merge_section(_cache.get("defaults"), _env_defaults()),
+        "ui": normalize_ui(_cache.get("ui")),
     }
 
 
@@ -523,6 +525,7 @@ def public_settings_view() -> dict[str, Any]:
             "engine": defaults.get("engine", get_default_engine()),
         },
         "available_engines": list_engines(),
+        "ui": public_ui(eff.get("ui")),
         "updated_at": _cache.get("updated_at"),
     }
 
@@ -540,6 +543,7 @@ async def refresh_cache(session: AsyncSession) -> SystemSettings:
         "fofa": dict(row.fofa or {}),
         "engines": dict(row.engines or {}),
         "defaults": dict(row.defaults or {}),
+        "ui": dict(row.ui or {}),
         "updated_at": to_cst_iso(row.updated_at),
     }
     return row
@@ -645,6 +649,12 @@ async def update_settings(session: AsyncSession, payload: dict[str, Any]) -> dic
             else:
                 defaults[k] = v
         row.defaults = defaults
+
+    if "ui" in payload and payload["ui"] is not None:
+        current = dict(row.ui or {})
+        incoming = dict(payload["ui"] or {})
+        merged = {**current, **incoming, "saved": True}
+        row.ui = normalize_ui(merged, saved=True)
 
     await session.commit()
     await session.refresh(row)

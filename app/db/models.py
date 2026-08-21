@@ -286,4 +286,5 @@ class SystemSettings(Base):
     fofa: Mapped[dict] = mapped_column(JSON, default=dict)      # key/max_pages/page_size/default_intent_mode
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
+    ui: Mapped[dict] = mapped_column(JSON, default=dict)        # 外观：主题色 / 背景图元数据
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

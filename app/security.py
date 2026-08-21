@@ -36,7 +36,7 @@ SECURITY_HEADERS = {
         "default-src 'self'; "
         "script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
+        "img-src 'self' data: https: http:; "
         "connect-src 'self' ws: wss:; "
         "base-uri 'self'; "
         "frame-ancestors 'none'; "

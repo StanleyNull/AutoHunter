@@ -26,16 +26,17 @@
   --faint:  oklch(58% 0.012 255);   /* 极弱：仅元信息/时间戳 */
 
   /* 单一品牌 accent：只用于主操作 / 当前选中 / 焦点 */
-  --accent:     oklch(70% 0.14 235);
-  --accent-ink: oklch(96% 0.02 235);
-  --accent-bg:  oklch(70% 0.14 235 / 0.14);
+  --accent-h: 235;
+  --accent:     oklch(70% 0.14 var(--accent-h));
+  --accent-ink: oklch(96% 0.02 var(--accent-h));
+  --accent-bg:  oklch(70% 0.14 var(--accent-h) / 0.14);
   --on-accent:  oklch(22% 0.02 255);
 
   /* 语义状态色（冷静、可区分；状态另有文字/图标冗余） */
   --ok:    oklch(72% 0.15 155);   /* 成功/发现 */
   --warn:  oklch(78% 0.14 75);    /* 警告/超时 */
   --danger:oklch(68% 0.17 25);    /* 错误/严重 */
-  --info:  oklch(72% 0.12 235);   /* 信息/运行 */
+  --info:  oklch(72% 0.12 var(--accent-h));   /* 信息/运行 */
 
   --ok-bg:    oklch(72% 0.15 155 / 0.14);
   --warn-bg:  oklch(78% 0.14 75 / 0.14);
@@ -44,9 +45,12 @@
 
   --shadow:    0 1px 2px oklch(0% 0 0 / 0.4), 0 4px 16px oklch(0% 0 0 / 0.28);
   --shadow-lg: 0 8px 40px oklch(0% 0 0 / 0.5);
-  --line: oklch(72% 0.12 235 / 0.08);
+  --line: oklch(72% 0.12 var(--accent-h) / 0.08);
   --radius: 10px;
   --radius-sm: 7px;
+
+  --wallpaper-dim: 0.72;
+  --wallpaper-fit: cover;
 
   /* 语义 z-index 阶 */
   --z-sticky: 30;
@@ -70,15 +74,16 @@
   --muted:  oklch(48% 0.012 255);
   --faint:  oklch(58% 0.012 255);
 
-  --accent:     oklch(54% 0.16 250);
-  --accent-ink: oklch(50% 0.17 250);
-  --accent-bg:  oklch(54% 0.16 250 / 0.10);
+  --accent-h: 235;
+  --accent:     oklch(54% 0.16 var(--accent-h));
+  --accent-ink: oklch(50% 0.17 var(--accent-h));
+  --accent-bg:  oklch(54% 0.16 var(--accent-h) / 0.10);
   --on-accent:  oklch(99% 0 0);
 
   --ok:    oklch(54% 0.15 150);
   --warn:  oklch(60% 0.14 65);
   --danger:oklch(55% 0.19 25);
-  --info:  oklch(54% 0.14 250);
+  --info:  oklch(54% 0.14 var(--accent-h));
 
   --ok-bg:    oklch(54% 0.15 150 / 0.10);
   --warn-bg:  oklch(60% 0.14 65 / 0.10);
@@ -87,7 +92,7 @@
 
   --shadow:    0 1px 2px oklch(0% 0 0 / 0.06), 0 4px 16px oklch(0% 0 0 / 0.08);
   --shadow-lg: 0 8px 40px oklch(0% 0 0 / 0.14);
-  --line: oklch(54% 0.14 250 / 0.08);
+  --line: oklch(54% 0.14 var(--accent-h) / 0.08);
 }
 
 * { box-sizing: border-box; }
@@ -120,6 +125,28 @@ body::before {
     linear-gradient(90deg, var(--line) 1px, transparent 1px);
   background-size: 44px 44px;
   mask-image: linear-gradient(180deg, black, oklch(0% 0 0 / .55) 64%, oklch(0% 0 0 / .28));
+}
+
+.ah-wallpaper {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: var(--wallpaper-fit);
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+.ah-wallpaper::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: color-mix(in oklch, var(--bg) calc(var(--wallpaper-dim) * 100%), transparent);
+}
+html[data-wallpaper="on"] .ah-wallpaper { opacity: 1; }
+html[data-wallpaper="on"] body {
+  background-image: none;
+}
+html[data-wallpaper="on"] body::before { opacity: .18; }
+@media (prefers-reduced-motion: reduce) {
+  .ah-wallpaper { transition: none; }
 }
 
 ::selection { background: var(--accent-bg); }
@@ -865,7 +892,7 @@ main {
 }
 .settings-layout {
   display: grid;
-  grid-template-columns: minmax(240px, 300px) minmax(0, 760px);
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -959,6 +986,90 @@ main {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.55;
+}
+.settings-nav {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 2px;
+}
+.settings-nav button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: 10px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-2);
+}
+.settings-nav button:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.settings-nav button.active {
+  background: var(--accent-bg);
+  color: var(--accent-ink);
+  border-color: color-mix(in oklch, var(--accent) 35%, transparent);
+}
+.settings-nav small {
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 500;
+}
+.settings-nav button.active small { color: var(--accent-ink); opacity: .8; }
+.settings-panel { display: grid; gap: 14px; }
+.settings-panel[hidden] { display: none !important; }
+.appearance-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.appearance-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.appearance-swatch {
+  width: 36px; height: 36px; padding: 0; border-radius: 999px;
+  border: 2px solid var(--border);
+  background: oklch(62% 0.14 var(--swatch-h));
+}
+.appearance-swatch.active {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.appearance-swatches input[type="color"] {
+  width: 36px; height: 36px; padding: 0; border: 2px solid var(--border);
+  border-radius: 999px; background: transparent; cursor: pointer;
+}
+.appearance-preview {
+  min-height: 120px;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  background:
+    var(--paper-preview, var(--surface-2));
+  background-size: cover;
+  background-position: center;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+}
+.appearance-drop {
+  display: grid;
+  gap: 8px;
+}
+.appearance-drop input[type="file"] { max-width: 100%; }
+.appearance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 .settings-form {
   max-width: none;
@@ -2832,6 +2943,20 @@ main {
     grid-template-columns: 1fr;
     gap: 12px;
   }
+  .settings-nav {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .settings-nav button {
+    width: auto;
+    flex: none;
+    white-space: nowrap;
+  }
+  .settings-nav small { display: none; }
+  .appearance-row { grid-template-columns: 1fr; }
   .settings-summary {
     position: static;
     padding: 13px;

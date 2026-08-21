@@ -3,6 +3,19 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { api } from "../api.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
 import { copyText, formatLlmTestCopy } from "../clipboard.js";
+import {
+  ACCENT_PRESETS,
+  applyUi,
+  compressImageFile,
+  DEFAULTS,
+  hexToHue,
+  hueToHex,
+  loadUiPrefs,
+  prefsFromApi,
+  prefsToApi,
+  resetUiLocal,
+  saveUiPrefs,
+} from "../uiTheme.js";
 
 const loading = ref(true);
 const saving = ref(false);
@@ -567,6 +580,10 @@ async function load() {
     form.deepen_cap = s.defaults?.deepen_cap ?? 2;
     form.skip_score_threshold = s.defaults?.skip_score_threshold ?? -10;
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
+    if (s.ui) {
+      uiPrefs.value = saveUiPrefs(prefsFromApi(s.ui));
+      await applyUi(uiPrefs.value);
+    }
     autoSaveStatus.value = "idle";
     autoSaveError.value = "";
   } finally {
@@ -723,7 +740,102 @@ const autoSaveLabel = computed(() => {
   return "改动后约 1 秒自动保存";
 });
 
+const settingsTab = ref("appearance");
+const uiPrefs = ref(loadUiPrefs());
+const wallpaperBusy = ref(false);
+const wallpaperError = ref("");
+let uiSaveTimer = null;
+
+async function syncUiToServer(prefs) {
+  const s = await api.updateSettings({ ui: prefsToApi(prefs) });
+  const next = saveUiPrefs(prefsFromApi(s.ui || prefs));
+  uiPrefs.value = next;
+  await applyUi(next);
+}
+
+async function persistUi(patch) {
+  uiPrefs.value = saveUiPrefs({ ...uiPrefs.value, ...patch });
+  await applyUi(uiPrefs.value);
+  clearTimeout(uiSaveTimer);
+  uiSaveTimer = setTimeout(() => {
+    syncUiToServer(uiPrefs.value).catch((e) => {
+      wallpaperError.value = String(e.message || e).replace(/^\d+\s*/, "");
+    });
+  }, 400);
+}
+function setAccentHue(h) {
+  persistUi({ accentHue: Number(h) });
+}
+function setThemeMode(t) {
+  persistUi({ theme: t });
+}
+async function onWallpaperFile(ev) {
+  const file = ev.target.files?.[0];
+  ev.target.value = "";
+  if (!file) return;
+  wallpaperBusy.value = true;
+  wallpaperError.value = "";
+  try {
+    const blob = await compressImageFile(file);
+    const uploaded = new File([blob], "wallpaper.jpg", { type: "image/jpeg" });
+    const s = await api.uploadUiWallpaper(uploaded);
+    uiPrefs.value = saveUiPrefs(prefsFromApi(s.ui || {}));
+    await applyUi(uiPrefs.value);
+  } catch (e) {
+    wallpaperError.value = String(e.message || e).replace(/^\d+\s*/, "");
+  } finally {
+    wallpaperBusy.value = false;
+  }
+}
+async function applyWallpaperUrl() {
+  const url = (uiPrefs.value.wallpaperUrl || "").trim();
+  if (!url) {
+    await onClearWallpaper();
+    return;
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    wallpaperError.value = "请填写 http(s) 图片地址";
+    return;
+  }
+  wallpaperError.value = "";
+  await persistUi({ wallpaperKind: "url", wallpaperUrl: url });
+}
+async function onClearWallpaper() {
+  wallpaperError.value = "";
+  try {
+    const s = await api.deleteUiWallpaper();
+    uiPrefs.value = saveUiPrefs(prefsFromApi(s.ui || { ...DEFAULTS }));
+  } catch {
+    uiPrefs.value = saveUiPrefs({ ...uiPrefs.value, wallpaperKind: "none", wallpaperUrl: "", wallpaperSrc: "" });
+  }
+  await applyUi(uiPrefs.value);
+}
+async function resetAppearance() {
+  wallpaperError.value = "";
+  try { await api.deleteUiWallpaper(); } catch { /* ignore */ }
+  const prefs = resetUiLocal();
+  await syncUiToServer(prefs);
+}
+
+const SETTINGS_TABS = [
+  { id: "appearance", label: "外观", hint: "颜色与背景" },
+  { id: "llm", label: "模型", hint: "LLM 通道" },
+  { id: "recon", label: "测绘", hint: "引擎与 Key" },
+  { id: "runtime", label: "调度", hint: "并发深挖" },
+  { id: "data", label: "数据", hint: "备份磁盘" },
+  { id: "update", label: "更新", hint: "版本检查" },
+];
+const visibleTabs = computed(() =>
+  SETTINGS_TABS.filter((t) => t.id !== "update" || updateState.supported)
+);
+
+function onUiChanged(e) {
+  if (e.detail) uiPrefs.value = { ...loadUiPrefs(), ...e.detail };
+}
+
 onMounted(async () => {
+  uiPrefs.value = loadUiPrefs();
+  window.addEventListener("ah-ui-changed", onUiChanged);
   await load();
   refreshProviderHealth().catch(() => {});
   healthPoll = setInterval(() => refreshProviderHealth().catch(() => {}), 10000);
@@ -733,6 +845,8 @@ onMounted(async () => {
   loadBackupStats();
 });
 onUnmounted(() => {
+  window.removeEventListener("ah-ui-changed", onUiChanged);
+  clearTimeout(uiSaveTimer);
   clearInterval(healthPoll);
   clearInterval(restartPoll);
   clearTimeout(autoSaveTimer);
@@ -850,7 +964,7 @@ async function runCleanup() {
     <header class="page-head">
       <h2>系统配置</h2>
       <p class="page-sub">
-        全局默认 LLM / 资产测绘引擎 / 调度参数。改动后约 1 秒自动保存；新建任务留空时会使用此处配置，任务内填写可单独覆盖。
+        左侧切换分组。模型/测绘/调度约 1 秒自动保存；外观写入服务器，换浏览器也还在。
         <span v-if="meta.updated_at" class="settings-updated">上次保存 {{ meta.updated_at?.slice(0, 19).replace("T", " ") }}</span>
       </p>
     </header>
@@ -878,11 +992,23 @@ async function runCleanup() {
       </div>
     </div>
     <div v-else class="settings-layout">
-      <aside class="settings-summary" aria-label="当前系统配置摘要">
+      <aside class="settings-summary" aria-label="设置分组">
         <div class="settings-summary-head">
-          <span>ACTIVE PROFILE</span>
-          <b>全局默认</b>
+          <span>SETTINGS</span>
+          <b>分组</b>
         </div>
+        <nav class="settings-nav" aria-label="设置分组">
+          <button
+            v-for="tab in visibleTabs"
+            :key="tab.id"
+            type="button"
+            :class="{ active: settingsTab === tab.id }"
+            @click="settingsTab = tab.id"
+          >
+            {{ tab.label }}
+            <small>{{ tab.hint }}</small>
+          </button>
+        </nav>
         <div class="settings-health">
           <div>
             <span>LLM</span>
@@ -899,27 +1025,80 @@ async function runCleanup() {
           </div>
           <i :class="{ on: engineKeysSetCount > 0 }">{{ engineKeysSetCount > 0 ? `${engineKeysSetCount} key` : "no key" }}</i>
         </div>
-        <dl class="settings-facts">
-          <div>
-            <dt>任务默认并发</dt>
-            <dd>{{ form.concurrency }}</dd>
-          </div>
-          <div>
-            <dt>默认深挖次数</dt>
-            <dd>{{ form.deepen_cap }}</dd>
-          </div>
-          <div>
-            <dt>低分跳过阈值</dt>
-            <dd>{{ form.skip_score_threshold }}</dd>
-          </div>
-        </dl>
-        <p class="settings-note">
-          此处是运行期默认值。任务创建时若在高级区单独填写，则按任务配置覆盖。
-        </p>
+        <p class="settings-note">任务创建时可覆盖模型与调度默认值。外观写入本实例数据库与数据卷。</p>
       </aside>
 
-      <form class="form settings-form" @submit.prevent="save">
-        <fieldset class="settings-block">
+      <form class="form settings-form" novalidate @submit.prevent="save">
+        <fieldset v-show="settingsTab === 'appearance'" class="settings-block">
+          <legend>
+            <span>外观</span>
+            <small>主题色与背景保存在本实例服务器，换电脑也能带上</small>
+          </legend>
+          <div class="appearance-row">
+            <label>明暗
+              <div class="llm-mode-switch" role="radiogroup" aria-label="明暗主题">
+                <button type="button" :class="{ active: uiPrefs.theme === 'dark' }" @click="setThemeMode('dark')">暗色</button>
+                <button type="button" :class="{ active: uiPrefs.theme === 'light' }" @click="setThemeMode('light')">亮色</button>
+              </div>
+            </label>
+            <label>铺满方式
+              <select :value="uiPrefs.wallpaperFit" @change="persistUi({ wallpaperFit: $event.target.value })">
+                <option value="cover">铺满裁切</option>
+                <option value="contain">完整显示</option>
+              </select>
+            </label>
+          </div>
+          <label class="full">主题色
+            <div class="appearance-swatches" role="list">
+              <button
+                v-for="sw in ACCENT_PRESETS"
+                :key="sw.h"
+                type="button"
+                class="appearance-swatch"
+                :class="{ active: Number(uiPrefs.accentHue) === sw.h }"
+                :style="{ '--swatch-h': sw.h }"
+                :title="sw.name"
+                :aria-label="sw.name"
+                @click="setAccentHue(sw.h)"
+              ></button>
+              <input
+                type="color"
+                :value="hueToHex(uiPrefs.accentHue)"
+                aria-label="自定义主题色"
+                @input="setAccentHue(hexToHue($event.target.value))"
+              />
+            </div>
+            <small class="muted">色相 {{ uiPrefs.accentHue }} · 按钮、选中态、焦点会跟着变</small>
+          </label>
+          <label class="full">色相
+            <input type="range" min="0" max="360" :value="uiPrefs.accentHue" @input="setAccentHue($event.target.value)" />
+          </label>
+          <label class="full">背景压暗
+            <input type="range" min="0.4" max="0.9" step="0.01" :value="uiPrefs.wallpaperDim" @input="persistUi({ wallpaperDim: Number($event.target.value) })" />
+            <small class="muted">值越大，背景越淡、字越好读</small>
+          </label>
+          <div class="appearance-drop">
+            <label class="full">背景图链接
+              <input v-model="uiPrefs.wallpaperUrl" placeholder="https://example.com/wallpaper.jpg" @keydown.enter.prevent="applyWallpaperUrl" />
+            </label>
+            <div class="appearance-actions">
+              <button type="button" @click="applyWallpaperUrl">使用链接</button>
+              <label class="mini-action" style="cursor:pointer">
+                上传图片
+                <input type="file" accept="image/*" hidden :disabled="wallpaperBusy" @change="onWallpaperFile" />
+              </label>
+              <button type="button" :disabled="uiPrefs.wallpaperKind === 'none'" @click="onClearWallpaper">去掉背景</button>
+              <button type="button" @click="resetAppearance">恢复默认外观</button>
+            </div>
+            <p v-if="wallpaperBusy" class="field-hint">正在压缩并保存图片…</p>
+            <p v-if="wallpaperError" class="field-hint" style="color:var(--danger)">{{ wallpaperError }}</p>
+            <div class="appearance-preview" :style="uiPrefs.wallpaperKind === 'url' && uiPrefs.wallpaperUrl ? { backgroundImage: `url('${uiPrefs.wallpaperUrl}')` } : {}">
+              {{ uiPrefs.wallpaperKind === 'none' ? '当前没有自定义背景' : (uiPrefs.wallpaperKind === 'file' ? '已使用本机图片' : '使用网络图片') }}
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset v-show="settingsTab === 'llm'" class="settings-block">
           <legend>
             <span>AI / LLM</span>
             <small>Worker、Reviewer、报告助手共用的默认模型通道</small>
@@ -1096,7 +1275,7 @@ async function runCleanup() {
           </div>
         </fieldset>
 
-        <fieldset class="settings-block">
+        <fieldset v-show="settingsTab === 'recon'" class="settings-block">
           <legend>
             <span>资产测绘</span>
             <small>多引擎搜集默认；创建任务可选引擎，Key 在此统一配置</small>
@@ -1153,7 +1332,7 @@ async function runCleanup() {
           </div>
         </fieldset>
 
-        <fieldset class="settings-block">
+        <fieldset v-show="settingsTab === 'runtime'" class="settings-block">
           <legend>
             <span>调度默认</span>
             <small>新任务创建时的保守默认值</small>
@@ -1169,7 +1348,7 @@ async function runCleanup() {
           </div>
         </fieldset>
 
-        <fieldset class="settings-block">
+        <fieldset v-show="settingsTab === 'data'" class="settings-block">
           <legend>
             <span>数据备份</span>
             <small>导出/导入是主路径。SQLite 在线备份打一致快照，不要直接拷正在写的库文件。</small>
@@ -1248,7 +1427,7 @@ async function runCleanup() {
           </div>
         </fieldset>
 
-        <fieldset class="settings-block">
+        <fieldset v-show="settingsTab === 'data'" class="settings-block">
           <legend>
             <span>工作目录管理</span>
             <small>Worker / Escalate 等 agent 产生的临时文件磁盘占用与清理</small>
@@ -1331,7 +1510,62 @@ async function runCleanup() {
           </div>
         </fieldset>
 
-        <div class="settings-actions">
+        <fieldset v-if="updateState.supported" v-show="settingsTab === 'update'" class="settings-block update-section">
+          <legend>
+            <span>版本更新</span>
+            <small>检查 GitHub 最新代码；git 部署可一键热更，镜像部署给出手动指引</small>
+          </legend>
+          <div v-if="updateState.restarting" class="update-restarting">
+            <div class="update-spinner"></div>
+            <p>服务正在重启，自动重连中…</p>
+          </div>
+          <div v-else class="update-body">
+            <button type="button" class="btn-check" @click="checkUpdate" :disabled="updateState.checking">
+              {{ updateState.checking ? "检测中…" : "检查更新" }}
+            </button>
+            <div v-if="updateState.error" class="update-error">{{ updateState.error }}</div>
+            <div v-if="updateState.info?.error" class="update-error">
+              <p>{{ updateState.info.error }}</p>
+              <p v-if="updateState.info.hint" class="update-hint">{{ updateState.info.hint }}</p>
+              <a
+                class="update-link"
+                :href="updateState.info.releases_url || 'https://github.com/StanleyNull/AutoHunter'"
+                target="_blank"
+                rel="noopener"
+              >打开 GitHub 仓库 / Releases</a>
+            </div>
+            <div v-if="updateState.info?.update_available" class="update-info">
+              <div class="update-version">
+                <span class="version-old">{{ updateState.info.current_commit }}</span>
+                <span class="version-arrow">→</span>
+                <span class="version-new">{{ updateState.info.latest_commit }}</span>
+                <span class="update-badge">落后 {{ updateState.info.commits_behind }} 个提交</span>
+              </div>
+              <div class="update-latest-msg">{{ updateState.info.latest_message }}</div>
+              <details class="update-files">
+                <summary>变更文件 ({{ updateState.info.changed_files?.length || 0 }})</summary>
+                <ul>
+                  <li v-for="f in updateState.info.changed_files" :key="f">{{ f }}</li>
+                </ul>
+              </details>
+              <div v-if="updateState.info.hot_updateable" class="update-actions">
+                <button type="button" class="primary" @click="runUpdate" :disabled="updateState.updating">
+                  {{ updateState.updating ? "更新中…" : "一键更新并重启" }}
+                </button>
+                <span class="update-hint">仅后端代码变更，可热更新（git pull + 自动重启）</span>
+              </div>
+              <div v-else class="update-actions rebuild">
+                <p class="update-warn">⚠ 本次更新包含前端/Dockerfile 变更，需在服务器执行完整重建：</p>
+                <code class="rebuild-cmd">{{ updateState.info.rebuild_command || 'git pull && docker compose up -d --build' }}</code>
+              </div>
+            </div>
+            <div v-else-if="updateState.info && !updateState.info.update_available && !updateState.info.error" class="update-uptodate">
+              ✓ 已是最新版本（{{ updateState.info.current_commit }}）
+            </div>
+          </div>
+        </fieldset>
+
+        <div v-show="['llm','recon','runtime'].includes(settingsTab)" class="settings-actions">
           <button type="submit" class="primary" :disabled="saving">
             {{ saving ? "保存中…" : "立即保存" }}
           </button>
@@ -1340,62 +1574,6 @@ async function runCleanup() {
         </div>
       </form>
     </div>
-
-    <!-- 一键更新（仅原版未注册 update 路由时隐藏；发布版即使非 git 也保留入口） -->
-    <section v-if="updateState.supported" class="settings-block update-section">
-      <legend>
-        <span>版本更新</span>
-        <small>检查 GitHub 最新代码；git 部署可一键热更，镜像部署给出手动指引</small>
-      </legend>
-      <div v-if="updateState.restarting" class="update-restarting">
-        <div class="update-spinner"></div>
-        <p>服务正在重启，自动重连中…</p>
-      </div>
-      <div v-else class="update-body">
-        <button class="btn-check" @click="checkUpdate" :disabled="updateState.checking">
-          {{ updateState.checking ? "检测中…" : "检查更新" }}
-        </button>
-        <div v-if="updateState.error" class="update-error">{{ updateState.error }}</div>
-        <div v-if="updateState.info?.error" class="update-error">
-          <p>{{ updateState.info.error }}</p>
-          <p v-if="updateState.info.hint" class="update-hint">{{ updateState.info.hint }}</p>
-          <a
-            class="update-link"
-            :href="updateState.info.releases_url || 'https://github.com/StanleyNull/AutoHunter'"
-            target="_blank"
-            rel="noopener"
-          >打开 GitHub 仓库 / Releases</a>
-        </div>
-        <div v-if="updateState.info?.update_available" class="update-info">
-          <div class="update-version">
-            <span class="version-old">{{ updateState.info.current_commit }}</span>
-            <span class="version-arrow">→</span>
-            <span class="version-new">{{ updateState.info.latest_commit }}</span>
-            <span class="update-badge">落后 {{ updateState.info.commits_behind }} 个提交</span>
-          </div>
-          <div class="update-latest-msg">{{ updateState.info.latest_message }}</div>
-          <details class="update-files">
-            <summary>变更文件 ({{ updateState.info.changed_files?.length || 0 }})</summary>
-            <ul>
-              <li v-for="f in updateState.info.changed_files" :key="f">{{ f }}</li>
-            </ul>
-          </details>
-          <div v-if="updateState.info.hot_updateable" class="update-actions">
-            <button class="primary" @click="runUpdate" :disabled="updateState.updating">
-              {{ updateState.updating ? "更新中…" : "一键更新并重启" }}
-            </button>
-            <span class="update-hint">仅后端代码变更，可热更新（git pull + 自动重启）</span>
-          </div>
-          <div v-else class="update-actions rebuild">
-            <p class="update-warn">⚠ 本次更新包含前端/Dockerfile 变更，需在服务器执行完整重建：</p>
-            <code class="rebuild-cmd">{{ updateState.info.rebuild_command || 'git pull && docker compose up -d --build' }}</code>
-          </div>
-        </div>
-        <div v-else-if="updateState.info && !updateState.info.update_available && !updateState.info.error" class="update-uptodate">
-          ✓ 已是最新版本（{{ updateState.info.current_commit }}）
-        </div>
-      </div>
-    </section>
 
     <div v-if="toastMsg" class="toast settings-toast">{{ toastMsg }}</div>
   </section>
