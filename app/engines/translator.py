@@ -1,7 +1,7 @@
-"""FOFA 语法解析器：将 FOFA 查询语法解析为结构化中间表示，再翻译成各引擎原生语法。
+"""查询语法识别 + 历史 FOFA 映射（仅作参考，运行时不再自动翻译）。
 
-产品约定：任务框统一按 FOFA 语法书写；collector 在调用非 FOFA 引擎前必须走本模块翻译。
-若输入本身不像 FOFA（解析不到 field= / != / =~ 条件），则原样透传，避免误伤用户原生语法。
+产品约定：选了哪个引擎，就按该引擎官网语法原样请求。
+用户选 Hunter / Quake / ZoomEye 等时，禁止再把语句当 FOFA 改写。
 """
 from __future__ import annotations
 
@@ -387,7 +387,8 @@ _BOOL_AND_OR_RE = re.compile(r"\b(AND|OR|NOT)\b", re.I)
 _HUNTER_NATIVE_RE = re.compile(
     r"(?i)\b("
     r"web\.title|web\.body|web\.app|web\.icon|web\.status_code|web\.similar|web\.tag|"
-    r"domain\.suffix|ip\.country|ip\.city|ip\.company|ip\.tag|header\.server|"
+    r"domain\.suffix|ip\.country|ip\.province|ip\.city|ip\.isp|ip\.os|ip\.hostname|"
+    r"ip\.company|ip\.tag|header\.status_code|header\.server|header\.content_type|"
     r"cert\.subject_org|cert\.is_trust|icp\.number|is_web"
     r")\b"
 )
@@ -476,27 +477,5 @@ def looks_like_query_syntax(engine: str, query: str) -> bool:
 
 
 def translate_fofa_query(query: str, target_engine: str) -> str:
-    """查询语法适配：
-
-    - 目标为 fofa：原样
-    - 已是目标引擎原生语法：原样透传（用户直接写 Quake/Hunter/… 也能用）
-    - 像 FOFA：翻译成目标引擎
-    - 其它无法识别：原样透传，避免误伤
-    """
-    if not query:
-        return query
-    engine = (target_engine or "fofa").strip().lower()
-    if engine in ("", "fofa"):
-        return query
-    if looks_like_native_syntax(engine, query):
-        return query
-    if not looks_like_fofa_syntax(query):
-        return query
-    translator = _FOFA_TRANSLATORS.get(engine)
-    if translator is None:
-        return query
-    try:
-        out = translator(query)
-        return out if out else query
-    except Exception:
-        return query
+    """运行时不再改写查询。选了哪个引擎就原样发给哪个引擎。"""
+    return query

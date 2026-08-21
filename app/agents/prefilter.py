@@ -11,11 +11,50 @@
 """
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import os
+import socket
+import threading
 from urllib.parse import urlparse
 
 import httpx
+
+# ---------------------------------------------------------------------------
+# 黑洞 DNS 防护：autodiscover 等记录常解析出几十个 IP（大量 IPv6 黑洞地址），
+# socket.create_connection 会逐个地址试到超时，单次探活可卡几分钟，进而把
+# 派发循环整批卡死。探活期间把解析限制为 IPv4 前 2 个地址
+# （引用计数式临时替换，多线程安全；IPv6-only 域名自动回退原始解析）。
+# ---------------------------------------------------------------------------
+_ORIG_GETADDRINFO = socket.getaddrinfo
+_GA_LOCK = threading.Lock()
+_GA_DEPTH = 0
+
+
+def _capped_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    try:
+        res = _ORIG_GETADDRINFO(host, port, socket.AF_INET, type, proto, flags)
+    except OSError:
+        # 纯 IPv6 / 无 A 记录：回退原始解析，避免误杀 IPv6-only 站点
+        res = _ORIG_GETADDRINFO(host, port, family, type, proto, flags)
+    return res[:2]
+
+
+@contextlib.contextmanager
+def capped_resolution():
+    """探活期间限制 DNS 解析：IPv4 优先、最多 2 个地址。"""
+    global _GA_DEPTH
+    with _GA_LOCK:
+        if _GA_DEPTH == 0:
+            socket.getaddrinfo = _capped_getaddrinfo
+        _GA_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _GA_LOCK:
+            _GA_DEPTH -= 1
+            if _GA_DEPTH == 0:
+                socket.getaddrinfo = _ORIG_GETADDRINFO
 
 # CDN / 对象存储 / 静态托管 域名特征（命中即跳过）
 _CDN_MARKERS = (
@@ -131,26 +170,27 @@ def is_cdn_host(host: str) -> bool:
 def probe(url: str, timeout: float = 8.0) -> dict:
     """探活：返回 {alive, status, server, body_len, is_spa}。失败则 alive=False。"""
     try:
-        with httpx.Client(timeout=timeout, verify=False, follow_redirects=True) as c:
-            r = c.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AutoHunter)"})
-            body = r.text or ""
-            server = r.headers.get("server", "").lower()
-            # 粗判 SPA/纯前端：body 很短 + 含 <div id=app/root> + 几乎无表单/接口痕迹
-            low = body.lower()
-            is_spa = (
-                len(body) < 3000
-                and ('id="app"' in low or 'id="root"' in low or "<script" in low)
-                and "<form" not in low
-                and "login" not in low
-            )
-            import re
-            m = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
-            title = (m.group(1).strip()[:200] if m else "")
-            return {
-                "alive": True, "status": r.status_code, "server": server,
-                "body_len": len(body), "is_spa": is_spa,
-                "title": title, "body_snippet": body[:4000],
-            }
+        with capped_resolution():
+            with httpx.Client(timeout=timeout, verify=False, follow_redirects=True) as c:
+                r = c.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AutoHunter)"})
+                body = r.text or ""
+                server = r.headers.get("server", "").lower()
+                # 粗判 SPA/纯前端：body 很短 + 含 <div id=app/root> + 几乎无表单/接口痕迹
+                low = body.lower()
+                is_spa = (
+                    len(body) < 3000
+                    and ('id="app"' in low or 'id="root"' in low or "<script" in low)
+                    and "<form" not in low
+                    and "login" not in low
+                )
+                import re
+                m = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+                title = (m.group(1).strip()[:200] if m else "")
+                return {
+                    "alive": True, "status": r.status_code, "server": server,
+                    "body_len": len(body), "is_spa": is_spa,
+                    "title": title, "body_snippet": body[:4000],
+                }
     except Exception:
         return {"alive": False, "status": 0, "server": "", "body_len": 0,
                 "is_spa": False, "title": "", "body_snippet": ""}
@@ -162,7 +202,7 @@ def should_skip(host: str, url: str) -> tuple[bool, str]:
     return skip, reason
 
 
-def should_skip_ex(host: str, url: str) -> tuple[bool, str, dict]:
+def should_skip_ex(host: str, url: str, timeout: float = 8.0) -> tuple[bool, str, dict]:
     """同 should_skip，但额外返回首页探测信息(供评分复用，避免重复发包)。"""
     # 畸形主机（截断/非法 IPv6 等，拼进 URL 会崩解析）：直接跳过，不探活、不派 worker
     from app.urlnorm import is_unusable_host
@@ -173,7 +213,7 @@ def should_skip_ex(host: str, url: str) -> tuple[bool, str, dict]:
         return True, _SENSITIVE_SKIP_REASON, {}
     if is_cdn_host(host):
         return True, "CDN/对象存储/静态托管域名", {}
-    info = probe(url)
+    info = probe(url, timeout=timeout)
     if not info["alive"]:
         return True, "死链/连接超时/无响应", info
     # 5xx 暂时挂了，跳过本轮（不彻底淘汰，可后续重试）

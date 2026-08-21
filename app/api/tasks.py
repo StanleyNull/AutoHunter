@@ -37,8 +37,20 @@ from app.settings_service import (
     resolve_worker_prompt_version,
     secret_ref,
 )
+from app.agents.deepen import clamp_deepen_cap
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+# 任务级 worker 并发上限（与设置页 max=32、全局 WORKER_MAX_CONCURRENCY 对齐）。
+_TASK_CONCURRENCY_MAX = 32
+
+
+def _clamp_task_concurrency(value: int | None, default: int = 3) -> int:
+    try:
+        n = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        n = default
+    return max(1, min(n, _TASK_CONCURRENCY_MAX))
 
 
 # Activity Stream 历史回放：过滤高频低价值事件（与前端 BoardView 规则对齐）。
@@ -55,7 +67,7 @@ _STREAM_IMPORTANT_KINDS = frozenset({
     "review_start", "review_done", "review_error", "review_deferred", "review_cancelled",
     "reproduce_start", "reproduce_done",
     "killsweep_start", "killsweep_done", "killsweep_dedup", "killsweep_error",
-    "killsweep_invalid", "killsweep_cancelled",
+    "killsweep_invalid", "killsweep_cancelled", "killsweep_retry",
     "reclaim", "recover", "workers_cancelled", "quota_stop",
     "llm_error", "llm_soft_retry", "llm_interrupt", "worker_resume", "llm_provider_failed",
     "tool_exception",
@@ -267,6 +279,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         id=t.id, name=_observer_task_name(t.name, t.id) if observer else t.name, status=t.status, src_type=t.src_type,
         vuln_types=t.vuln_types or [], target_source=t.target_source,
         engine=t.engine or "", fofa_query="" if observer else t.fofa_query, concurrency=t.concurrency,
+        deepen_cap=clamp_deepen_cap(getattr(t, "deepen_cap", None)),
         src_rules="" if observer else (t.src_rules or ""),
         manual_targets=[] if observer else (t.manual_targets or []),
         auth_bindings=_public_auth_bindings(t, observer=observer),
@@ -329,7 +342,7 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
             stats.rejected += cnt
     stats.killsweep = (await session.execute(
         select(func.count()).select_from(Killsweep).where(
-            Killsweep.task_id == task_id, Killsweep.is_killsweep == True)  # noqa: E712
+            Killsweep.task_id == task_id, Killsweep.status != "invalid")
     )).scalar() or 0
     # AI 未采纳归档：与 /archived 接口筛选完全一致，保证徽标数字 == 列表条数（不用点开即预加载）
     stats.archived = (await session.execute(
@@ -417,7 +430,8 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         manual_targets=clean_manual_target_list(req.manual_targets or []),
         auth_bindings=_dump_auth_bindings(req.auth_bindings),
         model_config_json=model_config,
-        fofa_config=fofa_cfg, concurrency=req.concurrency,
+        fofa_config=fofa_cfg, concurrency=_clamp_task_concurrency(req.concurrency),
+        deepen_cap=clamp_deepen_cap(req.deepen_cap),
         status="created",
     )
     session.add(task)
@@ -609,7 +623,9 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     if req.auth_bindings is not None:
         task.auth_bindings = _dump_auth_bindings(req.auth_bindings)
     if req.concurrency is not None:
-        task.concurrency = max(1, min(int(req.concurrency), 20))
+        task.concurrency = _clamp_task_concurrency(req.concurrency)
+    if req.deepen_cap is not None:
+        task.deepen_cap = clamp_deepen_cap(req.deepen_cap)
 
     old_query = task.fofa_query or ""
     if req.fofa_query is not None:

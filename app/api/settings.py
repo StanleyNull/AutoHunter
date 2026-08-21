@@ -6,16 +6,23 @@ import functools
 import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dto import SettingsUpdateRequest
 from app.config import LLMConfig
 from app.db.session import get_session
-from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent
+from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent, llm_request_url
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
+from app.ui_prefs import (
+    MAX_WALLPAPER_BYTES,
+    current_wallpaper,
+    delete_wallpaper,
+    save_wallpaper_bytes,
+)
 from app.settings_service import (
     _clean_llm_providers,
     _preserve_provider_keys,
@@ -116,28 +123,31 @@ _NAMED_SECRET_RE = re.compile(
 )
 
 
-def _safe_error(value: object, *secrets: str) -> str:
+def _safe_error(value: object, *secrets: str, limit: int = 500) -> str:
     text = " ".join(str(value or "").split())
     for secret in secrets:
         if secret:
             text = text.replace(str(secret), "<masked>")
     text = _NAMED_SECRET_RE.sub(r"\1<masked>", text)
-    return _TEST_SECRET_RE.sub("<masked>", text)[:500]
+    return _TEST_SECRET_RE.sub("<masked>", text)[:limit]
 
 
-def _api_root(base_url: str) -> str:
-    base = str(base_url or "").strip().rstrip("/")
-    lowered = base.lower()
-    for suffix in ("/chat/completions", "/messages"):
-        if lowered.endswith(suffix):
-            return base[: -len(suffix)].rstrip("/")
-    return base
-
-
-def _chat_url(base_url: str, protocol: str) -> str:
-    base = _api_root(base_url)
-    path = "messages" if protocol == "anthropic_messages" else "chat/completions"
-    return f"{base}/{path}" if base.lower().endswith("/v1") else f"{base}/v1/{path}"
+def _llm_test_error_copy(result: dict) -> str:
+    lines = [
+        f"ok={result.get('ok')}",
+        f"name={result.get('name') or '-'}",
+        f"model={result.get('model') or '-'}",
+        f"base_url={result.get('base_url') or '-'}",
+        f"protocol={result.get('protocol') or '-'}",
+        f"status_code={result.get('status_code') or 0}",
+        f"latency_ms={result.get('latency_ms') or 0}",
+        f"tool_calling={result.get('tool_calling') or '-'}",
+    ]
+    if result.get("error"):
+        lines.append(f"error={result['error']}")
+    if result.get("reply"):
+        lines.append(f"reply={result['reply']}")
+    return "\n".join(lines)
 
 
 def _test_configs(body: LLMTestRequest) -> list[tuple[str, LLMConfig]]:
@@ -258,7 +268,7 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
     if protocol == "auto":
         lowered = provider.base_url.lower()
         protocol = "anthropic_messages" if "anthropic" in lowered or "/messages" in lowered else "openai_chat"
-    url = _chat_url(provider.base_url, protocol)
+    url = llm_request_url(provider.base_url, protocol)
     result = {
         "name": name,
         "ok": False,
@@ -274,11 +284,13 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
     }
     if not provider.api_key:
         result["error"] = "未配置 API Key"
+        result["error_copy"] = _llm_test_error_copy(result)
         return result
     try:
         assert_safe_outbound_url(url)
     except SsrfBlocked as exc:
         result["error"] = f"base_url 不被允许：{exc}"
+        result["error_copy"] = _llm_test_error_copy(result)
         return result
 
     headers = {
@@ -310,9 +322,13 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
         result["latency_ms"] = int((time.perf_counter() - started) * 1000)
         result["status_code"] = response.status_code
         if response.status_code >= 400:
-            result["error"] = _safe_error(
-                f"HTTP {response.status_code}: {response.text[:300]}", provider.api_key
+            raw = _safe_error(
+                f"HTTP {response.status_code}: {response.text[:2000]}",
+                provider.api_key,
+                limit=2000,
             )
+            result["error"] = raw[:500]
+            result["error_copy"] = _llm_test_error_copy({**result, "error": raw})
             # 连接测试是管理员手动探测，只返回结果、不写生产熔断器（避免污染在跑 worker 的端点健康）。
             return result
         data = response.json()
@@ -328,11 +344,14 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
         result.update(ok=True, reply=reply[:80])
         # 连通性 OK 后再探一次工具调用能力（额外一次小请求，仅测试按钮触发，不碰挖洞）。
         result["tool_calling"] = await _probe_tool_calling(url, headers, provider.model, protocol)
+        result["error_copy"] = _llm_test_error_copy(result)
         # 测试成功不清生产熔断器（否则会抹掉真实 cooldown，让 worker 立即冲击刚被限流的端点）。
         return result
     except Exception as exc:
         result["latency_ms"] = int((time.perf_counter() - started) * 1000)
-        result["error"] = _safe_error(exc, provider.api_key)
+        raw = _safe_error(exc, provider.api_key, limit=2000)
+        result["error"] = raw[:500]
+        result["error_copy"] = _llm_test_error_copy({**result, "error": raw})
         # 同上：手动测试失败不累加生产熔断计数。
         return result
 
@@ -342,9 +361,14 @@ async def test_llm(body: LLMTestRequest, session: AsyncSession = Depends(get_ses
     await refresh_cache(session)
     providers = _test_configs(body)
     if not providers:
-        return {"ok": False, "results": [], "error": "未配置可用 LLM 端点"}
+        return {"ok": False, "results": [], "error": "未配置可用 LLM 端点", "error_copy": "ok=false\nerror=未配置可用 LLM 端点"}
     results = [await _test_llm_one(name, provider) for name, provider in providers]
-    return {"ok": all(item["ok"] for item in results), "results": results}
+    copy_parts = [item.get("error_copy") or _llm_test_error_copy(item) for item in results]
+    return {
+        "ok": all(item["ok"] for item in results),
+        "results": results,
+        "error_copy": "\n\n".join(copy_parts),
+    }
 
 
 @router.put("")
@@ -395,3 +419,45 @@ async def workdir_cleanup(
     return await loop.run_in_executor(
         None, functools.partial(cleanup_workdir, retention_days=retention_days, dry_run=dry_run)
     )
+
+
+@router.get("/ui/wallpaper")
+async def get_ui_wallpaper():
+    path = current_wallpaper()
+    if path is None:
+        raise HTTPException(status_code=404, detail="未设置背景图")
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(path.suffix.lower(), "image/jpeg")
+    return FileResponse(
+        path,
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.post("/ui/wallpaper")
+async def upload_ui_wallpaper(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+):
+    data = await file.read()
+    if len(data) > MAX_WALLPAPER_BYTES:
+        raise HTTPException(status_code=400, detail="图片超过 3MB")
+    try:
+        save_wallpaper_bytes(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await update_settings(session, {"ui": {"wallpaperKind": "file", "wallpaperUrl": "", "saved": True}})
+    return public_settings_view()
+
+
+@router.delete("/ui/wallpaper")
+async def remove_ui_wallpaper(session: AsyncSession = Depends(get_session)):
+    delete_wallpaper()
+    await update_settings(session, {"ui": {"wallpaperKind": "none", "wallpaperUrl": "", "saved": True}})
+    return public_settings_view()

@@ -70,7 +70,7 @@
       <a href="https://github.com/1diot9">
         <img src="https://avatars.githubusercontent.com/u/181919166?v=4&s=128" width="72" height="72" alt="1diot9" /><br />
         <sub><b>1diot9</b></sub>
-      </a><br /><sup>Contributor</sup>
+      </a><br /><sup>Workdir Cleanup</sup>
     </td>
     <td align="center" width="100">
       <a href="https://github.com/qianchongceng0-cyber">
@@ -89,6 +89,29 @@
         <img src="https://avatars.githubusercontent.com/u/102737018?v=4&s=128" width="72" height="72" alt="DmcforSpc" /><br />
         <sub><b>DmcforSpc</b></sub>
       </a><br /><sup>Kimi Code</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/moliyu1101">
+        <img src="https://avatars.githubusercontent.com/u/78614185?v=4&s=128" width="72" height="72" alt="moliyu1101" /><br />
+        <sub><b>moliyu1101</b></sub>
+      </a><br /><sup>DNS Probe</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/Saide-sec">
+        <img src="https://avatars.githubusercontent.com/u/90189362?v=4&s=128" width="72" height="72" alt="Saide-sec" /><br />
+        <sub><b>Saide-sec</b></sub>
+      </a><br /><sup>Frontend UX</sup>
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td align="center" width="100">
+      <a href="https://github.com/tf748i5gf5t">
+        <img src="https://avatars.githubusercontent.com/u/110716280?v=4&s=128" width="72" height="72" alt="tf748i5gf5t" /><br />
+        <sub><b>tf748i5gf5t</b></sub>
+      </a><br /><sup>Reviewer Fix</sup>
     </td>
   </tr>
 </table>
@@ -182,6 +205,7 @@ flowchart LR
 | 💥 **通杀 Hunter** | 出洞后自动分析能否「一打一片」，实打多个同款站点验证 |
 | 🧠 **情报沉淀复用** | 验证过的凭证/端点/指纹入全局情报库，后续 Worker 直接复用 |
 | 🛡️ **内置 WAF + 鉴权** | 应用层 WAF 默认开启，多角色访问令牌（全权/只读/观摩） |
+| 💾 **数据库备份** | 设置页一键下载/恢复 SQLite（在线一致快照），可选打包工作目录，服务器定时留快照 |
 
 ---
 
@@ -359,6 +383,8 @@ docker compose up -d --build           # 更新代码后重建
 
 数据持久化在 Docker volume：`ah_data`（SQLite + 漏洞证据）、`ah_work`（Worker 临时工作区）。**升级/重启不丢数据。**
 
+**备份 / 迁移**：设置页「数据备份」可导出一致的 SQLite 快照（可选打包工作目录）并上传恢复，这是主路径。服务器默认不自动堆快照；若点「在服务器覆盖留一份」，只覆盖 `data/backups/autohunter-latest.db.gz` 这一份，空间不够会拒绝以免把库盘写满。不要用 `cp autohunter.db` 当备份——WAL 模式下直接拷文件很容易拷到半截库。
+
 **开机自启**：`docker compose up -d` 的容器默认 `restart: unless-stopped`，崩溃/重启会自动拉起。若想托管给 systemd：
 
 <details>
@@ -406,7 +432,7 @@ hunt.example.com {
 > **访问控制**：公网部署**务必设 `AUTOHUNTER_API_TOKEN`**，否则控制台和挖洞能力对全网裸奔。内置 WAF 默认开启，但令牌是第一道门。
 
 - **成本控制**：Worker 靠 LLM 驱动，目标越多 token 越贵。用 `.env` 的 `WORKER_MAX_ROUNDS` / `*_BUDGET_CAP` 收紧预算，或降低并发。
-- **资源**：每个并发 Worker 会跑真实工具子进程。小内存机器调小 `AUTOHUNTER_AGENT_THREAD_POOL_SIZE` 和任务并发数。
+- **资源**：默认按 CPU/内存自动定 Worker 并发（约 1C1G→3，2C4G→8，大机器顶 32），Docker 会读 cgroup 限额。复制 `.env.example` 不必再填线程池。要强制用 `AUTOHUNTER_WORKER_MAX_CONCURRENCY`；每个 Worker 会跑真实工具子进程，小机器把任务并发也调低。
 - **网络**：服务器需能访问 LLM API 和目标网络；走代理要给 Docker/容器配好出网。
 - **重启恢复**：`AUTOHUNTER_RESTORE_ON_STARTUP=1` 时重启自动续跑之前 running 的任务；受限机器设 `0` 只起 Web/API。
 

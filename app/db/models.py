@@ -59,6 +59,7 @@ class Task(Base):
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
+    deepen_cap: Mapped[int] = mapped_column(Integer, default=2)         # 单目标深挖回炉上限（人工+AI+lead）
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -102,6 +103,9 @@ class Target(Base):
     deepen_count: Mapped[int] = mapped_column(Integer, default=0)
     # 搜集阶段顺带查到的、过滤打分后的该域泄露凭证（喂给 worker 作额外攻击面）。
     leaked_creds: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 选靶阶段主动探测出的高价值暴露端点（如 ["/actuator", "/nacos/(需鉴权)"]），
+    # 结构化落库，供 worker 强制侦察阶段直接复用、避免重复发包。
+    exposed_endpoints: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # 用户凭据：入队时从 Task.auth_bindings 匹配写入；worker 启动 bootstrap 用。
     auth_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 最近一次凭据使用反馈（无明文）：status/kinds/reason/...
@@ -222,7 +226,7 @@ class Killsweep(Base):
     # 既用于前端展示，也会进入 worker 查重上下文，避免同学校同通杀洞反复提交。
     affected_table: Mapped[list] = mapped_column(JSON, default=list)
     notes: Mapped[str] = mapped_column(Text, default="")                 # 分析结论/批量建议
-    # analyzing / done / failed
+    # analyzing / done / failed / cancelled / invalid
     status: Mapped[str] = mapped_column(String(20), default="analyzing", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
@@ -285,4 +289,5 @@ class SystemSettings(Base):
     fofa: Mapped[dict] = mapped_column(JSON, default=dict)      # key/max_pages/page_size/default_intent_mode
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
+    ui: Mapped[dict] = mapped_column(JSON, default=dict)        # 外观：主题色 / 背景图元数据
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

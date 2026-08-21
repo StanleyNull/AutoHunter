@@ -21,11 +21,16 @@ class WorkerCooldownTests(unittest.TestCase):
         worker.cancel_event = threading.Event()
         worker.findings = []
         worker._js_tool_enabled = False
+        worker.src_rules = ""
+        worker._should_soft_retry_llm = Mock(return_value=False)
         worker._intel_block = Mock(return_value="")
         worker._duplicate_block = Mock(return_value="")
         worker._emit = Mock()
         worker._route_rounds = Mock(return_value=(1, 1))
-        worker.executor = SimpleNamespace(session_status_block=Mock(return_value=""))
+        worker.executor = SimpleNamespace(
+            session_status_block=Mock(return_value=""),
+            export_resume_state=Mock(return_value={}),
+        )
         worker.llm = SimpleNamespace(
             chat=Mock(side_effect=LLMError("provider_cooldown", "all providers cooling", retry_after=17))
         )

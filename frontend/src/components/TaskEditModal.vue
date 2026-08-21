@@ -66,6 +66,7 @@ const form = reactive({
   max_pages: 20,
   page_size: 100,
   concurrency: 3,
+  deepen_cap: 2,
   skip_site_recon: false,
 });
 const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions } =
@@ -89,7 +90,7 @@ const queryPlaceholder = computed(() => {
   const samples = {
     fofa: 'title="统一身份认证" && domain=".edu.cn"',
     quake: 'title:"统一身份认证" AND domain:"edu.cn"',
-    hunter: 'web.title="统一身份认证" && domain.suffix="edu.cn"',
+    hunter: 'ip.isp="中国教育网"&&header.status_code="200"',
     zoomeye: 'title="统一身份认证" && country="CN"',
     shodan: 'http.title:"login" hostname:edu.cn',
     censys: 'host.dns.names: edu.cn',
@@ -148,6 +149,7 @@ function fill(task) {
   form.page_size = fofaCfg.page_size ?? 100;
   form.skip_site_recon = !!fofaCfg.skip_site_recon;
   form.concurrency = task.concurrency || 3;
+  form.deepen_cap = task.deepen_cap ?? 2;
   loadAuthBindings(task);
 
   const providers = Array.isArray(modelCfg.providers) ? modelCfg.providers : [];
@@ -269,6 +271,7 @@ async function save() {
     auth_bindings: showAuthBindings.value ? exportAuthBindings() : [],
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
+    deepen_cap: Math.max(0, Math.min(parseInt(form.deepen_cap) || 0, 10)),
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   });
@@ -292,7 +295,8 @@ async function save() {
 
       <div class="settings-grid">
         <label>任务名称 <input v-model="form.name" required /></label>
-        <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="20" /></label>
+        <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
+        <label>深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
         <label>任务模式
           <select v-model="form.src_type">
             <option value="edusrc">EduSRC（教育行业）</option>
@@ -322,7 +326,7 @@ async function save() {
         <label v-if="!isSiteMode">搜集方式
           <select v-model="form.intent_mode">
             <option value="">自动判断</option>
-            <option value="syntax">查询语法（FOFA 或引擎原生均可）</option>
+            <option value="syntax">查询语法（当前引擎官网语法）</option>
             <option value="intent">自然语言意图</option>
           </select>
         </label>
@@ -333,7 +337,7 @@ async function save() {
         <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
       </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
-        FOFA 语法会自动翻译到当前引擎；直接写该引擎原生语法则原样透传。示例：<code>{{ queryPlaceholder }}</code>
+        选了哪个引擎就写哪个引擎的官网语法，原样请求，不会改写成别的引擎语法。示例：<code>{{ queryPlaceholder }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。"></textarea>
@@ -428,7 +432,7 @@ async function save() {
         <div class="settings-grid" style="margin-top: 12px">
           <label v-if="!isSiteMode">搜集最大页数 <input v-model="form.max_pages" type="number" min="1" max="200" /></label>
           <label v-if="!isSiteMode">每页条数 <input v-model="form.page_size" type="number" min="1" max="1000" /></label>
-          <p v-if="!isSiteMode" class="field-hint full">分页对当前选用的测绘引擎生效（不限于 FOFA）。</p>
+          <p v-if="!isSiteMode" class="field-hint full">分页对当前选用的测绘引擎生效。</p>
           <template v-if="!isSiteMode && engineIsFofa">
             <label>FOFA Key（任务级覆盖） <input v-model="form.fofa_key" type="password" placeholder="留空保留原值" /></label>
             <label>FOFA API 端点 <input v-model="form.fofa_base_url" placeholder="https://fofa.info" /></label>

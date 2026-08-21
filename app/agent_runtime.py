@@ -11,6 +11,10 @@
 
 collector 的轻量探活/评分不走这个池（见 collector.py 的独立 IO 池），避免一轮
 几十个探测请求瞬间榨干 agent 池。
+
+并发默认按机器规格自动档（尊重 Docker cgroup 的 CPU/内存限额）：
+大约 1C1G→3，2C4G→8，4C8G→12，8C16G→20，大机器顶 32。
+可用 AUTOHUNTER_WORKER_MAX_CONCURRENCY 显式覆盖（覆盖优先，跳过自动档）。
 """
 from __future__ import annotations
 
@@ -26,56 +30,128 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def _detect_cpus() -> int:
-    """探测可用 CPU 数：优先 sched_getaffinity（尊重 cgroup/容器绑核），退回 cpu_count。"""
+def _clamp(n: int, lo: int, hi: int) -> int:
+    return max(lo, min(int(n), hi))
+
+
+def _read_text(path: str) -> str:
     try:
-        return max(1, len(os.sched_getaffinity(0)))  # type: ignore[attr-defined]
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _cgroup_cpu_count() -> float:
+    """容器 CPU 配额。无配额或读失败返回 0。"""
+    raw = _read_text("/sys/fs/cgroup/cpu.max")
+    if raw:
+        parts = raw.split()
+        if parts and parts[0] != "max":
+            try:
+                quota = int(parts[0])
+                period = int(parts[1]) if len(parts) > 1 else 100_000
+                if quota > 0 and period > 0:
+                    return max(0.5, quota / period)
+            except ValueError:
+                pass
+    quota_s = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") or _read_text(
+        "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us"
+    )
+    period_s = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us") or _read_text(
+        "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us"
+    )
+    try:
+        quota = int(quota_s)
+        period = int(period_s)
+        if quota > 0 and period > 0:
+            return max(0.5, quota / period)
+    except (TypeError, ValueError):
+        pass
+    return 0.0
+
+
+def _cgroup_mem_gib() -> float:
+    """容器内存上限（GiB）。无上限或读失败返回 0。"""
+    raw = _read_text("/sys/fs/cgroup/memory.max") or _read_text(
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+    )
+    if not raw or raw == "max":
+        return 0.0
+    try:
+        n = int(raw)
+    except ValueError:
+        return 0.0
+    # cgroup v1 未设限额时常是 ~2^63，视为无上限。
+    if n <= 0 or n >= (1 << 60):
+        return 0.0
+    return n / (1024 ** 3)
+
+
+def _detect_cpus() -> float:
+    """可用 CPU：affinity 与 cgroup 配额取更紧的那个。"""
+    try:
+        affinity = float(max(1, len(os.sched_getaffinity(0))))  # type: ignore[attr-defined]
     except (AttributeError, OSError):
-        return max(1, os.cpu_count() or 1)
+        affinity = float(max(1, os.cpu_count() or 1))
+    cgroup = _cgroup_cpu_count()
+    if cgroup > 0:
+        return max(0.5, min(affinity, cgroup))
+    return affinity
 
 
 def _detect_mem_gib() -> float:
-    """探测物理内存(GiB)。取不到时返回 0（表示未知，不参与限制）。"""
+    """可用内存(GiB)：物理内存与 cgroup 限额取更紧的那个。都读不到返回 0（不按内存限）。"""
+    host = 0.0
     try:
         pages = os.sysconf("SC_PHYS_PAGES")  # type: ignore[attr-defined]
         page_size = os.sysconf("SC_PAGE_SIZE")  # type: ignore[attr-defined]
-        return (pages * page_size) / (1024 ** 3)
+        host = (pages * page_size) / (1024 ** 3)
     except (AttributeError, ValueError, OSError):
-        return 0.0
+        host = 0.0
+    cgroup = _cgroup_mem_gib()
+    vals = [v for v in (host, cgroup) if v > 0]
+    return min(vals) if vals else 0.0
+
+
+def _auto_worker_base_from(cpus: float, mem_gib: float) -> int:
+    """把机器规格映射成 worker 并发。纯函数，方便单测。
+
+    agent 工作是 IO 密集（大部分时间阻塞等 LLM），不是 CPU 密集：
+    - 不按核数 1:1（28 核不代表 28 worker）；
+    - 硬顶 32，避免把 LLM 上游和本机句柄打满；
+    - 小机器按 CPU / 内存里更紧的那个降档，1C1G 也能起步。
+    """
+    if cpus <= 1:
+        by_cpu = 4
+    elif cpus <= 2:
+        by_cpu = 8
+    elif cpus <= 4:
+        by_cpu = 12
+    elif cpus <= 8:
+        by_cpu = 20
+    elif cpus <= 16:
+        by_cpu = 24
+    else:
+        by_cpu = 32
+    if mem_gib <= 0:
+        by_mem = by_cpu
+    elif mem_gib < 1.5:
+        by_mem = 3
+    elif mem_gib < 3:
+        by_mem = max(4, int(mem_gib / 0.6))
+    else:
+        by_mem = max(4, int(mem_gib / 0.5))
+    return max(3, min(by_cpu, by_mem, 32))
 
 
 def _auto_worker_base() -> int:
-    """按机器规格自动挑 worker 并发基准（其余 agent 按固定比例从它推导）。
+    """按本机（含 cgroup）规格自动挑 worker 并发基准。"""
+    return _auto_worker_base_from(DETECTED_CPUS, DETECTED_MEM_GIB)
 
-    agent 工作是 IO 密集（大部分时间阻塞等 LLM 响应），不是 CPU 密集，所以：
-    - 不按 CPU 线性缩放（28 核不代表要开 28 worker）；
-    - 真正的天花板是 LLM 上游限流，故 worker 封顶 12——再高只会撞 429；
-    - 小机器则按 CPU / 内存里更紧的那个降档，避免内存和上下文切换吃紧。
 
-    可用 AUTOHUNTER_WORKER_MAX_CONCURRENCY 显式覆盖（覆盖优先，跳过自动档）。
-    """
-    cpus = _detect_cpus()
-    mem = _detect_mem_gib()
-    # CPU 档：worker 是 IO 密集（大部分时间阻塞等 LLM），2 核也能并发好几个，
-    # 所以 CPU 少也不压太狠，保证小云服务器有基本吞吐。
-    if cpus <= 2:
-        by_cpu = 4
-    elif cpus <= 4:
-        by_cpu = 6
-    elif cpus <= 8:
-        by_cpu = 8
-    elif cpus <= 16:
-        by_cpu = 10
-    else:
-        by_cpu = 12
-    # 内存档（每个 worker 峰值主要是 LLM 上下文，粗估 ~0.8GiB 预算；0=未知则不限）。
-    if mem <= 0:
-        by_mem = by_cpu
-    else:
-        by_mem = max(4, int(mem // 0.8))
-    # 绝对下限 4：再小的机器也别把并发压到个位数以下，否则小云服务器几乎跑不动。
-    return max(4, min(by_cpu, by_mem, 12))
-
+DETECTED_CPUS = _detect_cpus()
+DETECTED_MEM_GIB = _detect_mem_gib()
 
 # worker 基准：env 显式给了就用 env，否则按机器规格自动定档。
 _WORKER_ENV = os.environ.get("AUTOHUNTER_WORKER_MAX_CONCURRENCY")
@@ -83,13 +159,14 @@ _WORKER_BASE = _int_env("AUTOHUNTER_WORKER_MAX_CONCURRENCY", _auto_worker_base()
     if _WORKER_ENV else _auto_worker_base()
 
 # 各类 agent 并发上限：worker 为主，其余按固定比例从 worker 基准推导，
-# 保持 worker:review:killsweep:escalation:assistant ≈ 12:4:3:2:3 的成熟配比。
+# 保持 worker:review:killsweep:escalation:assistant ≈ 6:2:1.5:1:1.5。
+# 小机器允许降到 1，避免 1G 盒子被「每类至少 2」抬爆。
 # 每一项仍可用对应 env 单独覆盖（覆盖优先）。
 WORKER_MAX_CONCURRENCY = _WORKER_BASE
-REVIEW_MAX_CONCURRENCY = _int_env("AUTOHUNTER_REVIEW_MAX_CONCURRENCY", max(2, _WORKER_BASE // 3))
-KILLSWEEP_MAX_CONCURRENCY = _int_env("AUTOHUNTER_KILLSWEEP_MAX_CONCURRENCY", max(2, _WORKER_BASE // 4))
+REVIEW_MAX_CONCURRENCY = _int_env("AUTOHUNTER_REVIEW_MAX_CONCURRENCY", max(1, _WORKER_BASE // 3))
+KILLSWEEP_MAX_CONCURRENCY = _int_env("AUTOHUNTER_KILLSWEEP_MAX_CONCURRENCY", max(1, _WORKER_BASE // 4))
 ESCALATION_MAX_CONCURRENCY = _int_env("AUTOHUNTER_ESCALATION_MAX_CONCURRENCY", max(1, _WORKER_BASE // 6))
-ASSISTANT_MAX_CONCURRENCY = _int_env("AUTOHUNTER_ASSISTANT_MAX_CONCURRENCY", max(2, _WORKER_BASE // 4))
+ASSISTANT_MAX_CONCURRENCY = _int_env("AUTOHUNTER_ASSISTANT_MAX_CONCURRENCY", max(1, _WORKER_BASE // 4))
 
 # 线程池容量：默认 = 各类上限之和 + 余量，保证不会因容量不足而排队死锁。
 # 允许用 AUTOHUNTER_AGENT_THREAD_POOL_SIZE 覆盖，但不得小于各类上限之和。
@@ -100,10 +177,10 @@ _SUM_LIMITS = (
     + ESCALATION_MAX_CONCURRENCY
     + ASSISTANT_MAX_CONCURRENCY
 )
-# 余量：为偶发的临时提交（如少量并发的 report assistant）留 4 个缓冲，仍可 env 覆盖，
-# 但无论如何不会小于 _SUM_LIMITS（否则触发历史 futex_wait 死锁）。
+# 余量：为偶发的临时提交（如少量并发的 report assistant）留 4 个缓冲。
+# env 可以再加大，但不能把缓冲削掉——池子一旦 < 各类上限之和就会 futex_wait 死锁。
 AGENT_THREAD_POOL_SIZE = max(
-    _SUM_LIMITS,
+    _SUM_LIMITS + 4,
     _int_env("AUTOHUNTER_AGENT_THREAD_POOL_SIZE", _SUM_LIMITS + 4),
 )
 
@@ -112,12 +189,24 @@ AGENT_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="ah-agent",
 )
 
-# collector 轻量 IO（探活/评分）独立小池，与重型 agent 工作彻底隔离，
-# 避免 collector 一轮几十个探测把 agent 池占满。
-_COLLECTOR_IO_SIZE = _int_env("AUTOHUNTER_COLLECTOR_IO_POOL_SIZE", 12)
+# collector 轻量 IO（探活/评分）独立小池，与重型 agent 工作彻底隔离。
+# 随 worker 基准缩放：1G 盒子约 8，大机器顶 32。不要写死 24。
+COLLECTOR_IO_POOL_SIZE = _int_env(
+    "AUTOHUNTER_COLLECTOR_IO_POOL_SIZE", _clamp(_WORKER_BASE, 8, 32)
+)
 COLLECTOR_IO_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_COLLECTOR_IO_SIZE,
+    max_workers=COLLECTOR_IO_POOL_SIZE,
     thread_name_prefix="ah-collector-io",
+)
+
+# 其余 IO 并发同样跟 worker 基准走，env 仍可单项覆盖。
+PREFILTER_CONCURRENCY = _int_env("COLLECTOR_PREFILTER_CONCURRENCY", _clamp(_WORKER_BASE, 6, 24))
+SCORE_CONCURRENCY = _int_env("COLLECTOR_SCORE_CONCURRENCY", _clamp(_WORKER_BASE // 2, 4, 16))
+TARGET_FILTER_CONCURRENCY = _int_env("TARGET_FILTER_CONCURRENCY", _clamp(_WORKER_BASE // 2, 3, 12))
+QUEUE_LIVENESS_CONCURRENCY = _int_env("QUEUE_LIVENESS_CONCURRENCY", _clamp(_WORKER_BASE, 4, 16))
+QUEUE_LIVENESS_BATCH_SIZE = _int_env("QUEUE_LIVENESS_BATCH_SIZE", _clamp(_WORKER_BASE * 2, 12, 48))
+DEFAULT_THREAD_POOL_SIZE = _int_env(
+    "AUTOHUNTER_DEFAULT_THREAD_POOL_SIZE", _clamp(_WORKER_BASE // 2 + 4, 4, 16)
 )
 
 

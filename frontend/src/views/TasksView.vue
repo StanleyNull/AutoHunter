@@ -1,8 +1,10 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onActivated, onDeactivated, onMounted, onUnmounted, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, authReadyRef, authRequiredRef, authRoleRef, loadAuthRole, verifyToken } from "../api.js";
 import TaskEditModal from "../components/TaskEditModal.vue";
+
+defineOptions({ name: "TasksView" });
 
 const tasks = ref([]);
 const initialLoading = ref(true);
@@ -23,13 +25,24 @@ const STATUS_LABEL = {
 function taskModeLabel(t) {
   return t?.src_type === "enterprise" ? "企业SRC" : "EduSRC";
 }
-function targetSourceLabel(source) {
+function engineLabel(engine) {
   return {
     fofa: "FOFA",
-    manual: "手动清单",
-    both: "FOFA+手动",
-    site: "单站协作",
-}[source] || source || "-";
+    quake: "360 Quake",
+    hunter: "Hunter",
+    zoomeye: "ZoomEye",
+    shodan: "Shodan",
+    censys: "Censys",
+  }[engine] || engine || "";
+}
+function targetSourceLabel(t) {
+  const source = t?.target_source;
+  const eng = engineLabel(t?.engine);
+  if (source === "manual") return "手动清单";
+  if (source === "site") return "单站协作";
+  if (source === "both") return eng ? `${eng}+手动` : "测绘+手动";
+  if (source === "fofa") return eng || "测绘搜集";
+  return source || "-";
 }
 function taskScopeText(t) {
   if (t?.target_source === "site") {
@@ -128,6 +141,14 @@ onMounted(async () => {
   if (!authReadyRef.value) await loadAuthRole();
   await load();
 });
+onActivated(() => {
+  if (tasks.value.length) load({ background: true });
+  syncPoller();
+});
+onDeactivated(() => {
+  clearInterval(pollTimer);
+  pollTimer = null;
+});
 onUnmounted(() => {
   clearInterval(pollTimer);
   pollTimer = null;
@@ -197,7 +218,7 @@ watch(hasRunning, () => syncPoller());
                 :title="`${t.pending_user_review} 个漏洞待复审`">{{ t.pending_user_review }}</span>
           <div class="task-card-meta">
             <span class="badge" :class="t.status">{{ STATUS_LABEL[t.status] || t.status }}</span>
-            <span class="meta">{{ taskModeLabel(t) }} · {{ targetSourceLabel(t.target_source) }} · 并发 {{ t.concurrency }}</span>
+            <span class="meta">{{ taskModeLabel(t) }} · {{ targetSourceLabel(t) }} · 并发 {{ t.concurrency }} · 深挖 ×{{ t.deepen_cap ?? 2 }}</span>
           </div>
           <div class="meta task-query">{{ taskScopeText(t) }}</div>
         </div>

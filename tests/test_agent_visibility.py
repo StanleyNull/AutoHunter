@@ -214,6 +214,7 @@ class WorkerDirectiveInjectionTests(unittest.TestCase):
         worker.findings = []
         worker._finished = None
         worker._js_tool_enabled = False
+        worker.src_rules = ""
         worker._reported_intel = []
         worker._reported_coverage = []
         worker._intel_block = Mock(return_value="")

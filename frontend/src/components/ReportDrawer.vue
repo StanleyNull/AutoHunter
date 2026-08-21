@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, nextTick } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { api, canWrite, isReadonly } from "../api.js";
@@ -20,7 +20,16 @@ const deepenText = ref("");
 const assistantText = ref("");
 const assistantBusy = ref(false);
 const assistantMessages = ref([]);
-const DEFAULT_ASSISTANT_WELCOME = "我可以回答这份报告的证据、危害、复现、修复问题。你也可以让我再发一个请求或跑一个简短 curl 做补充验证。";
+const assistantAbort = ref(null);
+const raLog = ref(null);
+const DEFAULT_ASSISTANT_WELCOME = "我是这份漏洞的报告助手。点下面的快捷指令，或直接问证据、等级、复现怎么写。润色结果可以一键写进编辑器。";
+const ASSISTANT_PRESETS = [
+  { label: "审证据", text: "判断这份报告证据链是否足够提交 SRC：缺什么、有没有像误报的地方、过审概率怎么看。" },
+  { label: "润色成SRC口径", text: "按当前 SRC 类型把标题、描述、影响范围、复现步骤和 PoC 改成可直接提交的口径，并调用改稿工具。" },
+  { label: "补复现步骤", text: "把复现步骤写成审核员能跟着点的逐步操作，补齐请求要点和判定成功的标志。" },
+  { label: "校准等级", text: "根据实际危害校准严重/高危/中危/低危，说明为什么现在这个等级站得住或应该下调。" },
+  { label: "现场再验证", text: "对 PoC 或关键接口再发一次定向请求，看漏洞是否仍在，并解读状态码和关键响应。" },
+];
 const SEVS = ["严重", "高危", "中危", "低危"];
 const isEnterprise = computed(() => props.srcType === "enterprise");
 
@@ -43,6 +52,10 @@ watch(() => props.findingId, async (id) => {
   deepenText.value = "";
   assistantText.value = "";
   assistantBusy.value = false;
+  if (assistantAbort.value) {
+    assistantAbort.value.abort();
+    assistantAbort.value = null;
+  }
   const saved = f.value.assistant_messages;
   assistantMessages.value = (saved?.length)
     ? saved
@@ -161,13 +174,46 @@ function copyEdusrcJson() {
     .catch(() => emit("toast", "复制失败，请使用导出按钮"));
 }
 
-const TOOL_LABEL = { http_request: "HTTP 请求", run_shell: "执行命令" };
+const TOOL_LABEL = { http_request: "HTTP 请求", run_shell: "执行命令", propose_report_edits: "提出改稿" };
 
 function stepLabel(ev) {
   if (ev.type === "thinking") return ev.text || "分析中…";
   if (ev.type === "tool_call") return `${TOOL_LABEL[ev.tool] || ev.tool}：${ev.summary || ""}`;
   if (ev.type === "tool_result") return `↳ ${ev.summary || "完成"}`;
   return ev.text || "";
+}
+
+function editFields(edits) {
+  if (!edits) return [];
+  return ["title", "description", "affected_scope", "steps", "poc", "severity"].filter((k) => edits[k]);
+}
+
+async function scrollAssistant() {
+  await nextTick();
+  const el = raLog.value;
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+function stopAssistant() {
+  if (assistantAbort.value) assistantAbort.value.abort();
+}
+
+function copyAssistant(m) {
+  const text = (m.content || m.partial || "").trim();
+  if (!text) { emit("toast", "还没有可复制的内容"); return; }
+  copyText(text).then(() => emit("toast", "已复制助手回复")).catch(() => emit("toast", "复制失败"));
+}
+
+function applySuggestedEdits(edits) {
+  if (!edits || !f.value) return;
+  if (edits.title) edit.value.title = edits.title;
+  if (edits.description) edit.value.description = edits.description;
+  if (edits.affected_scope) edit.value.affected_scope = edits.affected_scope;
+  if (Array.isArray(edits.steps)) edit.value.steps = edits.steps.join("\n");
+  if (edits.poc) edit.value.poc = edits.poc;
+  if (edits.severity) userSeverity.value = edits.severity;
+  editing.value = true;
+  emit("toast", "已填入编辑器，确认后点保存修改");
 }
 
 /** 聊天输入框 Enter 发送：跳过 IME 组合期（拼音输入法确认候选词时不触发发送）。 */
@@ -183,11 +229,13 @@ async function askAssistant(preset = "") {
   assistantText.value = "";
   assistantMessages.value.push({ role: "user", content: text });
   assistantBusy.value = true;
+  scrollAssistant();
 
-  // 流式助手回复：steps 实时累积过程，content 为最终答复。
   const liveMsg = { role: "assistant", content: "", steps: [], streaming: true };
   assistantMessages.value.push(liveMsg);
   const idx = assistantMessages.value.length - 1;
+  const controller = new AbortController();
+  assistantAbort.value = controller;
 
   const update = (patch) => {
     assistantMessages.value[idx] = { ...assistantMessages.value[idx], ...patch };
@@ -195,13 +243,13 @@ async function askAssistant(preset = "") {
   const pushStep = (ev) => {
     const cur = assistantMessages.value[idx];
     const steps = [...(cur.steps || [])];
-    // tool_result 紧跟同名 tool_call，合并展示更清爽。
     if (ev.type === "tool_result" && steps.length && steps[steps.length - 1].type === "tool_call") {
       steps[steps.length - 1] = { ...steps[steps.length - 1], result: stepLabel(ev) };
     } else {
       steps.push({ type: ev.type, label: stepLabel(ev), tool: ev.tool });
     }
     update({ steps });
+    scrollAssistant();
   };
 
   try {
@@ -214,24 +262,48 @@ async function askAssistant(preset = "") {
           break;
         case "assistant_partial":
           update({ partial: ev.text });
+          scrollAssistant();
+          break;
+        case "suggested_edits":
+          update({ suggestedEdits: ev.edits || null });
           break;
         case "final":
-          update({ content: ev.text || "", partial: "" });
+          update({
+            content: ev.text || "",
+            partial: "",
+            suggestedEdits: ev.suggested_edits || assistantMessages.value[idx].suggestedEdits || null,
+          });
+          scrollAssistant();
           break;
         case "done":
-          update({ content: ev.answer || assistantMessages.value[idx].content || "已完成。", streaming: false, partial: "" });
+          update({
+            content: ev.answer || assistantMessages.value[idx].content || "已完成。",
+            streaming: false,
+            partial: "",
+            suggestedEdits: ev.suggested_edits || assistantMessages.value[idx].suggestedEdits || null,
+          });
           break;
         default:
           break;
       }
-    });
+    }, controller.signal);
     if (assistantMessages.value[idx].streaming) {
       update({ streaming: false });
     }
   } catch (e) {
-    update({ content: `报告助手异常：${String(e.message || e)}`, streaming: false });
+    if (e?.name === "AbortError") {
+      update({
+        content: assistantMessages.value[idx].content || assistantMessages.value[idx].partial || "已停止。",
+        streaming: false,
+        partial: "",
+      });
+    } else {
+      update({ content: `报告助手异常：${String(e.message || e)}`, streaming: false });
+    }
   } finally {
     assistantBusy.value = false;
+    assistantAbort.value = null;
+    scrollAssistant();
   }
 }
 </script>
@@ -295,18 +367,25 @@ async function askAssistant(preset = "") {
           <div class="ra-head">
             <div>
               <span>报告助手</span>
-              <small>{{ readonlyOnly ? "只读模式不可发送" : readonly ? "未认证，请先换令牌" : "问证据、问危害、问复现；也可让它做少量补充验证" }}</small>
+              <small>{{ readonlyOnly ? "只读模式不可发送" : readonly ? "未认证，请先换令牌" : "问证据、等级、复现；可改稿进编辑器，也可做少量定向验证" }}</small>
             </div>
             <div v-if="!readonly" class="ra-actions">
-              <button @click="askAssistant('帮我判断这份报告证据链是否足够提交 SRC，还有哪些风险点？')" :disabled="assistantBusy">审证据</button>
-              <button @click="askAssistant('把这个漏洞用 SRC 提交口径重新总结成三句话。')" :disabled="assistantBusy">压缩总结</button>
+              <button v-if="assistantBusy" class="ra-stop" @click="stopAssistant">停止</button>
             </div>
           </div>
-          <div class="ra-log">
+          <div v-if="!readonly" class="ra-chips">
+            <button
+              v-for="p in ASSISTANT_PRESETS"
+              :key="p.label"
+              type="button"
+              :disabled="assistantBusy"
+              @click="askAssistant(p.text)"
+            >{{ p.label }}</button>
+          </div>
+          <div ref="raLog" class="ra-log">
             <div v-for="(m, i) in assistantMessages" :key="i" class="ra-msg" :class="m.role">
               <span>{{ m.role === "user" ? "你" : "助手" }}</span>
               <div class="ra-body">
-                <!-- 过程步骤（思考 / 工具调用 / 工具结果），实时展示助手在干什么 -->
                 <ul v-if="m.steps && m.steps.length" class="ra-steps">
                   <li v-for="(s, si) in m.steps" :key="si" class="ra-step" :class="s.type">
                     <span class="ra-step-ico">{{ s.type === "tool_call" ? "⚙" : s.type === "thinking" ? "…" : "•" }}</span>
@@ -316,22 +395,33 @@ async function askAssistant(preset = "") {
                     </span>
                   </li>
                 </ul>
-                <!-- 流式中的思考文字 -->
                 <div v-if="m.streaming && m.partial && !m.content" class="ra-md ra-partial" v-html="renderAssistantMd(m.partial)"></div>
-                <!-- 最终答复 -->
                 <div v-if="m.content" class="ra-md" v-html="renderAssistantMd(m.content)"></div>
-                <!-- 流式占位 -->
                 <div v-if="m.streaming && !m.content && !m.partial && !(m.steps && m.steps.length)" class="ra-md ra-pending"><p>正在分析…</p></div>
                 <span v-if="m.streaming" class="ra-cursor">▍</span>
+                <div v-if="m.suggestedEdits && editFields(m.suggestedEdits).length" class="ra-suggest">
+                  <div>
+                    <b>可应用改稿</b>
+                    <small>{{ editFields(m.suggestedEdits).join("、") }}{{ m.suggestedEdits.rationale ? ` · ${m.suggestedEdits.rationale}` : "" }}</small>
+                  </div>
+                  <button class="primary" :disabled="readonly" @click="applySuggestedEdits(m.suggestedEdits)">写入编辑器</button>
+                </div>
+                <div v-if="m.role === 'assistant' && (m.content || m.partial) && !m.streaming" class="ra-msg-actions">
+                  <button type="button" @click="copyAssistant(m)">复制</button>
+                </div>
               </div>
             </div>
           </div>
           <div v-if="!readonly" class="ra-input">
             <textarea v-model="assistantText" rows="2"
               placeholder="例：这个洞为什么不是普通信息泄露？再 curl 一下 PoC 看状态码。"
-              @keydown.enter.exact="onChatEnter($event, askAssistant)"></textarea>
-            <button class="primary" @click="askAssistant()" :disabled="assistantBusy || !assistantText.trim()">发送</button>
+              :disabled="assistantBusy"
+              @keydown.enter.exact="onChatEnter($event, askAssistant)"
+              @keydown.esc="stopAssistant"></textarea>
+            <button v-if="assistantBusy" class="ra-stop" @click="stopAssistant">停止</button>
+            <button v-else class="primary" @click="askAssistant()" :disabled="!assistantText.trim()">发送</button>
           </div>
+          <p v-if="!readonly" class="ra-hint">Enter 发送 · Shift+Enter 换行 · Esc 停止</p>
         </section>
       </div>
 

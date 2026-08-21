@@ -1,8 +1,7 @@
 """同步引擎查询桥接：给线程池里的同步 agent（worker.fofa_lookup / killsweep）使用。
 
 engine.search 是 async；worker/killsweep 跑在 AGENT_EXECUTOR 线程里（无事件循环），
-用 asyncio.run 开一个临时 loop 执行即可。查询统一按 FOFA 语法书写，请求前翻译成目标引擎，
-这样通杀/圈定也能走 Quake / Hunter / ZoomEye / Shodan / Censys，而不再硬绑 FOFA。
+用 asyncio.run 开一个临时 loop 执行即可。查询按当前引擎官网语法原样请求，不再从 FOFA 翻译。
 """
 from __future__ import annotations
 
@@ -26,13 +25,13 @@ def engine_search_sync(
     page: int = 1,
     page_size: int = 20,
     base_url: str | None = None,
-    translate_from_fofa: bool = True,
+    translate_from_fofa: bool = False,
 ) -> EngineResult:
     """同步执行一次引擎查询，返回统一 EngineResult。异常向上抛给调用方降级处理。"""
     engine = get_engine(engine_name)
     if engine is None:
         raise ValueError(f"未知测绘引擎: {engine_name}")
-    q = engine.translate_query(query, "fofa") if translate_from_fofa else query
+    q = query
     base = base_url or engine.get_default_base_url()
     return asyncio.run(
         engine.search(api_key, q, page=page, page_size=page_size, base_url=base)

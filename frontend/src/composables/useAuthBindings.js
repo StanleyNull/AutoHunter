@@ -53,11 +53,9 @@ export function useAuthBindings(manualTargetsGetter) {
 
   return {
     authBindings,
-    emptyBinding,
     addBinding,
     removeBinding,
     exportAuthBindings,
     bindingOptions,
-    manualTargetLines,
   };
 }

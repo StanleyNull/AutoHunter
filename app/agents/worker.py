@@ -24,9 +24,10 @@ from app.agents.write_proof import HARMLESS_PROTOCOL, weak_write_block_reason
 from app.agents import auth_bootstrap
 from app.config import worker_config
 from app import dedup
-from app.llm.client import LLMClient, LLMError
+from app.llm.client import LLMClient, LLMError, llm_error_event_fields
 from app.schemas import Finding, Verdict, WorkerResult
 from app.tools.executor import ToolExecutor
+from app.urlnorm import ensure_scheme, is_unusable_host, safe_urlparse
 from app.tools.schemas import (
     JS_ANALYZER_TOOL_SCHEMAS,
     SESSION_TOOL_SCHEMAS,
@@ -43,6 +44,39 @@ _JS_INTENT_RE = re.compile(
 )
 _WORKER_STATIC_PREFIX = (
     "下一条是目标/情报。只打当前目标；确认无攻击面才快速 finish。工具按信号开放，JS 线索再用 analyze_javascript。"
+)
+
+# 强制前置侦察：通用高危入口探测路径（技术路径，不绑定具体商业产品）。
+# 仅用于确定性测绘，把常见后台/API/运维面先探出来给模型，弱模型也不会漏入口。
+_RECON_PROBE_PATHS = (
+    "/admin", "/admin/", "/login", "/login/", "/api", "/api/", "/api/v1", "/api/v2",
+    "/swagger-ui.html", "/swagger", "/swagger/index.html", "/api-docs", "/v2/api-docs", "/doc.html",
+    "/actuator", "/actuator/", "/druid", "/druid/", "/console", "/console/",
+    "/phpmyadmin", "/phpMyAdmin", "/manager/html", "/manager",
+    "/graphql", "/graphiql", "/.env", "/.git/config", "/debug", "/status", "/health",
+    "/metrics", "/info", "/jenkins", "/solr", "/_profiler", "/upload", "/uploads", "/files",
+)
+# 技术栈指纹规则：仅识别通用框架/中间件，辅助模型优先打法（非商业产品示例）。
+_RECON_FINGERPRINT_RULES = (
+    ("Spring Boot", ("spring boot", "springboot", "whitelabel error page")),
+    ("Actuator", ("/actuator", "management.endpoint")),
+    ("Druid", ("druid", "德鲁伊")),
+    ("Nacos", ("nacos",)),
+    ("ThinkPHP", ("thinkphp",)),
+    ("Laravel", ("laravel", "x-laravel")),
+    ("WordPress", ("wordpress", "wp-content", "wp-includes")),
+    ("Jenkins", ("jenkins", "x-jenkins")),
+    ("phpMyAdmin", ("phpmyadmin",)),
+    ("Apache Solr", ("solr",)),
+    ("Tomcat", ("apache-coyote", "tomcat")),
+    ("Nginx", ("nginx",)),
+    ("IIS", ("microsoft-iis",)),
+    ("Apache", ("apache",)),
+    ("JBoss", ("jboss",)),
+    ("WebLogic", ("weblogic",)),
+    ("Vue", ("__nuxt", "_vue", "vue.")),
+    ("React", ("reactjs", "react.")),
+    ("Angular", ("angular", "ng-")),
 )
 
 # LLM 调用失败时，worker 内软重试次数（清粘性后换端点/同端点再试），耗尽才整轮收尾回队。
@@ -131,6 +165,925 @@ class Worker:
             "javascript", "script", "api_exposed", "secret", "前端",
         ))
 
+    # ---- 强制前置侦察：LLM 自主挖洞前确定性完成入口测绘 ----
+    def _safe_recon_req(self, executor, url: str, follow_redirects: bool = False) -> dict:
+        """包裹 executor.http_request，任何异常都返回空 dict，避免侦察拖垮主流程。"""
+        try:
+            return executor.http_request(url=url, method="GET", follow_redirects=follow_redirects) or {}
+        except Exception:
+            return {}
+
+    def _looks_blocked(self, resp: dict) -> bool:
+        """轻量判断响应是否像被 WAF/风控拦截页（不依赖具体厂商指纹，仅看状态码反射与通用拦截词）。"""
+        if not isinstance(resp, dict):
+            return False
+        code = resp.get("status_code")
+        if code in (406, 429, 503):
+            return True
+        body = str((resp.get("body") or "")).lower()
+        if not body:
+            return False
+        return any(
+            kw in body
+            for kw in (
+                "access denied", "forbidden", "blocked", "your request has been blocked",
+                "security violation", "请求被拦截", "已被拦截", "访问被拒绝", "防火墙", "captcha",
+                "verify you are human", "just a moment", "拦截", "阻断", "攻击特征", "危险请求",
+            )
+        )
+
+    def _recon_title(self, resp: dict) -> str:
+        body = (resp or {}).get("body") or ""
+        if not body:
+            return ""
+        m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        return (m.group(1).strip()[:120] if m else "")
+
+    def _recon_header(self, resp: dict, key: str) -> str:
+        hdrs = (resp or {}).get("response_headers") or {}
+        if not isinstance(hdrs, dict):
+            return ""
+        for k, v in hdrs.items():
+            if k.lower() == key.lower():
+                return str(v)[:80]
+        return ""
+
+    def _recon_js_signal(self, resp: dict) -> bool:
+        if not isinstance(resp, dict):
+            return False
+        text = str((resp.get("body") or ""))
+        if ".js" in text or _JS_INTENT_RE.search(text):
+            return True
+        return bool(_JS_INTENT_RE.search(str(resp.get("url") or "")))
+
+    def _recon_fingerprint(self, resp: dict) -> list:
+        if not isinstance(resp, dict):
+            return []
+        hdrs = (resp or {}).get("response_headers") or {}
+        header_blob = " ".join(f"{k}:{v}" for k, v in hdrs.items() if isinstance(hdrs, dict))
+        blob = (header_blob + " " + str((resp.get("body") or ""))).lower()
+        found = []
+        for name, keys in _RECON_FINGERPRINT_RULES:
+            if any(k.lower() in blob for k in keys):
+                found.append(name)
+        return found[:12]
+
+    @staticmethod
+    def _dedupe_script_srcs(srcs: list, base: str) -> list:
+        """把首页 <script src> 归一化为可独立分析的绝对 URL，去重并排除无关资源。
+
+        仅保留同源或绝对路径的脚本（跨域 CDN 分析价值低且易超时），避免重复发包。
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for s in srcs or []:
+            s = (s or "").strip()
+            if not s or s.startswith(("data:", "blob:", "javascript:", "//")):
+                continue
+            if s.startswith("/"):
+                s = base + s
+            elif not s.startswith("http"):
+                continue
+            key = s.rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+        return out
+
+    # 轻量参数级探测：对常见漏洞承载参数名做只读 GET，按响应特征提示对应漏洞类。
+    # 不发包到不存在的参数（默认首页即带参请求），只标记「该参数在目标上有响应差异」给模型。
+    _RECON_PARAM_PROBES = (
+        ("id", "IDOR/越权/SQLi：对象/记录主键常被直接引用"),
+        ("file", "任意文件读取/LFI：file 参数常接路径"),
+        ("path", "任意文件读取/LFI/路径遍历"),
+        ("url", "SSRF：url 参数常外发或内网请求"),
+        ("redirect", "开放重定向/SSRF：redirect 参数常做跳转"),
+        ("token", "令牌泄露/越权：token 参数常携凭证"),
+        ("page", "分页越权/敏感信息泄露：page 参数常暴露列表"),
+        ("filename", "任意文件读取/LFI"),
+        ("download", "任意文件下载/越权下载"),
+        ("q", "SQLi/命令注入：搜索参数常进查询"),
+        ("keyword", "SQLi/命令注入：搜索参数常进查询"),
+        ("cmd", "命令注入：cmd 参数常直接执行"),
+        ("host", "SSRF/主机头注入：host 参数常做内网寻址"),
+    )
+
+    # 参数级漏洞字典探测：仅对「已被 _param_probe_block 确认在目标上有响应」的参数，
+    # 再发一组**只读 GET**特征 payload，按响应特征标记确定性漏洞线索（仅供模型深挖，不误报为已确认洞）。
+    # 每条规则：(payload, 漏洞类, 命中特征正则列表)；命中特征全部小写匹配响应正文。
+    # 设计为「绝不写/不改服务端状态」的探针——SQLi 仅触发报错回显、SSTI 仅触发表达式求值回显、遍历仅读系统文件特征。
+    _RECON_PARAM_PAYLOADS = (
+        ("'\"`", "SQLi", ("sql syntax", "mysql", "sqlite", "ora-", "pg_query", "syntax error", "unclosed quotation", "you have an error")),
+        ("{{7*7}}", "SSTI/server-side 模板注入", ("49", "jinja", "freemarker", "velocity")),
+        ("../../../../../../etc/passwd", "路径遍历/LFI", ("root:x:", "bin/bash", "daemon:x:")),
+        ("{{7*'7'}}", "SSTI/server-side 模板注入", ("7777777", "49")),
+        ("<svg/onload=alert(1)>", "反射型 XSS（参数回显）", ("<svg/onload=alert(1)>", "alert(1)")),
+        ("$ENV{'PATH'}", "命令/模板注入", ("/usr/bin", "/bin:", "path'")),
+    )
+
+    # 匿名响应体敏感数据泄露特征：仅用于「匿名可达端点」的确定性只读扫描，
+    # 把模糊的「匿名可达」标记升级为具体的「疑似泄露了什么」。每条：(标签, 正则, 去敏样例)。
+    # 正则全部小写匹配响应正文（预转为小写）；命中即产出确定性线索交由模型复现，不直接判定为漏洞。
+    # 设计为只读特征扫描——不发任何写请求、不枚举、不爆破，仅读匿名 GET 的返回正文一次。
+    _RECON_LEAK_SIGS = (
+        ("邮箱", r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", "user@example.com"),
+        ("手机号", r"1[3-9]\d{9}", "138****0000"),
+        ("身份证号", r"\b\d{17}[\dxX]\b", "11010119900101123X"),
+        ("JSON 接口裸数据", r"\"(id|user(id)?|phone|email|token|password|mobile|realname|address)\"\s*:", "{\"id\":1,\"phone\":…"),
+        ("JWT/令牌", r"eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+", "eyJhbGciOi…"),
+        ("API Key/私钥", r"(api[_-]?key|secret|private[_-]?key|access[_-]?token)[\"'\s:=]+[a-z0-9/+]{16,}", "api_key=\"…\""),
+        ("SQL/堆栈报错", r"(sql syntax|traceback \(most recent call|stack trace|java\.lang\.(nullpointer|runtime)|unhandled exception)", "SQL syntax error"),
+        ("XML/SOAP 裸响应", r"<\?xml|<\w+:\w+(\s|>)", "<?xml version…"),
+    )
+
+    # 业务流节点识别：按 URL 路径关键字把已发现端点聚类到业务阶段，并给出该阶段的典型逻辑缺陷打法。
+    # 元素：(关键字元组, 阶段名, 建议攻击面, 业务指纹key)。命中任一关键字即归入该阶段；顺序即优先级（先精确后泛化）。
+    # 业务指纹key 用于在攻击链模板匹配时构造 biz:<key> 软指纹，让「业务流识别」闭环到「打法推荐」。
+    # 目的：把「散落的接口」连成「业务流地图」，让模型定向打业务逻辑缺陷（订单 IDOR/支付篡改/越权操作用户等），
+    # 而非把每个接口当孤立端点。纯静态路径分析，不发包、确定性、零误报风险。
+    _BUSINESS_FLOW_NODES = (
+        (("register", "signup", "sign-up", "regist"), "账号注册/开通",
+         "注册逻辑绕过（重复注册/验证码绕过/邀请码爆破）、默认角色权限过高", "register"),
+        (("login", "logon", "signin", "auth", "oauth", "sso", "cas"), "身份认证/登录",
+         "登录态窃取（JWT/会话）、认证绕过（空密码/参数篡改）、SSO/CAS 越权、弱口令", "auth"),
+        (("logout", "exit", "signout"), "会话注销", "注销后令牌未失效（复用令牌）、CSRF 注销", "session"),
+        (("password", "reset", "forget", "forgot", "pwd"), "密码重置/找回",
+         "重置令牌可预测/不过期、重置响应枚举（用户是否存在）、密码找回逻辑绕过", "reset"),
+        (("order", "orders", "trade", "bill", "invoice"), "订单/交易",
+         "订单 IDOR（遍历他人订单）、订单状态篡改、越权查看/操作他人订单", "order"),
+        (("pay", "payment", "checkout", "alipay", "wechat", "wxpay", "charge"), "支付/收银",
+         "支付金额/数量篡改（负值/0 元/小数溢出）、支付方式绕过、回调伪造", "payment"),
+        (("refund", "return", "cancel"), "退款/退货",
+         "退款金额篡改、退款逻辑绕过（重复退款/未发货退款）、越权退款他人订单", "refund"),
+        (("cart", "basket", "shopcar"), "购物车", "购物车越权操作、优惠券/折扣叠加绕过", "cart"),
+        (("user", "users", "member", "profile", "account", "mine", "center"), "用户中心/个人资料",
+         "水平越权（改他人 user_id）、个人资料 XSS、绑定信息篡改", "user_center"),
+        (("address", "consignee", "receiver"), "收货地址", "地址 ID IDOR（篡改/查看他人地址）", "address"),
+        (("coupon", "discount", "promo", "voucher"), "优惠券/营销", "优惠券爆破/叠加、活动逻辑绕过", "coupon"),
+        (("admin", "manage", "backend", "console", "dashboard", "sys"), "后台/管理面",
+         "垂直越权（普通用户访问管理接口）、后台未授权、管理功能滥用", "admin"),
+        (("api", "v1", "v2", "graphql", "openapi"), "API/开放接口",
+         "API 越权/未授权、GraphQL introspection、批量查询越权", "api"),
+        (("upload", "file", "attachment", "avatar"), "文件上传", "上传 webshell/恶意文件、路径遍历、存储型 XSS", "upload"),
+        (("search", "query", "list", "querylist"), "查询/检索", "SQLi/命令注入、越权查询他人数据、敏感信息泄露", "search"),
+    )
+
+    def _business_flow_block(self, base: str, apis: list[str], hit_paths: list[tuple[str, int]],
+                             meta_exposed: list) -> str:
+        """业务流状态机映射：把已发现端点按业务阶段聚类，给模型一张「业务流地图」。
+
+        纯静态路径关键字匹配，不发包、确定性。命中端点归入对应业务阶段并标注典型逻辑缺陷打法，
+        帮助模型从「孤立接口」升级到「业务流程攻击」（IDOR/支付篡改/越权操作等）。
+        无任何端点命中业务关键字时返回空字符串（不刷屏）。
+        """
+        # 汇总所有候选端点：探测命中 + JS 接口 + 选靶暴露端点
+        candidates: list[str] = []
+        for p, _ in hit_paths:
+            candidates.append(base + p)
+        candidates.extend(apis)
+        for e in meta_exposed[:20]:
+            ep = re.split(r"[（(]", str(e), maxsplit=1)[0].strip()
+            if ep and ep.startswith(("http://", "https://", "/")):
+                candidates.append(ep if ep.startswith("http") else base + ep)
+
+        if not candidates:
+            return ""
+
+        # 聚类：每个阶段收集命中的端点（去重）
+        buckets: dict[str, list[str]] = {}
+        for url in candidates:
+            low = url.lower()
+            for keys, stage, advice, _biz in self._BUSINESS_FLOW_NODES:
+                if any(k in low for k in keys):
+                    buckets.setdefault(stage, []).append(url)
+                    break  # 每个端点只归入最优先匹配的阶段
+
+        if not buckets:
+            return ""
+
+        lines = ["## 业务流状态机映射（系统据端点路径推断，供定向打业务逻辑缺陷）"]
+        for keys, stage, advice, _biz in self._BUSINESS_FLOW_NODES:
+            eps = buckets.get(stage)
+            if not eps:
+                continue
+            seen = list(dict.fromkeys(eps))[:8]  # 去重并限 8 条避免刷屏
+            lines.append(f"### {stage}（命中 {len(eps)} 个端点）")
+            for u in seen:
+                lines.append(f"- {u}")
+            lines.append(f"  建议打法：{advice}")
+        lines.append(
+            "提示：把以上端点视为「业务流程」而非孤立接口——优先测水平/垂直越权（换他人 ID/角色）、"
+            "状态与金额篡改、关键步骤跳过；同阶段端点间常存在依赖（下单→支付→退款），可串起来打。"
+        )
+        return "\n".join(lines)
+
+    def _detect_business_stages(self, base: str, apis: list[str], hit_paths: list[tuple[str, int]],
+                                meta_exposed: list) -> list[str]:
+        """从已发现端点识别业务阶段，返回 biz_key 列表（按命中端点数降序）。
+
+        用于把「业务流识别」闭环到「攻击链模板匹配」——worker 在 recon 后已掌握业务上下文，
+        此时按 biz:<key> 软指纹重新匹配模板，优先复用与业务强相关的成功打法（订单 IDOR/支付篡改等）。
+        纯静态路径分析、不发包、确定性；无任何命中返回空列表。
+        """
+        candidates: list[str] = []
+        for p, _ in hit_paths:
+            candidates.append(base + p)
+        candidates.extend(apis)
+        for e in meta_exposed[:20]:
+            ep = re.split(r"[（(]", str(e), maxsplit=1)[0].strip()
+            if ep and ep.startswith(("http://", "https://", "/")):
+                candidates.append(ep if ep.startswith("http") else base + ep)
+
+        # 统计每个 biz_key 命中的端点数（按最优先匹配阶段计）
+        counts: dict[str, int] = {}
+        for url in candidates:
+            low = url.lower()
+            for keys, _stage, _advice, biz in self._BUSINESS_FLOW_NODES:
+                if any(k in low for k in keys):
+                    counts[biz] = counts.get(biz, 0) + 1
+                    break
+        # 按命中数降序返回 biz_key；无命中返回空
+        return [k for k, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
+
+    def _param_dict_leads(self, executor, base: str, confirmed_params: list[str]) -> list[dict]:
+        """参数级漏洞字典探测的结构化版：对已在目标上确认有响应的参数发只读特征 payload 直通，
+        返回确定性命中线索（param/url/vuln_cls/signature），供模型首轮直接拿到「已确认可疑参数清单」，
+        省去重新发包验证。仅当参数名命中 `_RECON_PARAM_PROBES` 才探测，避免浪费发包；
+        **不**直接判定为漏洞（仅特征探针）。全程静默降级返回空列表。
+        """
+        if executor is None or not hasattr(executor, "http_request") or not confirmed_params:
+            return []
+        known = {p for p, _ in self._RECON_PARAM_PROBES}
+        out: list[dict] = []
+        for param in confirmed_params:
+            if param not in known:
+                continue
+            for payload, vuln_cls, signatures in self._RECON_PARAM_PAYLOADS:
+                probe_url = f"{base}/?{param}={payload}"
+                try:
+                    r = self._safe_recon_req(executor, probe_url)
+                    code = r.get("status_code")
+                    if code is None or code >= 500:
+                        # 5xx 直接跳过：可能是常规报错页，不在这里解读（交给模型按上下文判断）。
+                        continue
+                    body = str(r.get("body") or "").lower()
+                    if not body:
+                        continue
+                    hit = next((sig for sig in signatures if sig in body), None)
+                    if hit:
+                        out.append({
+                            "param": param,
+                            "url": probe_url,
+                            "vuln_cls": vuln_cls,
+                            "signature": hit,
+                        })
+                except Exception:
+                    continue
+        return out
+
+    @staticmethod
+    def _lead_to_text(lead: dict) -> str:
+        shown = lead["url"].split("=", 1)[-1]
+        shown = shown if len(shown) <= 20 else shown[:20] + "..."
+        return (
+            f"- 参数 `{lead['param']}` 命中 payload \"{shown}\" 触发响应特征「{lead['signature']}」"
+            f"—— 疑似 {lead['vuln_cls']}，优先用定向 payload 深挖（当前仅特征探针，未确认可利用）。"
+        )
+
+    def _param_dict_probe_block(self, executor, base: str, confirmed_params: list[str]) -> list[str]:
+        """参数级漏洞字典探测（文本版，供 recon 报告）：基于结构化 leads 渲染可读线索行。
+
+        仅当参数名命中 `_RECON_PARAM_PROBES`（即 confirmed_params 来源于 _param_probe_block 的命中）
+        才探测，避免对静态参数浪费发包。返回「疑似命中」线索，供模型优先深挖，**不**直接判定为漏洞。
+        """
+        leads = self._param_dict_leads(executor, base, confirmed_params)
+        out: list[str] = []
+        for lead in leads:
+            shown = lead["url"].split("=", 1)[-1]
+            shown = shown if len(shown) <= 20 else shown[:20] + "..."
+            out.append(
+                f"- 参数 `{lead['param']}` 命中 payload \"{shown}\" 触发响应特征「{lead['signature']}」"
+                f"—— 疑似 {lead['vuln_cls']}，优先用定向 payload 深挖（当前仅特征探针，未确认可利用）。"
+            )
+        return out
+
+    def _param_probe_block(self, executor, base: str) -> list[str]:
+        """轻量参数级探测：对常见漏洞承载参数做只读 GET，按响应差异给出漏洞类提示。
+
+        不依赖任何先验知识，仅标记「该参数在目标上有非 404/非 5xx 响应」供模型优先试探。
+        全程静默降级：executor 不支持 http_request / 任何异常都返回空列表。
+        """
+        if executor is None or not hasattr(executor, "http_request"):
+            return []
+        out: list[str] = []
+        seen_params: set[str] = set()
+        for param, hint in self._RECON_PARAM_PROBES:
+            if param in seen_params:
+                continue
+            seen_params.add(param)
+            probe_url = f"{base}/?{param}=autohunter_probe"
+            try:
+                r = self._safe_recon_req(executor, probe_url)
+                code = r.get("status_code")
+                if code in (200, 201, 301, 302, 307, 308, 400, 403, 406, 422, 500):
+                    body = str(r.get("body") or "")
+                    # 仅过滤完全空响应的 200（真空响应无信息量）；带任何正文即视为参数被服务器接收。
+                    if code == 200 and len(body) == 0:
+                        continue
+                    out.append(f"- `{param}=` 返回 HTTP {code} —— 疑似被解析，优先试探：{hint}")
+            except Exception:
+                continue
+        return out
+
+    def _auth_diff_probe(self, executor, url: str) -> dict:
+        """对单个端点做「匿名 vs 登录态」双态请求，对比鉴权差异。
+
+        返回结构化结果：
+          - reachable_anon / reachable_auth：两端点是否被允许访问（2xx/3xx 视为可达）
+          - unauth_code / authed_code：两端点的状态码
+          - gap：差异结论（anon_open=匿名即暴露；auth_only=仅登录可见；both_blocked=两端都拦；both_open=都通）
+          - error：探测异常原因（非空表示降级）
+
+        实现：先保存当前会话态 → 清除会话发匿名请求 → 恢复原会话发登录态请求。
+        任何一步失败都记 error 并返回空结论，绝不拖垮主侦察。
+        """
+        base_error = ""
+        saved_cookies = dict(getattr(executor, "_session_cookies", {}) or {})
+        saved_headers = dict(getattr(executor, "_session_headers", {}) or {})
+        # 匿名态：清掉会话，发一次请求
+        try:
+            executor.session_set(clear=True)
+        except Exception:
+            base_error = "session_clear_fail"
+        unauth = self._safe_recon_req(executor, url)
+        unauth_code = unauth.get("status_code")
+        # 恢复登录态：把之前保存的会话重新设回去
+        try:
+            executor.session_set(cookies=saved_cookies or None, headers=saved_headers or None)
+        except Exception:
+            base_error = base_error or "session_restore_fail"
+        authed = self._safe_recon_req(executor, url)
+        authed_code = authed.get("status_code")
+
+        def _open(c):
+            return isinstance(c, int) and c in (200, 201, 202, 203, 204, 206, 301, 302, 303, 307, 308)
+
+        reachable_anon = _open(unauth_code)
+        reachable_auth = _open(authed_code)
+        if reachable_anon and not reachable_auth:
+            gap = "anon_open"
+        elif not reachable_anon and reachable_auth:
+            gap = "auth_only"
+        elif not reachable_anon and not reachable_auth:
+            gap = "both_blocked"
+        else:
+            gap = "both_open"
+        return {
+            "url": url,
+            "unauth_code": unauth_code,
+            "authed_code": authed_code,
+            "unauth_resp": unauth,
+            "authed_resp": authed,
+            "reachable_anon": reachable_anon,
+            "reachable_auth": reachable_auth,
+            "gap": gap,
+            "error": base_error,
+        }
+
+    def _anon_leak_scan(self, executor, urls: list[str]) -> list[dict]:
+        """匿名响应体敏感数据泄露扫描：对「匿名可达端点」逐一发一次匿名 GET，读正文扫描泄露特征。
+
+        把 step5 得到的模糊标记「该端点匿名可达」升级为具体线索「匿名响应疑似泄露了 X 类数据」。
+        纯只读：不发写请求、不枚举、不爆破，仅对已知匿名可达端点各读一次正文；任何异常静默降级空列表。
+        返回结构化线索（url/label/sample），供 run() 在 recon 之后按独立块后置注入首轮（避开 _intel_block 时序），
+        模型据此直接复现并判断是否真泄露——不直接判定为漏洞。
+        """
+        if executor is None or not hasattr(executor, "http_request") or not urls:
+            return []
+        # 匿名态扫描：先清会话确保以未登录身份读取正文，避免把登录态才能看到的数据误判为泄露。
+        try:
+            executor.session_set(clear=True)
+        except Exception:
+            pass
+        out: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for u in urls[:8]:  # 限 8 个，避免对大量匿名端点刷屏/超时
+            try:
+                r = self._safe_recon_req(executor, u)
+                body = str(r.get("body") or "")
+                if not body:
+                    continue
+                low = body.lower()
+                for label, pat, sample in self._RECON_LEAK_SIGS:
+                    if (u, label) in seen:
+                        continue
+                    m = re.search(pat, low, re.I)
+                    if m:
+                        seen.add((u, label))
+                        out.append({"url": u, "label": label, "sample": sample})
+            except Exception:
+                continue
+        return out
+
+    def _collect_waf_profile(self, blocked_responses: list[dict]) -> dict:
+        """从侦察阶段已收集的「被拦响应」中聚类 WAF/风控指纹。
+
+        零额外发包：只消费 step3（路径探测）与 step5（鉴权差异）已经发出的请求响应。
+        复用 app.tools.waf_advisor._detect_waf 做厂商指纹识别；按指纹归类并保留证据，
+        返回结构化画像写独立字段 waf_profile，由 run() 在 recon 之后后置注入首轮。
+        任何异常静默降级为空画像。
+        """
+        if not blocked_responses:
+            return {}
+        try:
+            from app.tools.waf_advisor import _detect_waf
+
+            by_type: dict[str, dict] = {}
+            for r in blocked_responses:
+                if not isinstance(r, dict):
+                    continue
+                status = r.get("status_code")
+                headers = (r.get("response_headers") or {})
+                body = str(r.get("body") or "")
+                sig, evidence = _detect_waf(status, headers, body)
+                name = sig.name
+                if name == "none":
+                    continue
+                entry = by_type.setdefault(
+                    name,
+                    {"waf_type": name, "evidence": set(), "blocked_statuses": set(), "samples": 0},
+                )
+                entry["evidence"].add(evidence)
+                if isinstance(status, int):
+                    entry["blocked_statuses"].add(status)
+                entry["samples"] += 1
+            if not by_type:
+                return {}
+            # 取命中样本最多的前 2 个指纹（多于 2 个厂商同框罕见，避免刷屏）。
+            ranked = sorted(by_type.values(), key=lambda e: e["samples"], reverse=True)[:2]
+            for e in ranked:
+                e["evidence"] = sorted(e["evidence"])
+                e["blocked_statuses"] = sorted(e["blocked_statuses"])
+            return {
+                "detected": True,
+                "profiles": ranked,
+                "guidance": (
+                    "侦察已识别前述防护。首轮探测请优先带 X-Forwarded-For/X-Real-IP(127.0.0.1) "
+                    "与常见浏览器 UA 变形；命中拦截时再用 suggest_waf_bypass 取候选变形做 baseline vs "
+                    "variant 实测，切勿为绕 WAF 泛试 payload。"
+                ),
+            }
+        except Exception:
+            return {}
+
+    def _waf_profile_block(self) -> str:
+        """渲染「WAF/风控指纹画像」块（读 target_meta[\"waf_profile\"]，空字段返回空）。"""
+        profile = (getattr(self, "target_meta", None) or {}).get("waf_profile") or {}
+        if not profile.get("detected"):
+            return ""
+        profiles = profile.get("profiles") or []
+        if not profiles:
+            return ""
+        lines = ["## WAF/风控指纹画像（侦察已实测，首轮即带变形策略）", ""]
+        for p in profiles:
+            wt = p.get("waf_type", "unknown")
+            codes = "/".join(str(c) for c in (p.get("blocked_statuses") or []))
+            ev = "；".join(p.get("evidence") or [])
+            lines.append(f"- ⚠ 疑似 **{wt}** 防护（拦截码 {codes or '?'}）：{ev}")
+        lines.append(
+            "提示：" + profile.get("guidance", "命中拦截时用 suggest_waf_bypass 取候选变形实测。")
+        )
+        return "\n".join(lines) + "\n\n"
+
+    def _passive_intel_block(self, executor, base: str) -> str:
+        """被动情报补充攻击面（仅配置了测绘 key 时确定性前置一次）。
+
+        对当前目标域/同组织资产做一次只读测绘，把同 IP/同域暴露的其它
+        主机、端口、服务标题补充进攻击面，让 worker 有机会打到隐藏后台、
+        旁路服务或非标准端口。无任何 key / 查询失败 / 超时都静默降级为空串。
+
+        这是纯被动只读查询，不对目标产生任何请求；验证仍需 http_request 实证。
+        """
+        fofa_key = (getattr(executor, "fofa_key", None) or "").strip()
+        if not fofa_key:
+            return ""
+        parsed = safe_urlparse(base)
+        host = (parsed.hostname or "").strip()
+        if not host:
+            return ""
+        if is_unusable_host(host):
+            return ""
+        # 裸 IP 用 ip= 查邻居段；域名用 domain= 覆盖同组织全量资产。
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+            query = f'ip="{host}"'
+        else:
+            # 取主域（最后两段），避免子域过窄导致漏资产。
+            parts = host.split(".")
+            domain = ".".join(parts[-2:]) if len(parts) >= 2 else host
+            query = f'domain="{domain}"'
+        try:
+            res = executor.fofa_lookup(query=query, size=20)
+        except Exception:
+            return ""
+        if not isinstance(res, dict) or not res.get("ok"):
+            return ""
+        sample = res.get("sample") or []
+        if not sample:
+            return ""
+        out = [
+            "## 被动情报补充攻击面（测绘只读，确认后仍需 http_request 实证）",
+            f"- 查询：{query}（命中规模约 {res.get('size', '?')}）",
+        ]
+        shown = 0
+        seen_pairs: set[tuple[str, str]] = set()
+        for r in sample:
+            if not isinstance(r, dict):
+                continue
+            h = (r.get("host") or "").strip()
+            p = str(r.get("port") or "").strip()
+            if not h:
+                continue
+            pair = (h, p)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            title = (r.get("title") or "").strip()
+            org = (r.get("org") or "").strip()
+            line = f"- {h}:{p}" if p else f"- {h}"
+            if title:
+                line += f"  标题：{title}"
+            if org and org != (r.get("domain") or ""):
+                line += f"  归属：{org}"
+            out.append(line)
+            shown += 1
+            if shown >= 20:
+                break
+        if shown == 0:
+            return ""
+        out.append(
+            "提示：以上为同域/同组织的其它暴露面，可能藏隐藏后台、旁路接口或非标准端口服务；"
+            "优先用 http_request 验证其中与本目标相关的资产。"
+        )
+        return "\n".join(out) + "\n"
+
+    def _run_mandatory_recon(self) -> str:
+        """LLM 自主挖洞前做确定性入口测绘，保证任何模型都先拿到入口地图。
+
+        仅对首次挖洞（非回炉）执行；全程确定性调用工具，不消耗 LLM 轮次。
+        任何异常都静默降级为空字符串（不影响主挖洞流程）。executor 不具备
+        http_request 能力（如单测桩）时直接返回空，避免无意义调用。
+        """
+        executor = getattr(self, "executor", None)
+        if executor is None or not hasattr(executor, "http_request"):
+            return ""
+        base = ensure_scheme(self.target).rstrip("/")
+        self._emit("worker_recon_start", target=base)
+        try:
+            lines = [
+                "# 强制前置侦察报告（系统已完成，请直接基于此挖，不要重复下列基础探测）",
+                "",
+            ]
+            # 跨 step 累积的全部已发现端点（sitemap/探测命中/JS 接口），供业务流映射块聚类分析。
+            apis_all: list[str] = []
+
+            # 1. 首页/根：标题、指纹、是否含 JS
+            home = self._safe_recon_req(executor, base, follow_redirects=True)
+            title = self._recon_title(home)
+            server = self._recon_header(home, "server")
+            x_powered = self._recon_header(home, "x-powered-by")
+            fp = self._recon_fingerprint(home)
+            js_signal = self._recon_js_signal(home)
+            lines.append(f"## 首页（{base}）")
+            if home.get("ok"):
+                lines.append(
+                    f"- 状态码：{home.get('status_code')}；"
+                    f"最终地址：{home.get('final_url') or home.get('url')}"
+                )
+                if title:
+                    lines.append(f"- 标题：{title}")
+                if server:
+                    lines.append(f"- Server：{server}")
+                if x_powered:
+                    lines.append(f"- X-Powered-By：{x_powered}")
+            else:
+                lines.append("- 首页不可达（连接失败/超时），目标可能离线或网络受限。")
+            if fp:
+                lines.append(f"- 指纹命中：{', '.join(fp)}")
+            lines.append("")
+
+            # 选靶阶段已主动探出的高价值端点：直接采用，不再重复发包。
+            meta_exposed = (getattr(self, "target_meta", None) or {}).get("exposed_endpoints") or []
+            already_probed: set[str] = set()
+            if meta_exposed:
+                lines.append("## 选靶阶段已发现入口（系统已探测，直接复用，无需重探）")
+                for e in meta_exposed[:20]:
+                    path = re.split(r"[（(]", str(e), maxsplit=1)[0].strip()
+                    auth = "（需鉴权）" if "需鉴权" in str(e) else ""
+                    lines.append(f"- {path}{auth}")
+                    if path:
+                        already_probed.add(path.rstrip("/"))
+                lines.append("")
+
+            # 2. robots.txt / sitemap.xml：常暴露后台/隐藏路径
+            lines.append("## 暴露的入口清单")
+            for p in ("/robots.txt", "/sitemap.xml"):
+                r = self._safe_recon_req(executor, base + p)
+                code = r.get("status_code")
+                if r.get("ok") and code == 200:
+                    body = (r.get("body") or "")
+                    if p.endswith("sitemap.xml"):
+                        # sitemap 用 <loc> 列出真实页面/接口，解析入面（上限 40，避免巨型站点刷屏）
+                        locs = re.findall(r"<loc>(.*?)</loc>", body, re.I | re.S)
+                        locs = [u.strip() for u in locs if u.strip()][:40]
+                        if locs:
+                            # 同源路径并入已探集合，避免 step3 重复发包；疑似接口/后台的 loc 单列给模型。
+                            api_like: list[str] = []
+                            for u in locs:
+                                pu = safe_urlparse(u)
+                                if pu.hostname and pu.hostname == (safe_urlparse(base).hostname):
+                                    path = (pu.path or "").rstrip("/")
+                                    if path:
+                                        already_probed.add(path)
+                                if re.search(r"(/api/|/admin|/rest|/service|/v[12]/|/actuator|/swagger|\.json|\.api)", u, re.I):
+                                    api_like.append(u)
+                            lines.append(f"- sitemap.xml 暴露页面/接口 {len(locs)} 个（取前 40，同源路径已并入侦察面）：")
+                            for u in locs:
+                                lines.append(f"  - {u}")
+                            if api_like:
+                                lines.append(f"- 其中疑似后台/API 接口 {len(api_like)} 个（优先深挖）：")
+                                for u in api_like[:15]:
+                                    lines.append(f"  - {u}")
+                        else:
+                            # 兼容 robots 风格的 Allow/Disallow（部分站点把路径放 sitemap 同址）
+                            exposed = [
+                                ln.split(maxsplit=1)[1].strip()
+                                for ln in body.splitlines()
+                                if ln.strip().lower().startswith(("allow:", "disallow:"))
+                                and len(ln.split(maxsplit=1)) > 1
+                            ]
+                            if exposed:
+                                lines.append(f"- {p} 暴露路径：{', '.join(exposed[:30])}")
+                            else:
+                                lines.append(f"- {p} 存在（{len(body)} 字节），无 <loc> 路径条目。")
+                    else:
+                        exposed = [
+                            ln.split(maxsplit=1)[1].strip()
+                            for ln in body.splitlines()
+                            if ln.strip().lower().startswith(("allow:", "disallow:"))
+                            and len(ln.split(maxsplit=1)) > 1
+                        ]
+                        if exposed:
+                            lines.append(f"- {p} 暴露路径：{', '.join(exposed[:30])}")
+                        else:
+                            lines.append(f"- {p} 存在（{len(body)} 字节），无明显路径条目。")
+                elif code not in (None,):
+                    lines.append(f"- {p}：HTTP {code}（无暴露入口）")
+            lines.append("")
+
+            # 3. 后台/API/运维常见路径探测（只记录有响应的，排除纯 404）
+            # 选靶阶段已探明的端点不再重复发包，只补探尚未覆盖的路径。
+            lines.append("## 后台/API/运维路径探测（状态码）")
+            hit_paths = []
+            # 拦截响应汇总：把命中拦截特征（403/406/429/拦截页 body）的原始响应收集起来，
+            # 供 step5.6 做 WAF/风控指纹聚类（零额外发包，纯被动复用侦察已有响应）。
+            blocked_responses: list[dict] = []
+            for p in _RECON_PROBE_PATHS:
+                if p.rstrip("/") in already_probed:
+                    continue
+                r = self._safe_recon_req(executor, base + p)
+                if not r.get("ok"):
+                    continue
+                code = r.get("status_code")
+                if code in (200, 201, 301, 302, 307, 308, 401, 403, 405, 500):
+                    hit_paths.append((p, code))
+                    if code in (401, 403):
+                        lines.append(f"- {p}：{code}（需鉴权，可能是后台/管理面）")
+                    elif code in (301, 302, 307, 308):
+                        lines.append(f"- {p}：{code}（跳转→{r.get('final_url') or ''}）")
+                    else:
+                        lines.append(f"- {p}：{code}")
+                    if str(code) in ("401", "403", "406", "429") or self._looks_blocked(r):
+                        blocked_responses.append(r)
+            if not hit_paths:
+                lines.append("- 上述常见路径均未暴露（全 404/不可达）。")
+            lines.append("")
+
+            # 3.5 轻量参数级探测：常见漏洞承载参数名只读 GET，按响应差异提示漏洞类。
+            #     把命中参数端点也并入鉴权差异候选（参数端点是 IDOR/未授权/SSRF 的主战场）。
+            param_hits = self._param_probe_block(executor, base)
+            if param_hits:
+                lines.append("## 参数级探测（常见漏洞承载参数，疑似被解析）")
+                for h in param_hits[:14]:
+                    lines.append(h)
+                lines.append(
+                    "提示：以上参数在目标上返回非 404/5xx，可能真正参与逻辑；"
+                    "优先按提示类目试探越权/未授权/注入/SSRF，不要把参数当静态文本。"
+                )
+                lines.append("")
+
+                # 3.6 参数级漏洞字典探测：仅对上述已确认有响应的参数发只读特征 payload 直通，
+                # 把确定性漏洞线索（SQLi 报错/SSTI 求值/遍历回显/XSS 回显）直接喂给模型深挖。
+                confirmed_params = []
+                for h in param_hits[:14]:
+                    m = re.match(r"- `([^`]+)=`", h)
+                    if m:
+                        confirmed_params.append(m.group(1))
+                # 结构化 leads（param/url/vuln_cls/signature）用于首轮后置注入，让模型不必重新 parse 文本。
+                dict_leads = self._param_dict_leads(executor, base, confirmed_params)
+                dict_hits = [self._lead_to_text(l) for l in dict_leads]
+                if dict_hits:
+                    lines.append("## 参数级漏洞字典探测（只读特征 payload 直通）")
+                    for d in dict_hits[:14]:
+                        lines.append(d)
+                    lines.append(
+                        "提示：以上为「特征探针」命中，仅说明该参数对特定 payload 产生了可疑回显；"
+                        "需用定向 payload 复现并确认可利用性，切勿直接判定为已利用漏洞。"
+                    )
+                    lines.append("")
+                if dict_leads:
+                    # 写回 target_meta，run() 在 recon 之后按独立块后置注入首轮（避开 _intel_block 时序）。
+                    self.target_meta["confirmed_probe_leads"] = dict_leads
+
+            # 鉴权差异候选：侦察阶段会话已带登录态，因此探测返回 200/开放码的入口
+            # （含选靶阶段已暴露的端点 + 命中参数端点）本身并不能说明是否受鉴权保护——必须做
+            # 「匿名 vs 登录态」双态对比才能区分「匿名即可达（未授权）」与「仅登录可见（越权战场）」。
+            # 统一收集后见 step 5。
+            auth_diff_candidates: list[str] = []
+            for p, code in hit_paths:
+                if code in (200, 201, 301, 302, 307, 308, 500):
+                    auth_diff_candidates.append(base + p)
+            for e in meta_exposed[:20]:
+                # 暴露端点文本可能带中文/英文括号标注（如「（暴露）」「（需鉴权）」），统一去掉括号后缀。
+                ep = re.split(r"[（(]", str(e), maxsplit=1)[0].strip()
+                if ep and ep.startswith(("http://", "https://", "/")):
+                    auth_diff_candidates.append(ep if ep.startswith("http") else base + ep)
+            for h in param_hits[:14]:
+                # 从 "- `id=` 返回 HTTP 200 —— ..." 提取参数名构造探测端点候选。
+                m = re.match(r"- `([^`]+)=`", h)
+                if m:
+                    auth_diff_candidates.append(f"{base}/?{m.group(1)}=autohunter_probe")
+
+            # 4. JS 接口提取（首页含 JS 信号时确定性做，把接口地图直接给模型）
+            if js_signal:
+                try:
+                    seen_eps: set[str] = set()
+                    chains_all: list = []
+
+                    def _collect(js: dict | None) -> None:
+                        if not isinstance(js, dict):
+                            return
+                        for a in (js.get("api_endpoints") or js.get("endpoints") or []):
+                            ep = a if isinstance(a, str) else (a.get("url") or a.get("path") or "")
+                            if ep and ep not in seen_eps:
+                                seen_eps.add(ep)
+                                apis_all.append(ep)
+                        for ch in (js.get("chains") or []):
+                            chains_all.append(ch)
+
+                    # 4a. 首页本身（内联脚本 + 主 bundle），加深深度覆盖 SPA chunk
+                    home_js = executor.analyze_javascript(url=base, max_depth=3, max_assets=120)
+                    _collect(home_js)
+                    # 4b. 首页显式 <script src> 逐文件分析，把全量接口地图直接给模型
+                    #     （SPA 的真实 API 面常藏在独立 chunk 里，单分析首页会漏）
+                    home_body = (home.get("body") or "") if isinstance(home, dict) else ""
+                    # 兼容带引号与裸属性两种写法：src="a.js" / src='a.js' / src=a.js
+                    script_srcs = re.findall(
+                        r"<script[^>]+src=(?:[\"']([^\"']+)[\"']|([^\s>\"']+))",
+                        home_body, re.I,
+                    )
+                    script_srcs = [a or b for a, b in script_srcs]
+                    script_srcs = self._dedupe_script_srcs(script_srcs, base)[:12]
+                    for s in script_srcs:
+                        try:
+                            _collect(executor.analyze_javascript(url=s, max_depth=3, max_assets=120))
+                        except Exception:
+                            continue
+
+                    if apis_all:
+                        # 接口地图直接给模型上限放宽到 80，覆盖大型 SPA 的真实 API 面（原 40 易漏）。
+                        lines.append("## 前端 JS 暴露的接口线索")
+                        for ep in apis_all[:80]:
+                            lines.append(f"- {ep}")
+                        lines.append("")
+                    if chains_all:
+                        lines.append(f"- JS 高价值链路 {len(chains_all)} 条（详见工作目录 JS 分析报告）。")
+                        lines.append("")
+                except Exception:
+                    pass
+
+            # 5. 鉴权差异对比：对候选端点做「匿名 vs 登录态」双态请求，把鉴权缺口直接喂给模型。
+            #    这是坐实 IDOR/未授权/垂直越权的最短路——避免模型在 LLM 轮次里反复手动清 cookie 对比。
+            #    仅当至少有 1 个候选端点且 executor 支持会话态时执行；任何异常静默跳过。
+            # anon_open 在 step5 块内填充，step5.5 扫描依赖它；提前声明为空，避免 step5 不执行时未绑定。
+            anon_open: list[str] = []
+            if auth_diff_candidates and hasattr(executor, "session_set"):
+                try:
+                    diff_lines = ["## 鉴权差异对比（匿名 vs 登录态，系统已实测）"]
+                    auth_only: list[str] = []
+                    for u in auth_diff_candidates[:12]:
+                        d = self._auth_diff_probe(executor, u)
+                        if d.get("error"):
+                            continue
+                        if d["gap"] == "anon_open":
+                            anon_open.append(u)
+                            diff_lines.append(
+                                f"- ⚠ {u}：匿名即返回 {d['unauth_code']}（登录态 {d['authed_code']}）——"
+                                f"疑似未授权可直接拿数据，优先深挖是否含受限/敏感资源"
+                            )
+                        elif d["gap"] == "auth_only":
+                            auth_only.append(u)
+                            diff_lines.append(
+                                f"- {u}：匿名 {d['unauth_code']} → 登录态 {d['authed_code']}——"
+                                f"确实受鉴权保护，可尝试越权/鉴权绕过打法"
+                            )
+                        elif d["gap"] == "both_blocked":
+                            diff_lines.append(f"- {u}：匿名 {d['unauth_code']} / 登录态 {d['authed_code']}——两端都拦，暂不可达")
+                            # 两端都拦：把两端响应都纳入 WAF/风控指纹聚类（step5.6 复用，零额外发包）。
+                            for _resp in (d.get("unauth_resp"), d.get("authed_resp")):
+                                if isinstance(_resp, dict) and (str(_resp.get("status_code")) in ("401", "403", "406", "429") or self._looks_blocked(_resp)):
+                                    blocked_responses.append(_resp)
+                        else:  # both_open
+                            diff_lines.append(f"- {u}：匿名 {d['unauth_code']} / 登录态 {d['authed_code']}——两端都通，需看响应数据是否随身份变化")
+                    if anon_open or auth_only:
+                        diff_lines.append(
+                            "提示：匿名可达端点先按「公开接口识别」排除本就公开的展示类接口；"
+                            "确实受保护却匿名可达 = 未授权访问；仅登录可见端点 = 优先测水平/垂直越权与鉴权绕过。"
+                        )
+                        lines.append("\n".join(diff_lines))
+                        lines.append("")
+                    # 两端都拦 / 两端都通 没有额外结论价值，避免刷屏，不单独出块。
+                except Exception:
+                    pass
+
+            # 5.5 匿名响应体敏感数据泄露扫描：对 step5 已确认「匿名可达」的端点逐一发一次匿名 GET，
+            # 把模糊的「匿名可达」标记升级为具体线索「匿名响应疑似泄露 X 类数据」（邮箱/手机号/身份证/
+            # JSON 裸数据/JWT/报错/XML 等）。纯只读、不枚举、不爆破；结果写入独立字段 anon_leak_leads，
+            # 由 run() 在 recon 之后后置注入首轮（避开 _intel_block 时序窗口）。任何异常静默跳过。
+            if anon_open:
+                try:
+                    leak_leads = self._anon_leak_scan(executor, anon_open)
+                    if leak_leads:
+                        self.target_meta["anon_leak_leads"] = leak_leads
+                except Exception:
+                    pass
+
+            # 5.6 WAF/风控指纹画像：对侦察阶段已收集的「被拦响应」（step3 路径探测 + step5 鉴权差异两端）
+            # 做厂商指纹聚类，写独立字段 waf_profile，由 run() 在 recon 之后后置注入首轮——
+            # 让模型第一发请求就知道前面架着什么防护、该带什么变形，而不是撞墙后才补救。
+            # 纯被动复用既有响应，零额外发包。
+            if blocked_responses:
+                try:
+                    waf_profile = self._collect_waf_profile(blocked_responses)
+                    if waf_profile.get("detected"):
+                        self.target_meta["waf_profile"] = waf_profile
+                except Exception:
+                    pass
+
+            # 6. 被动情报补充攻击面（仅配置测绘 key 时确定性前置一次，无 key/失败静默跳过）
+            try:
+                intel_block = self._passive_intel_block(executor, base)
+                if intel_block:
+                    lines.append(intel_block)
+            except Exception:
+                pass
+
+            # 7. 业务流状态机映射：把已发现端点（探测命中 + JS 接口 + 选靶暴露）按业务阶段聚类，
+            #    给模型一张「业务流程地图」，定向打 IDOR/支付篡改/越权操作等逻辑缺陷。纯静态分析不发包。
+            biz_keys: list[str] = []
+            try:
+                flow_block = self._business_flow_block(base, apis_all, hit_paths, meta_exposed)
+                if flow_block:
+                    lines.append(flow_block)
+                    lines.append("")
+                # 业务流识别闭环到攻击链模板：把 biz_key 写回 target_meta，并本地按 biz 软指纹
+                # 匹配业务针对性打法。写入独立字段 business_attack_chain（而非混入编排层注入的
+                # attack_chain_hints）——因为 _intel_block 在 recon 之前已组装，混入口会被时序吃掉、
+                # 首轮 LLM 拿不到业务打法；改为 run() 在 recon 注入后单独追加业务打法块（见 _business_chain_block）。
+                biz_keys = self._detect_business_stages(base, apis_all, hit_paths, meta_exposed)
+                if biz_keys:
+                    self.target_meta["business_stages"] = biz_keys
+                    try:
+                        from app.agents.attack_chain_templates import match_for
+                        biz_hints = match_for([], business_stages=biz_keys)
+                        if biz_hints:
+                            self.target_meta["business_attack_chain"] = biz_hints
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            lines.append(
+                "以上为系统强制完成的入口测绘。请优先覆盖已暴露的高价值接口/后台，"
+                "再按方法论深挖；不要重复探测上面已列出的不可达/404 路径。"
+            )
+            report = "\n".join(lines)
+            self._emit("worker_recon_done", target=base, hits=len(hit_paths), fingerprint=",".join(fp))
+            return report
+        except Exception as e:  # 侦察失败绝不影响主挖洞
+            self._emit("worker_recon_error", target=base, error=str(e)[:200])
+            return ""
+
     def _intel_block(self) -> str:
         m = self.target_meta or {}
         school = (m.get("school") or "").strip()
@@ -158,7 +1111,8 @@ class Worker:
                 lines.append(f"- 通杀上下文：{priority_reason}")
             lines.append("注意：你只负责把当前站点的实际漏洞证据打出来，不要围绕该产品继续做通杀扩散判断。")
         lines.append("提交漏洞时，请核实归属（域名/备案/证书CN/页脚版权/FOFA org/登录页品牌）后把最终归属写进 submit_finding 的 owner 字段。")
-        return "\n".join(lines) + "\n\n" + self._user_auth_block() + self._creds_block() + self._intel_lib_block()
+        return ("\n".join(lines) + "\n\n" + self._user_auth_block() + self._creds_block()
+                + self._intel_lib_block() + self._attack_chain_block())
 
     def _user_auth_block(self) -> str:
         """用户在凭据区提供的 Cookie/账密（系统已尝试后的回执）。"""
@@ -193,6 +1147,97 @@ class Worker:
     def _intel_lib_block(self) -> str:
         """全局情报库命中（编排层触发式检索后注入的现成文本块）。"""
         return (self.target_meta or {}).get("intel_block") or ""
+
+    def _attack_chain_block(self) -> str:
+        """命中攻击链模板库的历史成功打法：按指纹复用相似系统有效利用链。
+
+        回炉（deepen）任务已有明确方向，跳过；任何异常静默返回空。
+        """
+        if self.deepen_context:
+            return ""
+        hints = (self.target_meta or {}).get("attack_chain_hints") or []
+        if not hints:
+            return ""
+        lines = ["# 同类系统历史成功打法（按指纹匹配，优先复用，但仍需逐目标实弹验证）"]
+        for h in hints[:3]:
+            chain = (h.get("attack_chain") or "").strip()
+            vt = h.get("vuln_type") or ""
+            if chain:
+                lines.append(f"- [{vt}] {chain}")
+        lines.append(
+            "注意：这些是相似系统上已被采纳的有效打法，可作为优先尝试方向；"
+            "但每个目标需独立取证，禁止直接套用未经验证的结论。"
+        )
+        return "\n".join(lines) + "\n\n"
+
+    def _business_chain_block(self) -> str:
+        """业务流识别闭环产出的业务针对性打法：recon 阶段按端点识别业务阶段（订单/支付/用户中心等），
+        本地匹配对应通用打法，在 recon 注入后单独追加到首轮上下文（避开 _intel_block 的时序窗口）。
+
+        与 _attack_chain_block 分离：前者是系统指纹命中（编排层注入、首轮前已就绪），本块是侦察期
+        动态识别的业务上下文命中（recon 后才算得出来），必须后置注入才进得了首轮 LLM。
+        """
+        hints = (self.target_meta or {}).get("business_attack_chain") or []
+        if not hints:
+            return ""
+        stages = (self.target_meta or {}).get("business_stages") or []
+        lines = ["# 业务流针对性打法（侦察期识别到目标属典型业务系统，优先复用）"]
+        if stages:
+            lines.append(f"- 识别到的业务阶段：{', '.join(stages)}")
+        for h in hints[:3]:
+            chain = (h.get("attack_chain") or "").strip()
+            vt = h.get("vuln_type") or ""
+            if chain:
+                lines.append(f"- [{vt}] {chain}")
+        lines.append(
+            "注意：业务系统最易出逻辑缺陷（订单/支付/用户越权、金额篡改、状态跳过）。"
+            "把端点当「业务流程」打，优先测水平/垂直越权与状态金额篡改，而非孤立接口。"
+        )
+        return "\n".join(lines) + "\n\n"
+
+    def _probe_leads_block(self) -> str:
+        """确定性漏洞线索块：侦察期参数字典探测已确认的「可疑参数」结构化清单，在 recon 之后
+        后置注入首轮上下文（与 _business_chain_block 同理由——避开 _intel_block 时序窗口）。
+
+        让模型首轮直接拿到「哪些参数对哪些 payload 产生了可疑回显」，省去重新发包验证、直接做
+        定向复现与可利用性确认；仍明确标注「仅特征探针、未确认可利用」，避免误报。
+        """
+        leads = (self.target_meta or {}).get("confirmed_probe_leads") or []
+        if not leads:
+            return ""
+        lines = ["# 确定性漏洞线索（侦察期参数字典探测已确认可疑参数，首轮直接复用）"]
+        for l in leads[:10]:
+            lines.append(
+                f"- `{l.get('param')}` → 疑似 {l.get('vuln_cls')}（特征「{l.get('signature')}」，"
+                f"探针 {l.get('url')}）"
+            )
+        lines.append(
+            "纪律：这些是只读特征探针命中，已确认「该参数对该类 payload 有可疑回显」；"
+            "请用定向 payload 复现并确认可利用性后再提交，切勿直接判定为已利用漏洞。"
+        )
+        return "\n".join(lines) + "\n\n"
+
+    def _anon_leak_block(self) -> str:
+        """匿名敏感数据泄露线索块：侦察期对「匿名可达端点」读正文扫描出的疑似泄露线索，
+        在 recon 之后后置注入首轮上下文（同 _business_chain_block / _probe_leads_block 的时序理由）。
+
+        把 step5 的模糊标记「该端点匿名可达」升级为具体「匿名响应疑似泄露了 X 类数据」，让模型
+        首轮直接拿到待复现线索；仍明确标注「仅特征扫描、需复现确认」，避免把正常接口误报为泄露。
+        """
+        leads = (self.target_meta or {}).get("anon_leak_leads") or []
+        if not leads:
+            return ""
+        lines = ["# 匿名敏感数据泄露线索（侦察期对匿名可达端点读正文扫描，首轮直接复用）"]
+        for l in leads[:10]:
+            lines.append(
+                f"- {l.get('url')} 匿名响应疑似含「{l.get('label')}」（特征样例：{l.get('sample')}）——"
+                f"优先复现是否真泄露受限/敏感数据"
+            )
+        lines.append(
+            "纪律：这些是只读特征扫描命中，仅说明匿名响应正文出现了某类敏感数据的特征；"
+            "需剔除本就公开的展示类接口后，用定向请求复现并确认确实泄露了他人/受限数据再提交。"
+        )
+        return "\n".join(lines) + "\n\n"
 
     def _creds_block(self) -> str:
         """泄露凭证情报：搜集阶段查到的该域已泄露账号密码（已过滤打分）。"""
@@ -256,6 +1301,42 @@ class Worker:
             {"role": "user", "content": user_content},
         ]
 
+        # 强制前置侦察：LLM 自主挖洞前先做确定性入口测绘，弱模型也不会漏入口。
+        # 回炉（deepen）任务已有明确方向，跳过以减少重复；任何异常静默降级。
+        if worker_config.mandatory_recon and not self.deepen_context:
+            try:
+                recon_report = self._run_mandatory_recon()
+            except Exception:
+                recon_report = ""
+            if recon_report:
+                messages.append({"role": "user", "content": recon_report})
+                self._emit("worker_recon_injected", target=self.target)
+                # 业务流识别闭环产出的业务针对性打法：recon 之后才算得出来，必须在这里后置注入，
+                # 否则首轮 LLM 拿不到（_intel_block 在 recon 之前已组装）。
+                biz_chain = self._business_chain_block()
+                if biz_chain:
+                    messages.append({"role": "user", "content": biz_chain})
+                    self._emit("worker_biz_chain_injected", target=self.target)
+                # 确定性漏洞线索（参数字典探测已确认可疑参数）：同理后置注入首轮，让模型直接复用、
+                # 不必重新发包验证，直接做定向复现与可利用性确认。
+                probe_leads = self._probe_leads_block()
+                if probe_leads:
+                    messages.append({"role": "user", "content": probe_leads})
+                    self._emit("worker_probe_leads_injected", target=self.target)
+                # 匿名敏感数据泄露线索（step5 已确认匿名可达端点读正文扫描）：同理后置注入首轮，
+                # 把模糊的「匿名可达」升级为具体的「疑似泄露 X 类数据」，模型首轮直接拿到待复现线索。
+                anon_leak = self._anon_leak_block()
+                if anon_leak:
+                    messages.append({"role": "user", "content": anon_leak})
+                    self._emit("worker_anon_leak_injected", target=self.target)
+
+                # WAF/风控指纹画像（step3+step5 被动复用被拦响应聚类）：后置注入首轮，
+                # 让模型第一发请求就知道前面架着什么防护、该带什么变形，而不是撞墙后才补救。
+                waf_profile = self._waf_profile_block()
+                if waf_profile:
+                    messages.append({"role": "user", "content": waf_profile})
+                    self._emit("worker_waf_profile_injected", target=self.target)
+
         rounds = 0
         no_tool_rounds = 0
         # auto 兼容模式下，检测到「哑模型」(全程零工具)时只自愈切一次提示词模拟，避免反复切
@@ -306,7 +1387,8 @@ class Worker:
                 msg = self.llm.chat(send_messages, tools=tools, tool_choice="auto")
                 consecutive_llm_failures = 0
             except Exception as e:
-                self._emit("llm_error", error=str(e))
+                fields = llm_error_event_fields(e)
+                self._emit("llm_error", **fields)
                 failure_kind = e.kind if isinstance(e, LLMError) else ""
                 retry_after = e.retry_after if isinstance(e, LLMError) else 0
                 if self._should_soft_retry_llm(e) and consecutive_llm_failures < _WORKER_LLM_SOFT_RETRIES:
@@ -325,6 +1407,9 @@ class Worker:
                         failure_kind=failure_kind or "unknown",
                         wait_seconds=wait_s,
                         error=str(e)[:240],
+                        error_copy=fields.get("error_copy") or str(e),
+                        detail=fields.get("detail") or "",
+                        diagnostic=fields.get("diagnostic") or "",
                     )
                     # 不消耗轮次预算：基础设施抖动不应吃掉挖掘配额
                     rounds = max(0, rounds - 1)
@@ -572,9 +1657,14 @@ class Worker:
     def _route_rounds(self, max_rounds: int, soft_rounds: int) -> tuple[int, int]:
         """按打法路线微调软收敛节奏。
 
+        据点（回炉）目标：已得入口/凭证，给足预算把多步利用链打穿，不被收敛提前截断。
         deep 路线（Actuator/Nacos/API docs/低代码等）更容易需要多步链路，延后软催收；
         static_low_value 才收紧硬上限，避免门户/官网长时间空转。
         """
+        if self.deepen_context:
+            # 回炉据点：复杂多步链常需远超首挖的轮次才能打穿，放宽硬/软上限。
+            max_rounds = max(max_rounds, 180 if self._enterprise else 150)
+            soft_rounds = max(soft_rounds, 120 if self._enterprise else 100)
         route = (self.target_meta or {}).get("playbook_route") or {}
         route_id = str(route.get("route_id") or "")
         intensity = str(route.get("intensity") or "")
@@ -750,6 +1840,8 @@ class Worker:
                 data=args.get("data"),
                 json_body=args.get("json_body"),
                 follow_redirects=args.get("follow_redirects", False),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
             )
             if not self._js_tool_enabled and isinstance(result, dict):
                 headers = result.get("response_headers") if isinstance(result.get("response_headers"), dict) else {}
@@ -806,7 +1898,12 @@ class Worker:
                     ),
                 }
             self._emit("tool_shell", round=rnd, command=command[:200])
-            return self.executor.run_shell(command, timeout=args.get("timeout"))
+            return self.executor.run_shell(
+                command,
+                timeout=args.get("timeout"),
+                confirm_destructive=args.get("confirm_destructive", False),
+                confirm_reason=args.get("confirm_reason") or "",
+            )
 
         if name == "decode_transform":
             self._mark_tool_used(name, rnd)
@@ -1021,6 +2118,8 @@ class Worker:
                 verdict="error",
                 failure_kind=failure_kind,
                 summary=reason[:300],
+                error=reason[:500],
+                error_copy=reason,
             )
             return
         verdict = "found" if self.findings else "no_vuln"
@@ -1277,6 +2376,24 @@ class Worker:
             }
 
         self.findings.append(finding)
+        # 侦察期已独立确认「该端点匿名可达且响应疑似泄露敏感数据」（anon_leak_leads 命中）的，
+        # 在 finding 上打 recon_anon_leak 标记——这是侦察侧强信号，审核降过杀时应优先救援，
+        # 避免把「侦察已实锤匿名可读数据」的线索误判为垃圾。仅做前缀匹配，避免 URL 带 query 时漏标。
+        anon_leak_leads = (self.target_meta or {}).get("anon_leak_leads") or []
+        if anon_leak_leads:
+            target_low = (finding.target_url or "").lower()
+            for lead in anon_leak_leads:
+                lu = (lead.get("url") or "").lower()
+                if lu and target_low.startswith(lu.rstrip("/")):
+                    finding.self_check.recon_anon_leak = True
+                    break
+        # 侦察期已实锤目标前方存在 WAF/风控（waf_profile.detected）时，打 recon_waf_present 标记——
+        # 该 finding 的「证据残缺」很可能源于被 WAF 拦截而非本身无价值，审核降过杀时应优先 rescue
+        # 派 worker 带 XFF/UA 变形补证，而不是被当成「没证据」直接归档。与目标端点是否命中泄露无关，
+        # 这是「本次目标整体有 WAF」的全局信号，对所有可疑 finding 都值得放宽门槛。
+        waf_profile = (self.target_meta or {}).get("waf_profile") or {}
+        if waf_profile.get("detected"):
+            finding.self_check.recon_waf_present = True
         # 携带完整 finding 供 orchestrator 实时落库（进程被打断时不丢洞）。
         self._emit(
             "finding_submitted",
