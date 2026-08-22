@@ -349,6 +349,8 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     # 单站协作：同一个真实 host 按路线拆成多个 worker，不走 FOFA 翻页。
     if task.target_source == "site":
         added += await _site_collect(session, task, progress)
+        if added == 0:
+            _mark_site_collect_idle(task)
         await session.commit()
         return added
 
@@ -424,6 +426,46 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     return added
 
 
+def _mark_site_collect_idle(task: Task) -> None:
+    """路线已齐时收口看板，避免一直停在「正在补充泄露凭据 / 凭据库 x/y」。"""
+    cfg = dict(task.fofa_config or {})
+    phase = str(cfg.get("collector_phase") or "")
+    text = str(cfg.get("collector_phase_text") or "")
+    if phase == "enrich" or "补充泄露凭据" in text or "凭据库" in text or "待查凭据库" in text:
+        cfg["collector_phase"] = "idle"
+        cfg["collector_phase_text"] = "单站路线已齐，搜集待命"
+        task.fofa_config = cfg
+
+
+async def _site_hosts_missing_routes(
+    session: AsyncSession,
+    task_id: str,
+    work: list[dict],
+    routes: list,
+) -> list[dict]:
+    """只留下至少缺一条开局路线的 host，已齐的不再空转入队。"""
+    if not work or not routes:
+        return []
+    hosts = [c["host"] for c in work]
+    rows = (await session.execute(
+        select(Target.host, Target.source).where(
+            Target.task_id == task_id,
+            Target.host.in_(hosts),
+        )
+    )).all()
+    have: dict[str, set[str]] = {}
+    for host, source in rows:
+        have.setdefault(host, set()).add(source)
+    pending: list[dict] = []
+    for item in work:
+        missing = [route for route in routes if route.source not in have.get(item["host"], set())]
+        if not missing:
+            continue
+        item["missing_routes"] = missing
+        pending.append(item)
+    return pending
+
+
 async def _site_collect(
     session: AsyncSession,
     task: Task,
@@ -438,7 +480,7 @@ async def _site_collect(
     if not parsed:
         return 0
 
-    # 先攒可打目标，统一补泄露凭据（同根域只查一次）
+    # 先攒可打目标；路线已经齐的 host 不再空转入队。
     work: list[dict] = []
     for item in parsed:
         host = item.get("host") or ""
@@ -461,24 +503,23 @@ async def _site_collect(
             continue
         work.append({"url": url or _ensure_url(host), "host": host})
 
+    routes = list(site_collab.initial_routes_for(task))
+    pending = await _site_hosts_missing_routes(session, task.id, work, routes)
+    if not pending:
+        return 0
+
     added = 0
-    for c in work:
+    for c in pending:
         host = c["host"]
         url = c["url"]
         leaked = c.get("leaked_creds") or None
-        existing = (await session.execute(
-            select(Target.source).where(Target.task_id == task.id, Target.host == host)
-        )).all()
-        existing_sources = {r[0] for r in existing}
         # 开局就把侦察(phase0)+5 条主题深挖(phase1)路线一次性全部并发入队。
         # 之前只入队侦察路线、等它跑完才补派主题路线，导致「能 3 分钟出洞的
         # 认证越权路线」被侦察串行硬拖到几十分钟。改回并发：侦察 worker 产出的
         # coverage 仍会通过 _build_coverage_context 喂给后启动的主题 worker，
         # 成果照样复用、又不牺牲开局速度。priority 高的侦察路线天然先抢并发。
         # 若任务开启「跳过入口盘点」(有登录凭据/目标明确) → 剔除 site_map 侦察路线省 token。
-        for route in site_collab.initial_routes_for(task):
-            if route.source in existing_sources:
-                continue
+        for route in c.get("missing_routes") or routes:
             session.add(Target(
                 task_id=task.id,
                 url=url,
