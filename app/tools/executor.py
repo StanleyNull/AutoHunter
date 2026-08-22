@@ -783,3 +783,34 @@ class ToolExecutor:
             )
         except Exception as e:
             return {"ok": False, "error": f"WAF 建议生成异常: {type(e).__name__}: {e}"}
+
+    def detect_waf_profiling(
+        self,
+        status_code: int,
+        response_headers: Optional[dict[str, Any]] = None,
+        response_body: str = "",
+    ) -> dict[str, Any]:
+        """对单个被拦截应答做本地 WAF/风控指纹画像（纯本地、不发网络）。
+
+        供 worker 首轮前置画像目标 WAF，产出的 header_variants（X-Forwarded-For /
+        X-Real-IP / UA 等）可直接用于首包针对性变形降低被拦概率。
+        """
+        try:
+            info = _suggest_waf_bypass(
+                payload="''",
+                status_code=status_code,
+                response_headers=response_headers,
+                response_body=response_body,
+                context="generic",
+            )
+            return {
+                "ok": True,
+                "detected": bool(info.get("detected")),
+                "waf_type": info.get("waf_type"),
+                "evidence": info.get("evidence", ""),
+                "blocked_likely": bool(info.get("blocked_likely")),
+                "strategy_priority": list(info.get("strategy_priority") or []),
+                "header_variants": list(info.get("header_variants") or []),
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"WAF 画像生成异常: {type(e).__name__}: {e}"}

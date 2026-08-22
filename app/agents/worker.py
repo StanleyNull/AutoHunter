@@ -27,6 +27,7 @@ from app import dedup
 from app.llm.client import LLMClient, LLMError, llm_error_event_fields
 from app.schemas import Finding, Verdict, WorkerResult
 from app.tools.executor import ToolExecutor
+from app.tools.anon_leak_scanner import scan_body as _leak_scan_body
 from app.tools.schemas import (
     JS_ANALYZER_TOOL_SCHEMAS,
     SESSION_TOOL_SCHEMAS,
@@ -44,6 +45,25 @@ _JS_INTENT_RE = re.compile(
 _WORKER_STATIC_PREFIX = (
     "下一条是目标/情报。只打当前目标；确认无攻击面才快速 finish。工具按信号开放，JS 线索再用 analyze_javascript。"
 )
+
+# ---- 侦察→挖洞闭环：匿名泄露嗅探 + WAF 画像前置 ----
+# 单个 worker 最多嗅探的匿名端点 / 上报的泄露线索条数（防一次侦察拖垮首轮）。
+_ANON_SCAN_LIMIT = int(os.environ.get("ANON_SCAN_LIMIT", "5"))
+_ANON_LEADS_EMIT = 3
+# 拦截样本上限；外科手术式只取最先命中的 WAF 指纹。
+_WAF_SAMPLE_LIMIT = 3
+# 是否补一次 live 基线探测来画像 WAF（即使侦察未给 recon_blocked，首包也能带变形策略）。
+_WAF_LIVE_PROBE = os.environ.get("WORKER_WAF_LIVE_PROBE", "1") == "1"
+_RECON_BLOCK_CODES = {"400", "401", "403", "406", "429", "501", "503"}
+# 命中这些类型的发现才把侦察锚点写进 self_check，供审核降过杀救援。
+_ANON_LEAK_VULN_TYPES = {
+    "unauthorized_access", "information_disclosure", "sensitive_information_disclosure",
+    "info_leak", "info_disclosure", "weak_password", "default_password",
+}
+_WAF_RELATED_VULN_TYPES = {
+    "sql_injection", "rce", "command_injection", "command_exec", "code_injection",
+    "ssti", "deserialization", "xss", "lfi", "rfi",
+}
 
 # LLM 调用失败时，worker 内软重试次数（清粘性后换端点/同端点再试），耗尽才整轮收尾回队。
 _WORKER_LLM_SOFT_RETRIES = int(os.environ.get("WORKER_LLM_SOFT_RETRIES", "3"))
@@ -159,6 +179,112 @@ class Worker:
             lines.append("注意：你只负责把当前站点的实际漏洞证据打出来，不要围绕该产品继续做通杀扩散判断。")
         lines.append("提交漏洞时，请核实归属（域名/备案/证书CN/页脚版权/FOFA org/登录页品牌）后把最终归属写进 submit_finding 的 owner 字段。")
         return "\n".join(lines) + "\n\n" + self._user_auth_block() + self._creds_block() + self._intel_lib_block()
+
+    def scan_anon_leaks(self) -> list[dict]:
+        """对侦察期收集的匿名可访问端点做敏感数据泄露嗅探。
+
+        结果写 target_meta['anon_leak_leads']（供首轮注入与审核看板），命中即置
+        target_meta['recon_anon_leak']。全部走 executor，尽力而为，失败不阻断。
+        """
+        anon_open = list((self.target_meta or {}).get("anon_open") or [])
+        leads: list[dict] = []
+        for ep in anon_open[:_ANON_SCAN_LIMIT]:
+            url = str(ep.get("url") if isinstance(ep, dict) else ep or "").strip()
+            if not url:
+                continue
+            try:
+                resp = self.executor.http_request(url=url, method="GET")
+            except Exception:
+                resp = {"ok": False}
+            if not isinstance(resp, dict) or resp.get("ok") is not True:
+                continue
+            body = str(resp.get("body") or "")
+            hits = _leak_scan_body(body)
+            if hits:
+                leads.append({
+                    "url": url,
+                    "status": resp.get("status_code"),
+                    "hits": hits[:5],
+                    "snippet": body[:400],
+                })
+        self.target_meta["anon_leak_leads"] = leads[:_ANON_LEADS_EMIT]
+        if leads:
+            self.target_meta["recon_anon_leak"] = True
+        return leads
+
+    def profile_waf(self) -> dict:
+        """对拦截应答（含可选的 live 基线探测）做 WAF/风控指纹画像。
+
+        结果写 target_meta['waf_profile']，命中即置 target_meta['recon_waf_present']。
+        header_variants（X-Forwarded-For / X-Real-IP / UA 等）供首轮变形降被拦。
+        """
+        samples: list[dict] = list((self.target_meta or {}).get("recon_blocked") or [])
+        if _WAF_LIVE_PROBE:
+            try:
+                probe = self.executor.http_request(url=self.target, method="GET")
+            except Exception:
+                probe = None
+            if isinstance(probe, dict) and probe.get("ok") is True:
+                headers = (probe.get("response_headers") or {})
+                headers = headers if isinstance(headers, dict) else {}
+                samples.append({
+                    "status_code": probe.get("status_code"),
+                    "headers": headers,
+                    "body": str(probe.get("body") or ""),
+                })
+        profile: dict = {}
+        for s in samples[:_WAF_SAMPLE_LIMIT]:
+            sc = s.get("status_code")
+            if not isinstance(sc, int):
+                continue
+            info = self.executor.detect_waf_profiling(sc, s.get("headers") or {}, str(s.get("body") or ""))
+            if not isinstance(info, dict) or not info.get("ok") or not info.get("detected"):
+                continue
+            profile = {
+                "waf_type": info.get("waf_type") or "unknown",
+                "evidence": info.get("evidence") or "",
+                "blocked_likely": bool(info.get("blocked_likely")),
+                "strategy_priority": list(info.get("strategy_priority") or []),
+                "header_variants": list(info.get("header_variants") or []),
+            }
+            break
+        self.target_meta["waf_profile"] = profile
+        if profile.get("waf_type"):
+            self.target_meta["recon_waf_present"] = True
+        return profile
+
+    def _recon_leads_block(self) -> str:
+        """首轮注入块：侦察期匿名泄露线索 + WAF 画像（空则不输出任何内容）。"""
+        m = self.target_meta or {}
+        parts: list[str] = []
+        leaks = list(m.get("anon_leak_leads") or [])
+        if leaks:
+            lines = ["\n# 侦察期匿名泄露线索（首包携带，优先核实后再报）"]
+            for it in leaks:
+                lines.append(f"- {it.get('url')} 响应疑似泄露：{', '.join(it.get('hits') or [])}")
+            parts.append("\n".join(lines))
+        wp = m.get("waf_profile") or {}
+        if isinstance(wp, dict) and wp.get("waf_type"):
+            lines = ["\n# 目标 WAF/风控画像（首包即可针对性变形降低被拦）"]
+            lines.append(f"- 疑似 WAF：{wp['waf_type']}（{wp.get('evidence') or '本地指纹'}）")
+            hdrs = list(wp.get("header_variants") or [])
+            if hdrs:
+                lines.append("- 可尝试的绕过请求头（先 baseline 后 variant 对比差异再实锤）：")
+                for h in hdrs[:4]:
+                    lines.append(f"  - {', '.join(f'{k}={v}' for k, v in h.items())}")
+            parts.append("\n".join(lines))
+        return ("\n".join(parts) + "\n") if parts else ""
+
+    def _recon_probe(self) -> None:
+        """首次挖掘轮前置：匿名泄露嗅探 + WAF 画像。均为尽力而为，任何失败不阻断进场。"""
+        try:
+            self.scan_anon_leaks()
+        except Exception:
+            pass
+        try:
+            self.profile_waf()
+        except Exception:
+            pass
 
     def _user_auth_block(self) -> str:
         """用户在凭据区提供的 Cookie/账密（系统已尝试后的回执）。"""
@@ -1278,6 +1404,17 @@ class Worker:
                     "不要把这条半成品提交给 reviewer。" + HARMLESS_PROTOCOL
                 ),
             }
+
+        # 侦察锚点：把侦察期已实锤的信号写进 self_check，供审核降过杀救援锚定。
+        # 只在命中对应漏洞类型时打标，避免无关发现被错误救援。
+        if (self.target_meta or {}).get("recon_anon_leak") and (
+            finding.vuln_type or ""
+        ).strip().lower() in _ANON_LEAK_VULN_TYPES:
+            finding.self_check.recon_anon_leak = True
+        if (self.target_meta or {}).get("recon_waf_present") and (
+            finding.vuln_type or ""
+        ).strip().lower() in _WAF_RELATED_VULN_TYPES:
+            finding.self_check.recon_waf_present = True
 
         duplicate, matches = self._dup_matches(finding.model_dump(mode="json"))
         if duplicate:
