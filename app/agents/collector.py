@@ -951,6 +951,7 @@ async def _fofa_collect(
                 source="fofa", status="skipped", is_edu=c.get("is_edu"),
                 school=c.get("school", ""),
                 priority_score=score, priority_reason=reason,
+                exposed_endpoints=c.get("exposed_endpoints"),
                 verdict="skip_cluster_cooldown",
                 dead_reason=target_cluster.cooldown_reason(cluster_item, cluster_item.get("sample", "")),
             ))
@@ -963,6 +964,7 @@ async def _fofa_collect(
                 source="fofa", status="skipped", is_edu=c.get("is_edu"),
                 school=c.get("school", ""),
                 priority_score=score, priority_reason=reason,
+                exposed_endpoints=c.get("exposed_endpoints"),
                 verdict="skip_cluster_pending",
                 dead_reason=target_cluster.pending_limit_reason(cluster_item),
             ))
@@ -975,6 +977,7 @@ async def _fofa_collect(
                 source="fofa", status="skipped", is_edu=c.get("is_edu"),
                 school=c.get("school", ""),
                 priority_score=score, priority_reason=reason,
+                exposed_endpoints=c.get("exposed_endpoints"),
                 verdict="skip_target_filter",
                 dead_reason=filter_decision.reason[:300],
             ))
@@ -989,6 +992,7 @@ async def _fofa_collect(
                 source="fofa", status="skipped", is_edu=c.get("is_edu"),
                 school=c.get("school", ""),
                 priority_score=score, priority_reason=reason,
+                exposed_endpoints=c.get("exposed_endpoints"),
                 verdict="skip_low_score",
                 dead_reason=f"评分 {score:.0f} < {skip_thr:.0f}，垃圾资产不打",
             ))
@@ -1053,7 +1057,7 @@ async def _score_targets(survivors: list[dict], src_type: str = "edusrc") -> Non
             title = c.get("title") or info.get("title", "")
             try:
                 loop = asyncio.get_running_loop()
-                sc, reason = await loop.run_in_executor(
+                sc, reason, exposed = await loop.run_in_executor(
                     COLLECTOR_IO_EXECUTOR,
                     lambda: scorer.score_target(
                         c["url"], title,
@@ -1061,6 +1065,7 @@ async def _score_targets(survivors: list[dict], src_type: str = "edusrc") -> Non
                         6.0, src_type,
                     ),
                 )
+                c["exposed_endpoints"] = exposed
                 plan = playbook_router.route_target(
                     url=c["url"],
                     title=title,

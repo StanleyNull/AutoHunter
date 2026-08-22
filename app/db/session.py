@@ -81,6 +81,7 @@ _MIGRATIONS = [
     ("tasks", "auth_bindings", "JSON"),
     ("targets", "auth_context", "JSON"),
     ("targets", "auth_status", "JSON"),
+    ("targets", "exposed_endpoints", "JSON"),
     ("tasks", "deepen_cap", "INTEGER DEFAULT 2"),
     ("system_settings", "ui", "JSON DEFAULT '{}'"),
 ]

@@ -103,6 +103,9 @@ class Target(Base):
     deepen_count: Mapped[int] = mapped_column(Integer, default=0)
     # 搜集阶段顺带查到的、过滤打分后的该域泄露凭证（喂给 worker 作额外攻击面）。
     leaked_creds: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 选靶阶段主动探测出的高价值暴露端点（如 ["/actuator", "/nacos/(需鉴权)"]），
+    # 结构化落库，供 worker 强制侦察阶段直接复用、避免重复发包。
+    exposed_endpoints: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # 用户凭据：入队时从 Task.auth_bindings 匹配写入；worker 启动 bootstrap 用。
     auth_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 最近一次凭据使用反馈（无明文）：status/kinds/reason/...

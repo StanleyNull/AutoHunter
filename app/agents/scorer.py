@@ -125,8 +125,12 @@ def _port_from_url(url: str) -> int:
 
 def score_target(url: str, title: str = "", server: str = "",
                  body: str = "", probe_endpoints: bool = True,
-                 timeout: float = 6.0, src_type: str = "edusrc") -> tuple[float, str]:
-    """对单个目标打分。返回 (score, reason)。score 越高越优先。HIGH>=5, MEDIUM>=1, LOW<1。"""
+                 timeout: float = 6.0, src_type: str = "edusrc") -> tuple[float, str, list[str]]:
+    """对单个目标打分。返回 (score, reason, exposed)。
+
+    exposed 为选靶阶段已主动探测出的高价值端点列表（如 ["/actuator", "/nacos/(需鉴权)"]），
+    供下游 worker 直接复用、避免重复发包。score 越高越优先；HIGH>=5, MEDIUM>=1, LOW<1。
+    """
     score = 0
     reasons: list[str] = []
     port = _port_from_url(url)
@@ -188,4 +192,27 @@ def score_target(url: str, title: str = "", server: str = "",
 
     if not reasons:
         reasons.append("普通资产")
-    return float(score), f"[{prio}] " + " · ".join(reasons[:6])
+    return float(score), f"[{prio}] " + " · ".join(reasons[:6]), exposed
+
+
+def parse_exposed_endpoints(reason: str) -> list[str]:
+    """从 priority_reason 文本还原选靶阶段探出的暴露端点（兼容未落库 exposed_endpoints 的目标）。
+
+    score_target 的 reason 形如 "[HIGH] +4 暴露端点:/actuator,/swagger-ui.html · +1 鉴权端点:/nacos/"，
+    这里把「暴露端点:」与「鉴权端点:」后的路径提取出来，供 worker 直接复用、避免重复探测。
+    """
+    out: list[str] = []
+    if not reason:
+        return out
+    for label in ("暴露端点:", "鉴权端点:"):
+        idx = reason.find(label)
+        if idx < 0:
+            continue
+        rest = reason[idx + len(label):]
+        # 截到下一个「 · 」或行尾，再按逗号切分
+        seg = rest.split("·")[0]
+        for p in seg.split(","):
+            p = p.strip()
+            if p and p not in out:
+                out.append(p)
+    return out

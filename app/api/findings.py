@@ -1295,6 +1295,13 @@ async def user_review(finding_id: str, req: UserReviewRequest,
     if req.submitted is not None:
         r.submitted = req.submitted
     await session.commit()
+    # 经验回流：人工复审通过的成功打法沉淀为攻击链模板，供相似目标复用
+    if req.user_status == "passed" and r.verdict == "accepted" and f:
+        try:
+            from app.agents.attack_chain_templates import record_accepted_finding
+            record_accepted_finding(f)
+        except Exception:
+            pass
     killsweep_triggered = False
     if trigger_killsweep:
         # 只有人工复审通过才启动通杀 Hunter；AI accepted 只是进入复审队列。

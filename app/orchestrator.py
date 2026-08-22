@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import dedup
+from app.config import worker_config
 from app.agents import collector
 from app.agents import intel as intel_lib
 from app.agents import playbook_router
@@ -28,7 +29,7 @@ from app.agents import prefilter
 from app.agents import site_collab
 from app.agents import target_cluster
 from app.agents.deepen import deepen_cap_for  # 任务级深挖上限（人工+AI+lead 合计，防死循环）
-from app.agents.prompts import is_enterprise_src, should_escalate
+from app.agents.prompts import is_enterprise_src, normalize_src_type, should_escalate
 from app.agents.reviewer import Reviewer
 from app.agents.worker import Worker
 from app.agent_runtime import (
@@ -68,6 +69,31 @@ _ESCALATE_TOPTIER_KEYWORDS = (
 )
 # 影响面数量级阈值：impact_count 达到此值也算「影响面质变」。
 _ESCALATE_IMPACT_THRESHOLD = int(os.environ.get("ESCALATE_IMPACT_THRESHOLD", "100"))
+
+
+def _lightweight_reproduce_eligible(finding: "Finding") -> bool:
+    """中/低危有完整证据时，系统可标记「已轻量复现」，提升进人工复审的洞质量。
+
+    判定（确定性，不依赖 LLM）：
+      - 等级为中危或低危（critical/high 走更重的实锤验证，不在此覆盖）；
+      - 具备 target_url（可定位复现入口）；
+      - 具备 detail / proof / 请求证据文本（证据链完整，人工可直接采信）。
+    命中即视为系统已确认证据闭环，标记 reproduced=True，减少人工重复验证成本。
+    """
+    sev = (getattr(finding, "severity_claimed", "") or "").strip()
+    if sev not in ("中危", "低危"):
+        return False
+    if not getattr(finding, "target_url", ""):
+        return False
+    evidence = " ".join([
+        str(getattr(finding, "detail", "") or ""),
+        str(getattr(finding, "proof", "") or ""),
+        str(getattr(finding, "request_evidence", "") or ""),
+    ]).strip()
+    # 证据需达到一定厚度（避免空壳洞被标记复现）：至少含 30 字实质描述或含请求/响应片段。
+    if len(evidence) < 30 and "HTTP" not in evidence and "请求" not in evidence:
+        return False
+    return True
 
 
 def _escalation_is_significant(orig_severity: str, res: dict) -> bool:
@@ -556,6 +582,55 @@ class TaskRunner:
             "model": getattr(config, "model", "") or "",
             "base_url": getattr(config, "base_url", "") or "",
         }
+
+    @staticmethod
+    def _resolve_worker_model_tier(target_meta: dict | None, src_type: str | None,
+                                   deepen_context: dict | None, is_edu: bool) -> str:
+        """判定 worker 应使用的模型档位：strong / weak / default。
+
+        难目标走强模型把利用链打穿，简单量扫目标走弱模型压低单目标成本；未配置
+        strong/weak 模型时返回 default（沿用任务默认模型，行为不变）。
+        """
+        if not (worker_config.strong_model or worker_config.weak_model):
+            return "default"
+        st = normalize_src_type(src_type)
+        meta = target_meta or {}
+        auth = meta.get("auth_context") or meta.get("user_auth")
+        # 难目标 → 强模型
+        if deepen_context:
+            return "strong"
+        if st in {"enterprise", "corp", "company", "企业", "企业src"}:
+            return "strong"
+        if auth:
+            return "strong"
+        # 简单量扫目标且无认证、无历史成功打法/情报命中 → 弱模型（纯侦察与已知打法足矣）
+        if st == "edusrc" and not auth:
+            chain_hints = meta.get("attack_chain_hints")
+            intel_block = meta.get("intel_block")
+            if not chain_hints and not intel_block:
+                return "weak"
+        return "default"
+
+    @staticmethod
+    def _worker_llm_for_tier(base_llm: LLMClient, tier: str) -> LLMClient:
+        """按档位覆盖模型名生成新的 LLMClient；base_url/api_key 沿用任务解析结果。"""
+        override = {"strong": worker_config.strong_model, "weak": worker_config.weak_model}.get(tier, "")
+        override = (override or "").strip()
+        providers = getattr(base_llm, "providers", None)
+        if not override or not providers:
+            return base_llm
+        new_providers = []
+        for p in providers:
+            cp = p.model_copy(deep=True)
+            cp.model = override
+            new_providers.append(cp)
+        return LLMClient(
+            providers=new_providers,
+            pool_mode=base_llm.pool_mode,
+            usage_key=base_llm.usage_key,
+            on_provider_failure=base_llm.on_provider_failure,
+            on_provider_selected=base_llm.on_provider_selected,
+        )
 
     @staticmethod
     def _finding_llm_fields(*, model: str = "", base_url: str = "") -> dict:
@@ -1896,10 +1971,15 @@ class TaskRunner:
                 self._live[target_id]["score_reason"] = tgt.priority_reason
                 deepen_context = tgt.deepen_context or None
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
+                # 选靶阶段已主动探出的高价值暴露端点：结构化优先，未落库时从 priority_reason 还原，
+                # 供 worker 强制侦察直接复用、避免重复发包（手动入库目标通常无 exposed_endpoints）。
+                from app.agents.scorer import parse_exposed_endpoints
+                exposed = tgt.exposed_endpoints or parse_exposed_endpoints(tgt.priority_reason or "")
                 target_meta = {
                     "school": tgt.school or "", "org": tgt.org or "",
                     "title": tgt.title or "", "is_edu": tgt.is_edu,
                     "source": tgt.source or "", "priority_reason": tgt.priority_reason or "",
+                    "exposed_endpoints": exposed,
                     "leaked_creds": tgt.leaked_creds or [],
                     "auth_context": tgt.auth_context or None,
                     "user_auth": tgt.auth_context or None,
@@ -1930,6 +2010,14 @@ class TaskRunner:
                     block = intel_lib.render_intel_block(hits)
                     if block:
                         target_meta["intel_block"] = block
+                except Exception:
+                    pass
+                # 攻击链模板库：按目标指纹匹配历史成功打法，注入 worker 优先复用
+                try:
+                    from app.agents.attack_chain_templates import match_for
+                    chain_hints = match_for(fps)
+                    if chain_hints:
+                        target_meta["attack_chain_hints"] = chain_hints
                 except Exception:
                     pass
                 try:
@@ -1968,13 +2056,20 @@ class TaskRunner:
                     loop, target_id, "挖掘模型"
                 ),
             )
-            self._live[target_id].update(self._llm_payload(llm, "挖掘模型"))
+            # 模型分级路由：难目标走强模型、简单量扫走弱模型，平衡成本与命中率。
+            tier = self._resolve_worker_model_tier(
+                target_meta, src_type, deepen_context, bool(tgt.is_edu)
+            )
+            worker_llm = self._worker_llm_for_tier(llm, tier)
+            self._live[target_id].update(self._llm_payload(worker_llm, "挖掘模型"))
+            if tier != "default":
+                self._live[target_id]["model_tier"] = tier
             prompt_version = resolve_worker_prompt_version(task_obj)
 
         worker_holder: dict[str, Worker] = {}
 
         def do_work() -> dict:
-            worker = Worker(url, llm=llm, on_event=emit,
+            worker = Worker(url, llm=worker_llm, on_event=emit,
                             deepen_context=deepen_context, target_meta=target_meta,
                             duplicate_history=duplicate_history,
                             cancel_event=cancel_event, src_type=src_type,
@@ -3009,6 +3104,16 @@ class TaskRunner:
             rv["reviewer_notes"] = (rv.get("reviewer_notes", "") +
                                     "\n[系统] 审核未给最终等级，已按 worker 自评兜底。").strip()
 
+        # 中/低危有完整证据：系统轻量复现标记（确定性，不依赖 LLM 复验）。
+        # 仅当审核未显式给出 reproduced 时才补——尊重审核员显式结论。
+        if rv.get("verdict") == "accepted" and not rv.get("reproduced"):
+            async with SessionLocal() as s:
+                f0 = await s.get(Finding, finding_id)
+                if f0 and _lightweight_reproduce_eligible(f0):
+                    rv["reproduced"] = True
+                    rv["reviewer_notes"] = (rv.get("reviewer_notes", "") +
+                                            "\n[系统] 中/低危证据链完整，已标记轻量复现（进人工复审可直接采信）。").strip()
+
         escalate_finding = False
         async with SessionLocal() as session:
             f = await session.get(Finding, finding_id)
@@ -3028,6 +3133,13 @@ class TaskRunner:
                     extra = await self._apply_deepen(session, f, rv)
                 else:
                     f.status = "reviewed"
+                # 经验回流：AI 采纳的成功打法沉淀为攻击链模板，供相似目标复用
+                if rv["verdict"] == "accepted":
+                    try:
+                        from app.agents.attack_chain_templates import record_accepted_finding
+                        record_accepted_finding(f)
+                    except Exception:
+                        pass
                 await session.commit()
                 await self._log(session, "reviewer", "review_done",
                                 f"审核「{f.title}」: {rv['verdict']} {rv.get('severity_final') or ''}{extra}",

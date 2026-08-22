@@ -272,6 +272,130 @@ def _maybe_deepen_ignored(finding: Finding, review: Review, src_type: str) -> bo
     return True
 
 
+def _has_complete_evidence(finding: Finding) -> bool:
+    """worker 是否给出了可核验的真实证据（请求/响应对、PoC、或带细节的攻击链）。"""
+    if (finding.raw_request or "").strip() and (finding.raw_response or "").strip():
+        return True
+    if (finding.poc or "").strip():
+        return True
+    if finding.kill_chain:
+        if any((s.method or "").strip() and (s.detail or "").strip() for s in finding.kill_chain):
+            return True
+    return False
+
+
+def _maybe_rescue_low_medium_evidenced(finding: Finding, review: Review, src_type: str) -> bool:
+    """降低过杀：低/中危且有真实证据却被判 ignored 的，改判 deepen 给 worker 补证确认，
+    而不是直接归档。高/严重与明确垃圾（轰炸/弱后门/重复/越界）仍走各自硬规则，不受影响。
+
+    这是最后一道兜底（位于 ignored→deepen 系统改判之后）：只有前序改判都未介入、
+    且确属“有证据却被判垃圾”的低/中危线索才会被救回。
+    """
+    if review.verdict != ReviewVerdict.ignored:
+        return False
+    if review.is_duplicate or not review.in_scope:
+        return False
+    if finding.severity_claimed not in {Severity.low, Severity.medium}:
+        return False
+    if not _has_complete_evidence(finding):
+        return False
+    review.verdict = ReviewVerdict.deepen
+    review.confidence = Confidence.uncertain
+    review.severity_final = None
+    review.score = min(max(review.score, 2.5), 3.9)
+    directive = (
+        "该低/中危线索已有真实请求/响应或 PoC 证据，不宜直接归档。请复核证据并确认实际影响："
+        "若确为有效漏洞，补齐利用链与影响面（尤其验证能否升级到越权/读数据/未授权访问等可收危害）；"
+        "若仅为信息类或无实际利用，再 finish no_vuln。"
+    )
+    review.deepen_directive = review.deepen_directive or directive
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + "\n[系统改判·降过杀] 低/中危且有真实证据，已从 ignored 改为 deepen，避免误杀。"
+    ).strip()
+    return True
+
+
+def _maybe_rescue_recon_anon_leak(finding: Finding, review: Review, src_type: str) -> bool:
+    """降过杀增强：侦察期已独立确认「该端点匿名可达且响应疑似泄露敏感数据」（recon_anon_leak 标记）
+    的低/中危线索被判 ignored 时，优先救援改为 deepen——侦察侧的匿名泄露实锤是强信号，
+    不应被当成垃圾归档。证据门槛放宽到「至少有残缺证据或匿名泄露标记本身即可」（侦察已实锤匿名可读数据），
+    但仍要求低/中危、未重复、在范围内，且非明确垃圾（轰炸/弱后门走各自硬规则在前序已拦截）。
+
+    排在 _maybe_rescue_low_medium_evidenced 之前：recon 已实锤的匿名泄露优先级高于「仅 worker 自证」的救援。
+    """
+    if review.verdict != ReviewVerdict.ignored:
+        return False
+    if review.is_duplicate or not review.in_scope:
+        return False
+    if finding.severity_claimed not in {Severity.low, Severity.medium}:
+        return False
+    if not getattr(finding.self_check, "recon_anon_leak", False):
+        return False
+    # 证据门槛放宽：recon 已实锤匿名可读数据，即使 worker 提交证据残缺也值得派 worker 定向补证确认。
+    if not (_has_complete_evidence(finding) or (finding.raw_response or "").strip()
+            or (finding.evidence and (finding.evidence.extracted_data_sample or finding.evidence.notes))):
+        return False
+    review.verdict = ReviewVerdict.deepen
+    review.confidence = Confidence.uncertain
+    review.severity_final = None
+    review.score = min(max(review.score, 3.0), 4.5)
+    directive = (
+        "该端点侦察期已实锤「匿名可达且响应疑似泄露敏感数据」（邮箱/手机号/身份证/JSON 裸数据/JWT 等）。"
+        "请定向补证：用匿名请求复现并确认确实泄露了他人/受限数据，量化可获取的数据量与类型；"
+        "若确为有效信息泄露/未授权访问，补齐利用链与影响面；若仅为本就公开的展示类接口，再 finish no_vuln。"
+    )
+    review.deepen_directive = review.deepen_directive or directive
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + "\n[系统改判·降过杀·recon实锤] 端点侦察已确认匿名泄露敏感数据，已从 ignored 改为 deepen，优先补证。"
+    ).strip()
+    return True
+
+
+def _maybe_rescue_recon_waf(finding: Finding, review: Review, src_type: str) -> bool:
+    """降过杀增强：本次目标侦察期已实锤前方存在 WAF/风控（recon_waf_present 标记）时，
+    对「被判 ignored 且证据残缺」的低/中危线索优先救援改为 deepen——它的「证据不足」很可能源于
+    被 WAF 拦截而非本身无价值。派 worker 带 X-Forwarded-For/X-Real-IP(127.0.0.1)+浏览器 UA 变形、
+    命中拦截再用 suggest_waf_bypass 取候选做 baseline vs variant 实测。
+
+    证据门槛比通用救援与 recon_anon_leak 都更宽：只需「至少有残缺证据/数据样本/notes 之一」（不要求
+    完整 req/resp 对），因为 WAF 存在本身就是「证据可能被拦掉」的解释。仍要求低/中危、未重复、在范围内，
+    且非明确垃圾（轰炸/弱后门走各自硬规则在前序已拦截）。排在 recon_anon_leak 之后：具体端点匿名泄露实锤
+    优先级高于「目标整体有 WAF」的全局信号。
+    """
+    if review.verdict != ReviewVerdict.ignored:
+        return False
+    if review.is_duplicate or not review.in_scope:
+        return False
+    if finding.severity_claimed not in {Severity.low, Severity.medium}:
+        return False
+    if not getattr(finding.self_check, "recon_waf_present", False):
+        return False
+    if not (
+        _has_complete_evidence(finding)
+        or (finding.raw_response or "").strip()
+        or (finding.evidence and (finding.evidence.extracted_data_sample or finding.evidence.notes))
+    ):
+        return False
+    review.verdict = ReviewVerdict.deepen
+    review.confidence = Confidence.uncertain
+    review.severity_final = None
+    review.score = min(max(review.score, 3.0), 4.5)
+    directive = (
+        "本次目标侦察已实锤前方存在 WAF/风控，该 finding 的「证据残缺」很可能源于被拦截而非本身无价值。"
+        "请带 X-Forwarded-For/X-Real-IP(127.0.0.1) 与常见浏览器 UA 变形重试；命中拦截时用 suggest_waf_bypass "
+        "取 1-3 个候选做 baseline vs variant 实测，确认是否真能绕过并复现实际危害；"
+        "若确为有效漏洞补齐利用链与影响面，若仅是 WAF 噪声/公开接口则 finish no_vuln。"
+    )
+    review.deepen_directive = review.deepen_directive or directive
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + "\n[系统改判·降过杀·recon实锤WAF] 目标已确认有 WAF，evidence 残缺可能源于被拦，已从 ignored 改为 deepen 带变形补证。"
+    ).strip()
+    return True
+
+
 def _is_thinking_tool_choice_error(err: LLMError) -> bool:
     """强制指定 submit_review 的 tool_choice 不被模型/网关接受时的兜底判定。
 
@@ -362,6 +486,12 @@ class Reviewer:
             self._emit("review_auto_accept_write", title=finding.title, write_kind=classify_write_proof(finding))
         elif _maybe_deepen_ignored(finding, review, self.src_type):
             self._emit("review_auto_deepen", title=finding.title, directive=review.deepen_directive)
+        elif _maybe_rescue_recon_anon_leak(finding, review, self.src_type):
+            self._emit("review_auto_rescue_recon_anon_leak", title=finding.title, directive=review.deepen_directive)
+        elif _maybe_rescue_recon_waf(finding, review, self.src_type):
+            self._emit("review_auto_rescue_recon_waf", title=finding.title, directive=review.deepen_directive)
+        elif _maybe_rescue_low_medium_evidenced(finding, review, self.src_type):
+            self._emit("review_auto_rescue_low_medium", title=finding.title, directive=review.deepen_directive)
 
         # 阶段③：仅 accepted 且 严重/高危 才触发复现验证。
         # 写/删 PoC 禁止现场复放：URL 含 delete 不是破坏性 SQL，复放既不安全
