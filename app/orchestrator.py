@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import dedup
+from app.tools import intake_screen
 from app.agents import collector
 from app.agents import intel as intel_lib
 from app.agents import playbook_router
@@ -2262,6 +2263,12 @@ class TaskRunner:
                     return
                 target_ref = tgt.url or tgt.host
                 worker_id = tgt.assigned_worker
+                # 两道闸门之一（Stage-0 预筛）：垃圾/半成品不写 Finding 主表。
+                ok, reason = intake_screen.screen_submission(f)
+                if not ok:
+                    await self._reject_intake(session, task_id, target_id, f, reason)
+                    await session.commit()
+                    return
                 duplicate = await self._find_existing_duplicate(session, target_ref, f)
                 if duplicate:
                     return
@@ -2297,6 +2304,24 @@ class TaskRunner:
         except Exception:
             logger.warning("[realtime_persist] target=%s 实时落库失败（整轮 result 仍会兜底）",
                             target_id[:8], exc_info=True)
+
+    async def _reject_intake(self, session, task_id: str, target_id: str, f, reason: str) -> None:
+        """被 Stage-0 预筛拦下的垃圾：只记一条 TaskEvent，不写 Finding 主表。
+
+        由调用方负责 commit（各入库事务自行收口，避免跨事务状态不一致）。
+        """
+        try:
+            title = (str(f.get("title") or "")[:40] if isinstance(f, dict) else str(f)[:40])
+            session.add(TaskEvent(
+                task_id=task_id,
+                agent="orchestrator",
+                kind="intake_reject",
+                level="info",
+                message=f"入库预筛拦截（{reason}）：{title}",
+                payload={"target_id": target_id, "reason": reason},
+            ))
+        except Exception:
+            logger.warning("intake_reject log failed target=%s", target_id[:8], exc_info=True)
 
     async def _heartbeat_target(self, target_id: str) -> None:
         timeout_ref = WORKER_IDLE_TIMEOUT if WORKER_IDLE_TIMEOUT > 0 else WORKER_WALL_TIMEOUT
@@ -2481,6 +2506,11 @@ class TaskRunner:
 
             # 落 Finding（含漏洞级去重；DB 唯一索引兜底，逐条 savepoint 容错并发重复）
             for f in findings:
+                # 两道闸门之一（Stage-0 预筛）：垃圾/半成品不写 Finding 主表。
+                ok, reason = intake_screen.screen_submission(f)
+                if not ok:
+                    await self._reject_intake(session, task_id, target_id, f, reason)
+                    continue
                 duplicate = await self._find_existing_duplicate(session, target_ref, f)
                 if duplicate:
                     continue
