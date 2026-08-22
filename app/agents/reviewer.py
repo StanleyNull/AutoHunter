@@ -272,6 +272,95 @@ def _maybe_deepen_ignored(finding: Finding, review: Review, src_type: str) -> bo
     return True
 
 
+def _evidence_fragmentary(finding: Finding) -> bool:
+    """证据残缺判定：缺一条可直接取证的高价值数据样本，且无响应包支撑。
+
+    用于匿名泄露救援——有 extracted_data_sample/raw_response 说明敏感数据已抓到，
+    证据并不残缺；仍被 ignored 属垃圾洞，不救。
+    """
+    if (finding.raw_response or "").strip():
+        return False
+    if (finding.evidence.extracted_data_sample or "").strip():
+        return False
+    return True
+
+
+def _has_some_evidence(finding: Finding) -> bool:
+    """证据至少一点：只要有任一可支撑的取证原料（响应/PoC/请求/样本/链路），就不算空洞。"""
+    if (finding.raw_response or "").strip():
+        return True
+    if (finding.raw_request or "").strip():
+        return True
+    if (finding.poc or "").strip():
+        return True
+    if (finding.evidence.extracted_data_sample or "").strip():
+        return True
+    if (finding.evidence.tool_output or "").strip():
+        return True
+    if finding.kill_chain and any((s.detail or "").strip() for s in finding.kill_chain):
+        return True
+    return False
+
+
+def _maybe_rescue_recon_anon_leak(finding: Finding, review: Review) -> bool:
+    """匿名泄露降过杀救援：侦察已实锤匿名端点泄露敏感数据，但中/低危被 ignored 且证据残缺
+    的发现是「证据残缺但高价值」线索，不当垃圾丢，改判 deepen 定向补证，避免漏报。"""
+    if review.verdict != ReviewVerdict.ignored or review.is_duplicate or not review.in_scope:
+        return False
+    if not getattr(finding.self_check, "recon_anon_leak", False):
+        return False
+    if finding.severity_claimed not in {Severity.medium, Severity.low}:
+        return False
+    if not _evidence_fragmentary(finding):
+        return False
+    review.verdict = ReviewVerdict.deepen
+    review.confidence = Confidence.uncertain
+    review.severity_final = None
+    review.score = min(max(review.score or 0, 2.5), 3.9)
+    review.ignore_reasons = []
+    review.deepen_directive = (
+        "该匿名端点已被侦察确认可公开访问且疑似返回敏感数据，但证据残缺。"
+        "请沿此端点用 curl 复现原始请求，脱敏截取响应体中对应的敏感字段（凭证/token/密钥/内部路径等），"
+        "给出请求包+响应关键片段，明确命中字段与敏感类型；确认并非页面正常展示内容、确有可取证敏感数据后提交。"
+        "若确认响应无敏感数据，finish no_vuln。"
+    )
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + "\n[系统改判] 该发现为侦察期匿名泄露线索、证据残缺但高价值，已由 ignored 改为 deepen 定向补证。"
+    ).strip()
+    return True
+
+
+def _maybe_rescue_recon_waf(finding: Finding, review: Review) -> bool:
+    """WAF 实锤降过杀救援：侦察已确认目标存在 WAF/风控拦截，这类发现常因请求被拦而证据残缺；
+    只要带 recon_waf_present 标记且证据至少一点，不直接 ignored，改判 deepen 并附绕过变形头。"""
+    if review.verdict != ReviewVerdict.ignored or review.is_duplicate or not review.in_scope:
+        return False
+    if not getattr(finding.self_check, "recon_waf_present", False):
+        return False
+    if not _has_some_evidence(finding):
+        return False
+    review.verdict = ReviewVerdict.deepen
+    review.confidence = Confidence.uncertain
+    review.severity_final = None
+    review.score = min(max(review.score or 0, 2.5), 3.9)
+    review.ignore_reasons = []
+    review.deepen_directive = (
+        "目标已确认存在 WAF/风控拦截，本次证据不足可能因请求被拦导致。"
+        "请沿同一注入点携带绕过变形头重试，先 baseline 后 variant 对比响应差异再实锤："
+        "- X-Forwarded-For: 127.0.0.1   /   X-Forwarded-For: 1.1.1.1, 127.0.0.1"
+        "- X-Real-IP: 127.0.0.1"
+        "- 随机正常 User-Agent / 空 User-Agent / Accept: text/html 等常见浏览器请求头"
+        "对比基线响应与变形后响应（状态码/拦截页/业务回显）差异，坐实注入是否被 WAF 放行；"
+        "拿到明确差异或业务回显后提交，若所有变形均被拦确证无真实注入则 finish no_vuln。"
+    )
+    review.reviewer_notes = (
+        (review.reviewer_notes or "").strip()
+        + "\n[系统改判] 该发现带侦察期 WAF 实锤、证据或残缺，已由 ignored 改为 deepen 并附绕过变形头定向深挖。"
+    ).strip()
+    return True
+
+
 def _is_thinking_tool_choice_error(err: LLMError) -> bool:
     """强制指定 submit_review 的 tool_choice 不被模型/网关接受时的兜底判定。
 
@@ -360,6 +449,10 @@ class Reviewer:
             self._emit("review_auto_ignore_weak_backdoor", title=finding.title)
         elif _maybe_accept_write_proof(finding, review):
             self._emit("review_auto_accept_write", title=finding.title, write_kind=classify_write_proof(finding))
+        elif _maybe_rescue_recon_anon_leak(finding, review):
+            self._emit("review_auto_rescue_recon_anon_leak", title=finding.title, directive=review.deepen_directive)
+        elif _maybe_rescue_recon_waf(finding, review):
+            self._emit("review_auto_rescue_recon_waf", title=finding.title, directive=review.deepen_directive)
         elif _maybe_deepen_ignored(finding, review, self.src_type):
             self._emit("review_auto_deepen", title=finding.title, directive=review.deepen_directive)
 
