@@ -1,0 +1,5 @@
+# Windows 检出必须保持 LF，否则 Docker 里跑 scripts/*.sh 会失败。
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

@@ -69,6 +69,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN nuclei -update-templates -silent || true
 
 COPY . .
+# Windows 检出/解压可能带 CRLF；入口脚本带 \r 时容器会报 no such file or directory。
+RUN find /app/scripts -type f -name '*.sh' -exec sed -i 's/\r$//' {} +
 
 # 拷入前端构建产物（覆盖空的 web/dist）
 COPY --from=frontend /web/dist /app/web/dist

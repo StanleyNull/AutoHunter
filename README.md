@@ -240,9 +240,9 @@ sudo firewall-cmd --permanent --add-port=18800/tcp && sudo firewall-cmd --reload
 
 <br>
 
-1. 管理员 PowerShell 装 WSL2：`wsl --install`，装完重启。
-2. 装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，安装勾选 “Use WSL 2 based engine”，Settings → Resources → WSL Integration 打开集成。
-3. 在 **WSL / Git Bash** 里：
+1. 管理员 PowerShell 装 WSL2：**必须装一个 Linux 发行版**（推荐 Ubuntu）。执行 `wsl --install`（或 `wsl --install -d Ubuntu`），装完重启。只开 Docker Desktop 自带的 `docker-desktop` 不够。
+2. 装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，安装勾选 “Use WSL 2 based engine”。打开 **Settings → Resources → WSL Integration**，打开集成并**勾选 Ubuntu**。
+3. 在 **Ubuntu 终端**（不要用空的 WSL 壳）里：
    ```bash
    git clone https://github.com/StanleyNull/AutoHunter.git autohunter && cd autohunter
    bash scripts/install.sh
@@ -250,6 +250,10 @@ sudo firewall-cmd --permanent --add-port=18800/tcp && sudo firewall-cmd --reload
 4. 访问 `http://localhost:18800/`。
 
 > 💡 代码放在 **WSL 文件系统内**（如 `~/autohunter`）比放 `C:\` 挂载盘性能好很多。只用 PowerShell 的话走下方手动部署。
+>
+> 国内拉 `node` / `python` 基础镜像失败时，在 Docker Desktop → Docker Engine 自行配置 `registry-mirrors`（第三方加速地址经常失效，不要写死进项目）。
+>
+> 仓库脚本已强制 LF。若你是从 zip 解压到 Windows 再 build，镜像构建时会自动去掉 `\r`，不必再手动 dos2unix。
 
 </details>
 
