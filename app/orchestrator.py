@@ -126,6 +126,8 @@ WORKER_CLEANUP_TIMEOUT = float(os.environ.get("WORKER_CLEANUP_TIMEOUT", "15"))
 REVIEW_RETRY_BACKOFF = float(os.environ.get("REVIEW_RETRY_BACKOFF", "300"))
 TARGET_HEARTBEAT_INTERVAL = float(os.environ.get("TARGET_HEARTBEAT_INTERVAL", "30"))
 KILLSWEEP_DEDUP_SCAN_LIMIT = int(os.environ.get("KILLSWEEP_DEDUP_SCAN_LIMIT", "200"))
+# 通杀闭环：单次通杀最多把多少个「已实证受影响」的同类站点批量入队，防一次打爆队列。
+KILLSWEEP_REPLAY_ENQUEUE_LIMIT = int(os.environ.get("KILLSWEEP_REPLAY_ENQUEUE_LIMIT", "50"))
 # 同一目标因临时 LLM 错误回队的最大次数（内存级，不耗 retry_count）。
 # 超过则置 dead 收敛，避免模型持续抽风时目标无限回队空转。
 MAX_TRANSIENT_LLM_REQUEUE = int(os.environ.get("MAX_TRANSIENT_LLM_REQUEUE", "5"))
@@ -3322,12 +3324,17 @@ class TaskRunner:
             row.notes = res.get("notes", "")
             row.status = "done"
 
-            # 判定可通杀 + 实证验证成功 → 把那个同款站点入挖掘队列出货
+            # 通杀闭环：可通杀 → affected_table 里已实证的同类站点批量入队打洞（含 verified_url）。
             enq = ""
+            if res.get("is_killsweep") and affected_table:
+                added = await self._enqueue_killsweep_affected(
+                    session, task_id, affected_table, origin_host)
+                if added:
+                    enq = f"；已将 {added} 个已实证受影响站点批量入队打洞"
             if res.get("is_killsweep") and res.get("verified") and res.get("verified_url"):
-                added = await self._enqueue_killsweep_target(
-                    session, task_id, res["verified_url"], origin_host)
-                enq = "；已将验证成功的同款站点入队出货" if added else ""
+                if await self._enqueue_killsweep_target(
+                        session, task_id, res["verified_url"], origin_host):
+                    enq = f"{enq}；已将验证成功的同款站点入队出货"
             try:
                 await session.commit()
             except IntegrityError:
@@ -3354,6 +3361,10 @@ class TaskRunner:
                     "[产品指纹与已有记录冲突，已保留本条源漏洞分析]"
                 ).strip()
                 row.updated_at = _now()
+                # 通杀闭环（降级分支同样收口）：已实证同类受影响站点批量入队打洞。
+                if res.get("is_killsweep") and affected_table:
+                    await self._enqueue_killsweep_affected(
+                        session, task_id, affected_table, origin_host)
                 if res.get("is_killsweep") and res.get("verified") and res.get("verified_url"):
                     await self._enqueue_killsweep_target(
                         session, task_id, res["verified_url"], origin_host)
@@ -3401,6 +3412,31 @@ class TaskRunner:
         except IntegrityError:
             return False
         return True
+
+    async def _enqueue_killsweep_affected(self, session: AsyncSession, task_id: str,
+                                          affected_table: list, origin: str) -> int:
+        """通杀闭环：把 Hunter 已实证（status=verified）的同款受影响站点批量入队打洞。
+
+        复用原生 Target 队列 → Worker 挖掘 →（Stage-0 预筛）→ 落库链路，让每个实证
+        中招的同类站点逐步复现并产出独立 Finding。candidate 行不入队，避免空耗；
+        上限 KILLSWEEP_REPLAY_ENQUEUE_LIMIT 防止一次通杀打爆队列。返回实际入队数。
+        """
+        if not affected_table:
+            return 0
+        enqueued = 0
+        for item in affected_table:
+            if enqueued >= KILLSWEEP_REPLAY_ENQUEUE_LIMIT:
+                break
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") != "verified":
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            if await self._enqueue_killsweep_target(session, task_id, url, origin):
+                enqueued += 1
+        return enqueued
 
     def trigger_escalation(self, task_id: str, finding_id: str, orig_severity: str) -> bool:
         """AI accepted 后触发扩大危害深挖；finding 级 inflight 去重，单洞只打一次。"""
