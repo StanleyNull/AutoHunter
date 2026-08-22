@@ -64,6 +64,10 @@ class WorkerConfig(BaseModel):
     enterprise_soft_round_budget_cap: int = int(os.environ.get("ENTERPRISE_WORKER_SOFT_ROUND_BUDGET_CAP", "0"))
     # JS 分析工具 schema 体积不小，默认按信号开启；设 1 可恢复每轮常驻。
     js_tool_always_on: bool = os.environ.get("WORKER_JS_TOOL_ALWAYS_ON", "0").lower() in {"1", "true", "yes"}
+    # 强制前置侦察：worker 自主挖洞前，由系统确定性完成入口测绘（robots/sitemap/后台/API/
+    # 运维路径/指纹/JS 接口），无论模型强弱都先拿到入口地图，直接提升召回率。
+    # 回炉（deepen）任务默认跳过；设 0 可关闭（退回纯 LLM 自主侦察）。
+    mandatory_recon: bool = os.environ.get("WORKER_MANDATORY_RECON", "1").lower() in {"1", "true", "yes"}
     # worker 提示词版本：legacy=2026-06-25 老版骨架+新工具说明；current=当前省 token 版；modern/full=当前完整版。
     prompt_version: str = os.environ.get("WORKER_PROMPT_VERSION", "legacy")
     # 工作目录根
@@ -72,6 +76,10 @@ class WorkerConfig(BaseModel):
     work_retention_days: int = int(os.environ.get("WORKER_WORK_RETENTION_DAYS", "7"))
     # 自动清理检查间隔（小时）
     work_cleanup_interval_hours: int = int(os.environ.get("WORKER_WORK_CLEANUP_INTERVAL_HOURS", "6"))
+    # 模型分级路由：对难目标走强模型、对简单量扫目标走弱模型，平衡成本与命中率。
+    # 只覆盖 model 名，base_url/api_key 仍取任务解析结果；两者都留空则不做分级（沿用任务默认模型）。
+    strong_model: str = os.environ.get("WORKER_STRONG_MODEL", "").strip()
+    weak_model: str = os.environ.get("WORKER_WEAK_MODEL", "").strip()
 
     def rounds_for(self, src_type: str | None) -> tuple[int, int]:
         """按 src_type 返回 (max_rounds, soft_rounds)。企业模式给更大深挖预算。"""

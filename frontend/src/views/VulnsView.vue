@@ -1,8 +1,10 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
 import { fmtLocalTime } from "../format.js";
+
+defineOptions({ name: "VulnsView" });
 
 const router = useRouter();
 const stats = ref({ total: 0, submitted: 0, ready: 0, by_severity: {} });
@@ -92,6 +94,9 @@ watch(searchDraft, (v) => {
 });
 
 onMounted(reload);
+onActivated(() => {
+  if (rows.value.length) reload();
+});
 </script>
 
 <template>

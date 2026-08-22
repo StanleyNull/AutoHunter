@@ -21,7 +21,20 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.api import findings, intel, runtime_logs, settings, stream, tasks, update, vulns
+from app.agent_runtime import (
+    AGENT_THREAD_POOL_SIZE,
+    ASSISTANT_MAX_CONCURRENCY,
+    COLLECTOR_IO_POOL_SIZE,
+    DEFAULT_THREAD_POOL_SIZE,
+    DETECTED_CPUS,
+    DETECTED_MEM_GIB,
+    ESCALATION_MAX_CONCURRENCY,
+    KILLSWEEP_MAX_CONCURRENCY,
+    REVIEW_MAX_CONCURRENCY,
+    WORKER_MAX_CONCURRENCY,
+)
+from app.api import backup, findings, intel, runtime_logs, settings, stream, tasks, update, vulns
+from app.backup import run_periodic_backup
 from app.db.session import init_db
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
 from app.orchestrator import manager
@@ -29,6 +42,7 @@ from app.settings_service import init_settings_cache
 from app.security import SECURITY_HEADERS, auth_enabled, protected_path, request_allowed, resolve_role, token_from_headers
 from app.waf import WAF_BLOCK_MODE, inspect_request, waf_headers
 from app.workdir_cleanup import run_periodic_cleanup
+from app.memory import run_periodic_memory_reclaim
 
 # Vite 构建产物目录（多阶段构建拷贝到此）
 WEB_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -101,14 +115,28 @@ async def _loop_lag_monitor() -> None:
 async def lifespan(app: FastAPI):
     _install_diagnostics(asyncio.get_running_loop())
     default_executor = ThreadPoolExecutor(
-        max_workers=int(os.environ.get("AUTOHUNTER_DEFAULT_THREAD_POOL_SIZE", "8")),
+        max_workers=DEFAULT_THREAD_POOL_SIZE,
         thread_name_prefix="ah-default",
     )
     asyncio.get_running_loop().set_default_executor(default_executor)
     lag_monitor = asyncio.create_task(_loop_lag_monitor())
     cleanup_task = asyncio.create_task(run_periodic_cleanup())
+    memory_task = asyncio.create_task(run_periodic_memory_reclaim())
+    backup_task = asyncio.create_task(run_periodic_backup())
     await init_db()
     await init_settings_cache()
+    DIAG_LOG.info(
+        "并发档: cpus=%.1f mem_gib=%.1f worker=%s review=%s killsweep=%s escalation=%s assistant=%s agent_pool=%s collector_io=%s",
+        DETECTED_CPUS,
+        DETECTED_MEM_GIB,
+        WORKER_MAX_CONCURRENCY,
+        REVIEW_MAX_CONCURRENCY,
+        KILLSWEEP_MAX_CONCURRENCY,
+        ESCALATION_MAX_CONCURRENCY,
+        ASSISTANT_MAX_CONCURRENCY,
+        AGENT_THREAD_POOL_SIZE,
+        COLLECTOR_IO_POOL_SIZE,
+    )
     if not auth_enabled():
         DIAG_LOG.warning(
             "安全告警：未配置任何访问令牌（AUTOHUNTER_API_TOKEN / _READ_TOKEN / _OBSERVER_TOKEN），"
@@ -124,7 +152,9 @@ async def lifespan(app: FastAPI):
     finally:
         lag_monitor.cancel()
         cleanup_task.cancel()
-        for t in (lag_monitor, cleanup_task):
+        memory_task.cancel()
+        backup_task.cancel()
+        for t in (lag_monitor, cleanup_task, memory_task, backup_task):
             try:
                 await t
             except asyncio.CancelledError:
@@ -138,6 +168,7 @@ app = FastAPI(title="AutoHunter", version="0.1", lifespan=lifespan)
 if DS2API_ENABLED:
     app.include_router(ds2api_router)
 app.include_router(settings.router)
+app.include_router(backup.router)
 
 
 @app.middleware("http")

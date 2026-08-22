@@ -21,18 +21,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import dedup
+from app.config import worker_config
 from app.agents import collector
 from app.agents import intel as intel_lib
 from app.agents import playbook_router
 from app.agents import prefilter
 from app.agents import site_collab
 from app.agents import target_cluster
-from app.agents.deepen import DEEPEN_CAP  # 单 target 深挖上限（人工+AI 合计，防死循环）
-from app.agents.prompts import is_enterprise_src, should_escalate
+from app.agents.deepen import deepen_cap_for  # 任务级深挖上限（人工+AI+lead 合计，防死循环）
+from app.agents.prompts import is_enterprise_src, normalize_src_type, should_escalate
 from app.agents.reviewer import Reviewer
 from app.agents.worker import Worker
 from app.agent_runtime import (
     AGENT_EXECUTOR, COLLECTOR_IO_EXECUTOR, WORKER_MAX_CONCURRENCY,
+    QUEUE_LIVENESS_BATCH_SIZE, QUEUE_LIVENESS_CONCURRENCY,
     agent_semaphore, shutdown_agent_executor,
 )
 from app.db.models import CST, Finding, Killsweep, Review, Target, Task, TaskEvent
@@ -43,6 +45,7 @@ from app.llm.client import LLMClient
 from app.settings_service import (
     llm_client_for_task,
     resolve_engine_config,
+    resolve_engine_name,
     resolve_llm_runtime_mode,
     resolve_worker_prompt_version,
 )
@@ -66,6 +69,31 @@ _ESCALATE_TOPTIER_KEYWORDS = (
 )
 # 影响面数量级阈值：impact_count 达到此值也算「影响面质变」。
 _ESCALATE_IMPACT_THRESHOLD = int(os.environ.get("ESCALATE_IMPACT_THRESHOLD", "100"))
+
+
+def _lightweight_reproduce_eligible(finding: "Finding") -> bool:
+    """中/低危有完整证据时，系统可标记「已轻量复现」，提升进人工复审的洞质量。
+
+    判定（确定性，不依赖 LLM）：
+      - 等级为中危或低危（critical/high 走更重的实锤验证，不在此覆盖）；
+      - 具备 target_url（可定位复现入口）；
+      - 具备 detail / proof / 请求证据文本（证据链完整，人工可直接采信）。
+    命中即视为系统已确认证据闭环，标记 reproduced=True，减少人工重复验证成本。
+    """
+    sev = (getattr(finding, "severity_claimed", "") or "").strip()
+    if sev not in ("中危", "低危"):
+        return False
+    if not getattr(finding, "target_url", ""):
+        return False
+    evidence = " ".join([
+        str(getattr(finding, "detail", "") or ""),
+        str(getattr(finding, "proof", "") or ""),
+        str(getattr(finding, "request_evidence", "") or ""),
+    ]).strip()
+    # 证据需达到一定厚度（避免空壳洞被标记复现）：至少含 30 字实质描述或含请求/响应片段。
+    if len(evidence) < 30 and "HTTP" not in evidence and "请求" not in evidence:
+        return False
+    return True
 
 
 def _escalation_is_significant(orig_severity: str, res: dict) -> bool:
@@ -105,6 +133,7 @@ _WORKER_TRACE_KINDS = frozenset({
     "auth_status", "finish_blocked",
 })
 _TRACE_TEXT_KEYS = ("text", "command", "url", "error", "message", "reason", "query", "summary")
+_TRACE_LONG_KEYS = ("error_copy", "diagnostic", "detail")
 # 单 target 超时兜底。
 # WORKER_WALL_TIMEOUT 保持向后兼容：现在作为「无活动空闲超时」默认值。
 # 活跃 worker 可继续运行到 WORKER_MAX_WALL_TIMEOUT，避免深挖正在推进时被 30min 一刀切。
@@ -112,6 +141,9 @@ WORKER_WALL_TIMEOUT = float(os.environ.get("WORKER_WALL_TIMEOUT", "1800"))
 WORKER_IDLE_TIMEOUT = float(os.environ.get("WORKER_IDLE_TIMEOUT", str(WORKER_WALL_TIMEOUT)))
 WORKER_MAX_WALL_TIMEOUT = float(os.environ.get("WORKER_MAX_WALL_TIMEOUT", str(max(WORKER_WALL_TIMEOUT * 4, WORKER_WALL_TIMEOUT))))
 WORKER_WAIT_POLL_INTERVAL = float(os.environ.get("WORKER_WAIT_POLL_INTERVAL", "10"))
+# 等待 worker 并发位的超时：并发位被幽灵线程长期占住时 acquire 可能永远等不到，
+# 超时后把目标回队列并退出本协程，避免「启动中…」无限挂起（由下一轮 tick 再试）。
+WORKER_SEM_ACQUIRE_TIMEOUT = float(os.environ.get("WORKER_SEM_ACQUIRE_TIMEOUT", "120"))
 REVIEW_WALL_TIMEOUT = float(os.environ.get("REVIEW_WALL_TIMEOUT", "600"))
 KILLSWEEP_WALL_TIMEOUT = float(os.environ.get("KILLSWEEP_WALL_TIMEOUT", "3600"))
 # 扩大危害深挖刻意克制：轮数少、墙钟短，打不动就撤。
@@ -136,13 +168,11 @@ FOFA_AUTH_FAIL_PAUSE_THRESHOLD = int(os.environ.get("FOFA_AUTH_FAIL_PAUSE_THRESH
 STALE_NO_WORKER_GRACE = float(os.environ.get("STALE_NO_WORKER_GRACE", "150"))
 # 派发前探活：queued 目标真正交给 worker 前再复查一次，避免 worker 时间浪费在死链上。
 QUEUE_LIVENESS_TIMEOUT = float(os.environ.get("QUEUE_LIVENESS_TIMEOUT", "6"))
-QUEUE_LIVENESS_CONCURRENCY = int(os.environ.get("QUEUE_LIVENESS_CONCURRENCY", "8"))
 QUEUE_LIVENESS_CACHE_TTL = float(os.environ.get("QUEUE_LIVENESS_CACHE_TTL", "300"))
 QUEUE_LOW_SUCCESS_SKIP = os.environ.get("QUEUE_LOW_SUCCESS_SKIP", "1").lower() not in {"0", "false", "no"}
 QUEUE_LOW_SUCCESS_SCORE_THRESHOLD = float(os.environ.get("QUEUE_LOW_SUCCESS_SCORE_THRESHOLD", "-3.5"))
 QUEUE_TRANSIENT_PREFILTER_COOLDOWN = float(os.environ.get("QUEUE_TRANSIENT_PREFILTER_COOLDOWN", "900"))
 QUEUE_DISPATCH_CANDIDATE_LIMIT = max(30, int(os.environ.get("QUEUE_DISPATCH_CANDIDATE_LIMIT", "120")))
-QUEUE_LIVENESS_BATCH_SIZE = max(1, int(os.environ.get("QUEUE_LIVENESS_BATCH_SIZE", "24")))
 
 _LOW_SUCCESS_SCORE_MARKERS = (
     "pure_frontend", "pure_marketing_site", "static_assets", "data_display_platform",
@@ -303,7 +333,7 @@ def _probe_target_liveness(url: str, host: str, timeout: float) -> dict:
     urls = _probe_urls(url, host)
     skipped: list[dict] = []
     for probe_url in urls:
-        skip, reason, info = prefilter.should_skip_ex(host, probe_url)
+        skip, reason, info = prefilter.should_skip_ex(host, probe_url, timeout=timeout)
         if not skip:
             return {
                 "alive": True,
@@ -452,7 +482,9 @@ class TaskRunner:
         for k, v in (payload or {}).items():
             if k in ("finding",):
                 continue
-            if k in _TRACE_TEXT_KEYS and isinstance(v, str):
+            if k in _TRACE_LONG_KEYS and isinstance(v, str):
+                out[k] = v[:2000]
+            elif k in _TRACE_TEXT_KEYS and isinstance(v, str):
                 out[k] = v[:500]
             elif isinstance(v, str) and len(v) > 300:
                 out[k] = v[:300]
@@ -550,6 +582,55 @@ class TaskRunner:
             "model": getattr(config, "model", "") or "",
             "base_url": getattr(config, "base_url", "") or "",
         }
+
+    @staticmethod
+    def _resolve_worker_model_tier(target_meta: dict | None, src_type: str | None,
+                                   deepen_context: dict | None, is_edu: bool) -> str:
+        """判定 worker 应使用的模型档位：strong / weak / default。
+
+        难目标走强模型把利用链打穿，简单量扫目标走弱模型压低单目标成本；未配置
+        strong/weak 模型时返回 default（沿用任务默认模型，行为不变）。
+        """
+        if not (worker_config.strong_model or worker_config.weak_model):
+            return "default"
+        st = normalize_src_type(src_type)
+        meta = target_meta or {}
+        auth = meta.get("auth_context") or meta.get("user_auth")
+        # 难目标 → 强模型
+        if deepen_context:
+            return "strong"
+        if st in {"enterprise", "corp", "company", "企业", "企业src"}:
+            return "strong"
+        if auth:
+            return "strong"
+        # 简单量扫目标且无认证、无历史成功打法/情报命中 → 弱模型（纯侦察与已知打法足矣）
+        if st == "edusrc" and not auth:
+            chain_hints = meta.get("attack_chain_hints")
+            intel_block = meta.get("intel_block")
+            if not chain_hints and not intel_block:
+                return "weak"
+        return "default"
+
+    @staticmethod
+    def _worker_llm_for_tier(base_llm: LLMClient, tier: str) -> LLMClient:
+        """按档位覆盖模型名生成新的 LLMClient；base_url/api_key 沿用任务解析结果。"""
+        override = {"strong": worker_config.strong_model, "weak": worker_config.weak_model}.get(tier, "")
+        override = (override or "").strip()
+        providers = getattr(base_llm, "providers", None)
+        if not override or not providers:
+            return base_llm
+        new_providers = []
+        for p in providers:
+            cp = p.model_copy(deep=True)
+            cp.model = override
+            new_providers.append(cp)
+        return LLMClient(
+            providers=new_providers,
+            pool_mode=base_llm.pool_mode,
+            usage_key=base_llm.usage_key,
+            on_provider_failure=base_llm.on_provider_failure,
+            on_provider_selected=base_llm.on_provider_selected,
+        )
 
     @staticmethod
     def _finding_llm_fields(*, model: str = "", base_url: str = "") -> dict:
@@ -740,11 +821,13 @@ class TaskRunner:
                 ),
             )
 
-            # FOFA 账号连续无效达阈值 → 自动暂停任务，不再空转刷无效请求。
+            # 测绘引擎账号连续无效达阈值 → 自动暂停任务，不再空转刷无效请求。
             fofa_fail = int((task.fofa_config or {}).get("fofa_auth_fail_count", 0))
             if FOFA_AUTH_FAIL_PAUSE_THRESHOLD and fofa_fail >= FOFA_AUTH_FAIL_PAUSE_THRESHOLD:
                 last_err = (task.fofa_config or {}).get("last_fofa_error", "")
-                reason = f"FOFA 账号连续 {fofa_fail} 次无效，已自动暂停任务，请检查/更换 FOFA key 后重新启动"
+                from app.engines.sync import engine_display_name
+                disp = engine_display_name(resolve_engine_name(task))
+                reason = f"{disp} 账号连续 {fofa_fail} 次无效，已自动暂停任务，请检查/更换 {disp} key 后重新启动"
                 task.status = "paused"
                 await session.commit()
                 await self._log(session, "orchestrator", "auto_paused", f"{reason}（最后错误：{last_err}）",
@@ -752,12 +835,14 @@ class TaskRunner:
                 await self.pause(reason)
                 return
 
-            # FOFA 每日额度耗尽，连续 12 次（约 12 小时）未恢复 → 自动暂停任务。
+            # 测绘引擎每日额度耗尽，连续 12 次（约 12 小时）未恢复 → 自动暂停任务。
             # 适合挂机过夜：额度恢复则自动继续搜集；12 小时都没恢复才停。
             if (task.fofa_config or {}).get("daily_limit_exhausted"):
                 dl_count = int((task.fofa_config or {}).get("daily_limit_count", 0))
                 last_err = (task.fofa_config or {}).get("last_fofa_error", "")
-                reason = f"FOFA 每日额度耗尽，连续 {dl_count} 次（约 {dl_count} 小时）未恢复，已自动暂停任务"
+                from app.engines.sync import engine_display_name
+                disp = engine_display_name(resolve_engine_name(task))
+                reason = f"{disp} 每日额度耗尽，连续 {dl_count} 次（约 {dl_count} 小时）未恢复，已自动暂停任务"
                 task.status = "paused"
                 await session.commit()
                 await self._log(session, "orchestrator", "auto_paused", f"{reason}（最后错误：{last_err}）",
@@ -1886,10 +1971,15 @@ class TaskRunner:
                 self._live[target_id]["score_reason"] = tgt.priority_reason
                 deepen_context = tgt.deepen_context or None
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
+                # 选靶阶段已主动探出的高价值暴露端点：结构化优先，未落库时从 priority_reason 还原，
+                # 供 worker 强制侦察直接复用、避免重复发包（手动入库目标通常无 exposed_endpoints）。
+                from app.agents.scorer import parse_exposed_endpoints
+                exposed = tgt.exposed_endpoints or parse_exposed_endpoints(tgt.priority_reason or "")
                 target_meta = {
                     "school": tgt.school or "", "org": tgt.org or "",
                     "title": tgt.title or "", "is_edu": tgt.is_edu,
                     "source": tgt.source or "", "priority_reason": tgt.priority_reason or "",
+                    "exposed_endpoints": exposed,
                     "leaked_creds": tgt.leaked_creds or [],
                     "auth_context": tgt.auth_context or None,
                     "user_auth": tgt.auth_context or None,
@@ -1920,6 +2010,14 @@ class TaskRunner:
                     block = intel_lib.render_intel_block(hits)
                     if block:
                         target_meta["intel_block"] = block
+                except Exception:
+                    pass
+                # 攻击链模板库：按目标指纹匹配历史成功打法，注入 worker 优先复用
+                try:
+                    from app.agents.attack_chain_templates import match_for
+                    chain_hints = match_for(fps)
+                    if chain_hints:
+                        target_meta["attack_chain_hints"] = chain_hints
                 except Exception:
                     pass
                 try:
@@ -1958,13 +2056,20 @@ class TaskRunner:
                     loop, target_id, "挖掘模型"
                 ),
             )
-            self._live[target_id].update(self._llm_payload(llm, "挖掘模型"))
+            # 模型分级路由：难目标走强模型、简单量扫走弱模型，平衡成本与命中率。
+            tier = self._resolve_worker_model_tier(
+                target_meta, src_type, deepen_context, bool(tgt.is_edu)
+            )
+            worker_llm = self._worker_llm_for_tier(llm, tier)
+            self._live[target_id].update(self._llm_payload(worker_llm, "挖掘模型"))
+            if tier != "default":
+                self._live[target_id]["model_tier"] = tier
             prompt_version = resolve_worker_prompt_version(task_obj)
 
         worker_holder: dict[str, Worker] = {}
 
         def do_work() -> dict:
-            worker = Worker(url, llm=llm, on_event=emit,
+            worker = Worker(url, llm=worker_llm, on_event=emit,
                             deepen_context=deepen_context, target_meta=target_meta,
                             duplicate_history=duplicate_history,
                             cancel_event=cancel_event, src_type=src_type,
@@ -1996,7 +2101,27 @@ class TaskRunner:
         # 仍在跑的情况)时才释放，避免线程未退就放行新 worker 导致池子超订。
         worker_sem = agent_semaphore("worker")
         # acquire 本身可能被取消(pause/stop)——此时还没建 heartbeat/future，无需清理。
-        await worker_sem.acquire()
+        # 并发位超时保护：幽灵线程占位时 acquire 会无限等待，worker 会永久挂在
+        # 「启动中…」且没有心跳/超时兜底（历史现象：配了并发却只有 1 个在跑）。
+        # 等不到位就把目标回队列、退出本协程，由下一轮 tick 重新派发。
+        try:
+            await asyncio.wait_for(worker_sem.acquire(), timeout=WORKER_SEM_ACQUIRE_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[sem_wait] target=%s 等待 worker 并发位超时(%.0fs)，目标回队待重派，活跃协程=%d",
+                target_id[:8], WORKER_SEM_ACQUIRE_TIMEOUT, len(self._active_workers),
+            )
+            self._live.pop(target_id, None)
+            self._worker_last_activity.pop(target_id, None)
+            async with SessionLocal() as s2:
+                tgt = await s2.get(Target, target_id)
+                if tgt is not None and tgt.status == "scanning":
+                    tgt.status = "queued"
+                    tgt.assigned_worker = ""
+                    tgt.heartbeat_at = None
+                    tgt.last_error = f"等待 worker 并发位超时({WORKER_SEM_ACQUIRE_TIMEOUT:.0f}s)，已回队"
+                    await s2.commit()
+            return
         # 心跳放在拿到并发位之后再起：确保它的生命周期与 worker_future 完全对齐，
         # 任何一条退出路径都能在下方 finally 里把它取消，杜绝心跳协程泄漏。
         heartbeat_task = asyncio.create_task(self._heartbeat_target(target_id))
@@ -2012,7 +2137,17 @@ class TaskRunner:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
             raise
-        worker_future.add_done_callback(lambda _f: worker_sem.release())
+        # 幂等释放：future 正常完成释放一次；若线程卡死（future 永不完成），由下方
+        # 超时/取消路径强制释放一次，未来线程真返回时不会重复释放导致超订。
+        _sem_released = False
+
+        def _release_sem(_f: object = None) -> None:
+            nonlocal _sem_released
+            if not _sem_released:
+                _sem_released = True
+                worker_sem.release()
+
+        worker_future.add_done_callback(_release_sem)
         try:
             # 活跃续命：worker 有持续事件就不因旧的 30min 墙钟被误杀；
             # 真正卡死则按 idle timeout 回收，活跃过久也有 max wall 兜底。
@@ -2054,6 +2189,9 @@ class TaskRunner:
                         result["resume_context"] = cleaned.get("resume_context") or {}
             except Exception:
                 worker_future.add_done_callback(_consume_task_exception)
+                # 线程仍卡死未返回：强制释放并发位，防止幽灵线程永久占位
+                # （线程真返回时 _release_sem 幂等，不会重复释放）。
+                _release_sem()
             async with SessionLocal() as s:
                 await self._log(s, "worker", "timeout",
                                 f"目标超时强制回收：{timeout_reason}，已触发工具子进程清理",
@@ -2066,6 +2204,7 @@ class TaskRunner:
             if worker:
                 worker.executor.cancel_running()
             worker_future.add_done_callback(_consume_task_exception)
+            _release_sem()
         except Exception as e:
             result = {"verdict": "error", "findings": [], "error": str(e)}
         finally:
@@ -2586,11 +2725,13 @@ class TaskRunner:
                 tgt.dead_reason = ""
             elif verdict == Verdict.no_vuln.value:
                 # 自动深挖回火：worker 突破了入口但没打穿，给了 deepen_lead → 带定向指令再派一轮
-                # （复用 deepen_count + DEEPEN_CAP 防死循环；优先于收敛/重试/dead）。
+                # （复用 deepen_count + 任务 deepen_cap 防死循环；优先于收敛/重试/dead）。
                 deepen_lead = (result.get("deepen_lead") or "").strip()
                 no_vuln_retry_reason = self._no_vuln_retry_reason(tgt)
+                task_row = await session.get(Task, task_id)
+                cap = deepen_cap_for(task_row)
                 if (_is_actionable_worker_deepen_lead(deepen_lead) and verdict == Verdict.no_vuln.value
-                        and tgt.deepen_count < DEEPEN_CAP):
+                        and tgt.deepen_count < cap):
                     _prev_dctx = tgt.deepen_context or {}
                     _prev_origin_fid = _prev_dctx.get("from_finding_id") or ""
                     _prev_origin_src = _prev_dctx.get("source") or ""
@@ -2963,6 +3104,16 @@ class TaskRunner:
             rv["reviewer_notes"] = (rv.get("reviewer_notes", "") +
                                     "\n[系统] 审核未给最终等级，已按 worker 自评兜底。").strip()
 
+        # 中/低危有完整证据：系统轻量复现标记（确定性，不依赖 LLM 复验）。
+        # 仅当审核未显式给出 reproduced 时才补——尊重审核员显式结论。
+        if rv.get("verdict") == "accepted" and not rv.get("reproduced"):
+            async with SessionLocal() as s:
+                f0 = await s.get(Finding, finding_id)
+                if f0 and _lightweight_reproduce_eligible(f0):
+                    rv["reproduced"] = True
+                    rv["reviewer_notes"] = (rv.get("reviewer_notes", "") +
+                                            "\n[系统] 中/低危证据链完整，已标记轻量复现（进人工复审可直接采信）。").strip()
+
         escalate_finding = False
         async with SessionLocal() as session:
             f = await session.get(Finding, finding_id)
@@ -2982,6 +3133,13 @@ class TaskRunner:
                     extra = await self._apply_deepen(session, f, rv)
                 else:
                     f.status = "reviewed"
+                # 经验回流：AI 采纳的成功打法沉淀为攻击链模板，供相似目标复用
+                if rv["verdict"] == "accepted":
+                    try:
+                        from app.agents.attack_chain_templates import record_accepted_finding
+                        record_accepted_finding(f)
+                    except Exception:
+                        pass
                 await session.commit()
                 await self._log(session, "reviewer", "review_done",
                                 f"审核「{f.title}」: {rv['verdict']} {rv.get('severity_final') or ''}{extra}",
@@ -3001,17 +3159,84 @@ class TaskRunner:
 
     async def _apply_deepen(self, session: AsyncSession, finding: Finding, rv: dict) -> str:
         """审核打回深挖：复用共享回炉逻辑（与人工复审「继续深挖」同一套）。"""
-        from app.agents.deepen import apply_deepen
+        from app.agents.deepen import apply_deepen, deepen_cap_for
         tgt = await session.get(Target, finding.target_id)
+        task_row = await session.get(Task, finding.task_id) if finding.task_id else None
         _ok, suffix = apply_deepen(session, finding, tgt,
-                                   rv.get("deepen_directive") or "", source="ai")
+                                   rv.get("deepen_directive") or "", source="ai",
+                                   cap=deepen_cap_for(task_row))
         return suffix
 
-    def trigger_killsweep(self, task_id: str, finding_id: str) -> bool:
-        """人工复审通过后启动通杀分析；finding 级 inflight 去重，避免重复点击。"""
+    async def _killsweep_row_for_finding(self, session: AsyncSession, finding_id: str) -> Killsweep | None:
+        return (await session.execute(
+            select(Killsweep)
+            .where(Killsweep.origin_finding_id == finding_id)
+            .order_by(Killsweep.created_at.desc())
+        )).scalars().first()
+
+    async def _upsert_killsweep_start(self, task_id: str, finding_id: str) -> str | None:
+        """通杀一开始就落库（analyzing），失败/无命中也能出现在通杀列，不必改复审状态重来。"""
+        async with SessionLocal() as session:
+            f = await session.get(Finding, finding_id)
+            if not f:
+                return None
+            row = await self._killsweep_row_for_finding(session, finding_id)
+            pending_key = f"pending:{finding_id}"
+            if row:
+                row.status = "analyzing"
+                row.notes = ""
+                row.is_killsweep = False
+                row.verified = False
+                row.verified_url = ""
+                row.affected_table = []
+                if not row.product_key or row.product_key.startswith("pending:"):
+                    row.product_key = pending_key
+                if not row.vuln_type:
+                    row.vuln_type = f.vuln_type or ""
+                if not row.vuln_summary:
+                    row.vuln_summary = f.title or ""
+                row.updated_at = _now()
+            else:
+                row = Killsweep(
+                    task_id=task_id,
+                    origin_finding_id=finding_id,
+                    product_key=pending_key,
+                    product_name="",
+                    vuln_type=f.vuln_type or "",
+                    vuln_summary=f.title or "",
+                    status="analyzing",
+                    is_killsweep=False,
+                )
+                session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            await self._log(
+                session, "killsweep", "killsweep_start",
+                f"通杀 Hunter 启动：{f.title or finding_id}",
+                finding_id=finding_id, killsweep_id=row.id, title=f.title or "",
+            )
+            return row.id
+
+    async def _mark_killsweep(self, finding_id: str, **fields) -> None:
+        async with SessionLocal() as session:
+            row = await self._killsweep_row_for_finding(session, finding_id)
+            if not row:
+                return
+            for key, value in fields.items():
+                setattr(row, key, value)
+            row.updated_at = _now()
+            await session.commit()
+
+    async def trigger_killsweep(self, task_id: str, finding_id: str) -> bool:
+        """启动通杀分析（复审通过或通杀列手动重启）；finding 级 inflight 去重，避免重复点击。"""
         if finding_id in self._killsweep_inflight:
             return False
         self._killsweep_inflight.add(finding_id)
+        try:
+            await self._upsert_killsweep_start(task_id, finding_id)
+        except Exception:
+            self._killsweep_inflight.discard(finding_id)
+            raise
         self._killsweep_tasks[finding_id] = asyncio.create_task(self._run_killsweep(task_id, finding_id))
         return True
 
@@ -3021,9 +3246,11 @@ class TaskRunner:
         try:
             await self._run_killsweep_inner(task_id, finding_id)
         except Exception:
+            err = traceback.format_exc()[:400]
+            await self._mark_killsweep(finding_id, status="failed", notes=f"通杀分析异常: {err}")
             async with SessionLocal() as s:
                 await self._log(s, "killsweep", "error",
-                                f"通杀分析异常: {traceback.format_exc()[:400]}", level="error",
+                                f"通杀分析异常: {err}", level="error",
                                 finding_id=finding_id)
         finally:
             self._killsweep_inflight.discard(finding_id)
@@ -3037,6 +3264,7 @@ class TaskRunner:
         async with SessionLocal() as session:
             f = await session.get(Finding, finding_id)
             if not f:
+                await self._mark_killsweep(finding_id, status="failed", notes="源漏洞已不存在")
                 return
             task = await session.get(Task, task_id)
             engine_cfg = resolve_engine_config(task)
@@ -3054,11 +3282,14 @@ class TaskRunner:
         if not fofa_key:
             from app.engines.sync import engine_display_name
             disp = engine_display_name(engine_name)
+            msg = (
+                f"无 {disp} key，跳过通杀分析（通杀圈定依赖测绘引擎，"
+                f"请在设置中为 {disp} 配置 key）"
+            )
+            await self._mark_killsweep(finding_id, status="failed", notes=msg)
             async with SessionLocal() as s:
                 await self._log(s, "killsweep", "skip",
-                                f"无 {disp} key，跳过通杀分析（通杀圈定依赖测绘引擎，"
-                                f"请在设置中为 {disp} 配置 key）",
-                                level="warn", finding_id=finding_id)
+                                msg, level="warn", finding_id=finding_id)
             return
 
         llm = _llm_for_task(
@@ -3117,6 +3348,7 @@ class TaskRunner:
         except asyncio.CancelledError:
             cancel_event.set()
             hunt_future.add_done_callback(_consume_task_exception)
+            await self._mark_killsweep(finding_id, status="cancelled", notes="通杀分析被控制面取消，未写入结果")
             async with SessionLocal() as s:
                 await self._log(s, "killsweep", "cancelled",
                                 "通杀分析被控制面取消，未写入结果",
@@ -3126,14 +3358,16 @@ class TaskRunner:
             res = {"error": str(e)}
 
         if res.get("error"):
+            err = str(res["error"])
+            await self._mark_killsweep(finding_id, status="failed", notes=err[:2000])
             async with SessionLocal() as s:
-                if self._is_quota_error(str(res["error"])):
-                    await self._stop_task_for_quota(s, str(res["error"]), finding_id=finding_id)
+                if self._is_quota_error(err):
+                    await self._stop_task_for_quota(s, err, finding_id=finding_id)
                     await self._log(s, "orchestrator", "quota_stop",
-                                    f"通杀阶段检测到 LLM/API 额度不足，任务已自动停止: {str(res['error'])[:120]}",
+                                    f"通杀阶段检测到 LLM/API 额度不足，任务已自动停止: {err[:120]}",
                                     level="error", finding_id=finding_id)
                 else:
-                    await self._log(s, "killsweep", "error", f"通杀分析失败: {res['error']}",
+                    await self._log(s, "killsweep", "error", f"通杀分析失败: {err}",
                                     level="warn", finding_id=finding_id)
             return
 
@@ -3155,30 +3389,50 @@ class TaskRunner:
                 ).hexdigest(),
             }]
         async with SessionLocal() as session:
-            # 产品指纹去重：同款系统同类洞已分析过则跳过（保留首条）
+            row = await self._killsweep_row_for_finding(session, finding_id)
+            if not row:
+                row = Killsweep(
+                    task_id=task_id, origin_finding_id=finding_id,
+                    product_key=f"pending:{finding_id}",
+                    status="analyzing",
+                )
+                session.add(row)
+                await session.flush()
+            # 产品指纹去重：同款系统已有别的完成记录则本条标 done+说明，不另插一行。
             exists = (await session.execute(
-                select(Killsweep).where(Killsweep.task_id == task_id, Killsweep.product_key == pkey)
+                select(Killsweep).where(
+                    Killsweep.task_id == task_id,
+                    Killsweep.product_key == pkey,
+                    Killsweep.id != row.id,
+                )
             )).scalar_one_or_none()
+            row.product_name = res.get("product_name", "") or row.product_name
+            row.vuln_type = finding_dict["vuln_type"]
+            row.vuln_summary = finding_dict["title"]
+            row.fofa_query = res.get("fofa_query", "")
+            row.fingerprint = res.get("fingerprint", "")
+            row.asset_count = res.get("asset_count", 0)
+            row.edu_count = res.get("edu_count", 0)
+            row.is_killsweep = bool(res.get("is_killsweep", False))
+            row.confidence = res.get("confidence", "")
+            row.verified_url = res.get("verified_url", "")
+            row.verified = bool(res.get("verified", False))
+            row.affected_table = affected_table
+            row.updated_at = _now()
             if exists:
+                row.status = "done"
+                row.notes = (
+                    f"同款产品已分析过，跳过：{res.get('product_name', '')}\n"
+                    f"{(res.get('notes') or '').strip()}"
+                ).strip()
+                await session.commit()
                 await self._log(session, "killsweep", "dedup",
                                 f"同款产品已分析过，跳过：{res.get('product_name','')}",
                                 finding_id=finding_id)
                 return
-            try:
-                async with session.begin_nested():
-                    session.add(Killsweep(
-                        task_id=task_id, origin_finding_id=finding_id, product_key=pkey,
-                        product_name=res.get("product_name", ""), vuln_type=finding_dict["vuln_type"],
-                        vuln_summary=finding_dict["title"], fofa_query=res.get("fofa_query", ""),
-                        fingerprint=res.get("fingerprint", ""), asset_count=res.get("asset_count", 0),
-                        edu_count=res.get("edu_count", 0), is_killsweep=res.get("is_killsweep", False),
-                        confidence=res.get("confidence", ""), verified_url=res.get("verified_url", ""),
-                        verified=res.get("verified", False), affected_table=affected_table,
-                        notes=res.get("notes", ""),
-                        status="done",
-                    ))
-            except IntegrityError:
-                return  # 并发撞唯一索引，跳过
+            row.product_key = pkey or f"pending:{finding_id}"
+            row.notes = res.get("notes", "")
+            row.status = "done"
 
             # 判定可通杀 + 实证验证成功 → 把那个同款站点入挖掘队列出货
             enq = ""
@@ -3186,7 +3440,46 @@ class TaskRunner:
                 added = await self._enqueue_killsweep_target(
                     session, task_id, res["verified_url"], origin_host)
                 enq = "；已将验证成功的同款站点入队出货" if added else ""
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                row = await self._killsweep_row_for_finding(session, finding_id)
+                if not row:
+                    return
+                row.product_name = res.get("product_name", "") or row.product_name
+                row.vuln_type = finding_dict["vuln_type"]
+                row.vuln_summary = finding_dict["title"]
+                row.fofa_query = res.get("fofa_query", "")
+                row.fingerprint = res.get("fingerprint", "")
+                row.asset_count = res.get("asset_count", 0)
+                row.edu_count = res.get("edu_count", 0)
+                row.is_killsweep = bool(res.get("is_killsweep", False))
+                row.confidence = res.get("confidence", "")
+                row.verified_url = res.get("verified_url", "")
+                row.verified = bool(res.get("verified", False))
+                row.affected_table = affected_table
+                row.product_key = f"pending:{finding_id}"
+                row.status = "done"
+                row.notes = (
+                    f"{(res.get('notes') or '').strip()}\n"
+                    "[产品指纹与已有记录冲突，已保留本条源漏洞分析]"
+                ).strip()
+                row.updated_at = _now()
+                if res.get("is_killsweep") and res.get("verified") and res.get("verified_url"):
+                    await self._enqueue_killsweep_target(
+                        session, task_id, res["verified_url"], origin_host)
+                await session.commit()
+                await self._log(
+                    session, "killsweep", "killsweep_done",
+                    f"通杀分析「{res.get('product_name','')}」: "
+                    f"{'可通杀' if res.get('is_killsweep') else '不可通杀'} "
+                    f"(全网{res.get('asset_count',0)}/教育{res.get('edu_count',0)})"
+                    "；产品指纹冲突已降级保留",
+                    finding_id=finding_id, is_killsweep=res.get("is_killsweep"),
+                    asset_count=res.get("asset_count", 0),
+                )
+                return
             await self._log(session, "killsweep", "killsweep_done",
                             f"通杀分析「{res.get('product_name','')}」: "
                             f"{'可通杀' if res.get('is_killsweep') else '不可通杀'} "
@@ -3492,7 +3785,7 @@ class OrchestratorManager:
         }
 
     async def trigger_killsweep(self, task_id: str, finding_id: str) -> bool:
-        """人工复审通过后触发通杀 Hunter。
+        """触发通杀 Hunter（复审通过或通杀列手动重启）。
 
         任务即使当前不在 running，也允许做一次离线通杀分析；这里创建轻量 runner
         只承载该后台任务，不自动启动主挖掘循环。
@@ -3502,7 +3795,7 @@ class OrchestratorManager:
             runner = TaskRunner(task_id)
             # 离线通杀也挂到 manager，后续 stop/pause 才能统一取消它。
             self._runners[task_id] = runner
-        return runner.trigger_killsweep(task_id, finding_id)
+        return await runner.trigger_killsweep(task_id, finding_id)
 
     async def ensure_running(self, task_id: str) -> None:
         existing_task = self._tasks.get(task_id)

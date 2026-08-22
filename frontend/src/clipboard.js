@@ -27,3 +27,56 @@ export async function copyText(text) {
     document.body.removeChild(ta);
   }
 }
+
+export function isLlmErrorEvent(ev = {}) {
+  const k = String(ev.kind || "");
+  if (k.startsWith("llm_") || k === "worker_auto_finish" || k === "quota_stop") return true;
+  const text = `${ev.message || ""} ${ev._text || ""} ${ev.error || ""}`;
+  return k === "target_requeued" && /LLM|额度|配额|不可用/.test(text);
+}
+
+export function formatLlmErrorCopy(ev = {}) {
+  if (ev.error_copy) {
+    const head = [
+      ev.kind ? `event=${ev.kind}` : "",
+      ev.model ? `model=${ev.model}` : "",
+      ev.base_url ? `base_url=${ev.base_url}` : "",
+      ev.ts ? `time=${ev.ts}` : "",
+    ].filter(Boolean);
+    return [...head, String(ev.error_copy)].join("\n");
+  }
+  const lines = [];
+  if (ev.kind) lines.push(`kind=${ev.kind}`);
+  if (ev.ts) lines.push(`time=${ev.ts}`);
+  if (ev.model) lines.push(`model=${ev.model}`);
+  if (ev.base_url) lines.push(`base_url=${ev.base_url}`);
+  if (ev.error_kind) lines.push(`error_kind=${ev.error_kind}`);
+  if (ev.status != null && ev.status !== "") lines.push(`status=${ev.status}`);
+  if (ev.code) lines.push(`code=${ev.code}`);
+  const summary = ev._text || ev.message || "";
+  if (summary) lines.push(`message=${summary}`);
+  if (ev.error && ev.error !== summary) lines.push(`error=${ev.error}`);
+  if (ev.detail) lines.push(`detail=${ev.detail}`);
+  if (ev.diagnostic) lines.push(`diagnostic=${ev.diagnostic}`);
+  if (ev.summary && ev.summary !== summary) lines.push(`summary=${ev.summary}`);
+  return lines.join("\n") || String(summary || ev.kind || "");
+}
+
+export function formatLlmTestCopy(test = {}) {
+  if (test.error_copy) return String(test.error_copy);
+  const parts = [`LLM ${test.ok ? "可用" : "不可用"}`];
+  if (test.error) parts.push(test.error);
+  for (const item of test.results || []) {
+    parts.push(item.error_copy || [
+      `ok=${item.ok}`,
+      `name=${item.name || "-"}`,
+      `model=${item.model || "-"}`,
+      `base_url=${item.base_url || "-"}`,
+      `status_code=${item.status_code || 0}`,
+      item.error ? `error=${item.error}` : "",
+      item.tool_calling ? `tool_calling=${item.tool_calling}` : "",
+    ].filter(Boolean).join("\n"));
+  }
+  return parts.filter(Boolean).join("\n\n");
+}
+

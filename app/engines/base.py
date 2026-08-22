@@ -53,11 +53,8 @@ class SearchEngine(ABC):
         ...
 
     def translate_query(self, query: str, from_engine: str = "fofa") -> str:
-        """将 from_engine（默认 FOFA）语法翻译为本引擎语法。"""
-        if from_engine != "fofa" or self.name == "fofa":
-            return query
-        from app.engines.translator import translate_fofa_query
-        return translate_fofa_query(query, self.name)
+        """不再改写：选了本引擎就原样请求。"""
+        return query
 
     def get_default_base_url(self) -> str:
         """默认 API 端点。"""

@@ -35,8 +35,8 @@ _CONNECT_PRAGMAS = (
     "PRAGMA busy_timeout=5000;",          # 写锁最多等 5s 再报错，吸收瞬时竞争
     "PRAGMA synchronous=NORMAL;",         # WAL 下安全，显著降低写延迟
     "PRAGMA foreign_keys=ON;",
-    "PRAGMA cache_size=-64000;",          # 约 64MB page cache，减少看板/列表热读扫盘
-    "PRAGMA mmap_size=268435456;",        # 256MB mmap，SQLite 读多写少场景更稳
+    "PRAGMA cache_size=-16000;",          # 约 16MB page cache；每条连接一份，不能再开 64MB
+    "PRAGMA mmap_size=67108864;",         # 64MB mmap，避免把整库映射进 cgroup
     "PRAGMA temp_store=MEMORY;",          # ORDER BY/GROUP BY 临时表走内存
     "PRAGMA wal_autocheckpoint=1000;",
 )
@@ -81,6 +81,9 @@ _MIGRATIONS = [
     ("tasks", "auth_bindings", "JSON"),
     ("targets", "auth_context", "JSON"),
     ("targets", "auth_status", "JSON"),
+    ("targets", "exposed_endpoints", "JSON"),
+    ("tasks", "deepen_cap", "INTEGER DEFAULT 2"),
+    ("system_settings", "ui", "JSON DEFAULT '{}'"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。
@@ -143,6 +146,9 @@ _SECONDARY_INDEXES = [
     ("ix_killsweeps_task_hit_rank",
      "CREATE INDEX IF NOT EXISTS ix_killsweeps_task_hit_rank "
      "ON killsweeps(task_id, is_killsweep, verified, asset_count, created_at)"),
+    ("ix_killsweeps_origin_finding",
+     "CREATE INDEX IF NOT EXISTS ix_killsweeps_origin_finding "
+     "ON killsweeps(origin_finding_id)"),
     # 运行异常日志：按 level/agent 过滤 + ts DESC 排序。
     ("ix_task_events_level_ts",
      "CREATE INDEX IF NOT EXISTS ix_task_events_level_ts ON task_events(level, ts)"),
