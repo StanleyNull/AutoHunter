@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import dedup
+from app.tools import escalation_guard
 from app.agents import collector
 from app.agents import intel as intel_lib
 from app.agents import playbook_router
@@ -3598,6 +3599,13 @@ class TaskRunner:
             "affected_scope": res.get("affected_scope", ""),
             "kill_chain": res.get("kill_chain", []),
         }
+        # Escalation 闭环收口：空发射（无任一实证）不落库，避免污染报告。
+        if not escalation_guard.has_emission(res):
+            async with SessionLocal() as session:
+                await self._log(session, "escalation", "escalate_skip",
+                                f"升级结果无实证，放弃落库（空升级洞）: {title[:80]}",
+                                finding_id=origin_finding_id)
+            return
         async with SessionLocal() as session:
             origin = await session.get(Finding, origin_finding_id)
             if origin is None:
