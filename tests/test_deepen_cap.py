@@ -6,17 +6,17 @@ from app.agents.deepen import apply_deepen, clamp_deepen_cap, deepen_cap_for
 
 class DeepenCapTest(unittest.TestCase):
     def test_clamp_default_and_bounds(self):
-        self.assertEqual(clamp_deepen_cap(None), 4)
+        self.assertEqual(clamp_deepen_cap(None), 2)
         self.assertEqual(clamp_deepen_cap(0), 0)
         self.assertEqual(clamp_deepen_cap(10), 10)
         self.assertEqual(clamp_deepen_cap(99), 10)
         self.assertEqual(clamp_deepen_cap(-3), 0)
         self.assertEqual(clamp_deepen_cap("5"), 5)
-        self.assertEqual(clamp_deepen_cap("nope"), 4)
+        self.assertEqual(clamp_deepen_cap("nope"), 2)
 
     def test_deepen_cap_for_task(self):
-        self.assertEqual(deepen_cap_for(None), 4)
-        self.assertEqual(deepen_cap_for(SimpleNamespace()), 4)
+        self.assertEqual(deepen_cap_for(None), 2)
+        self.assertEqual(deepen_cap_for(SimpleNamespace()), 2)
         self.assertEqual(deepen_cap_for(SimpleNamespace(deepen_cap=5)), 5)
         self.assertEqual(deepen_cap_for(SimpleNamespace(deepen_cap=99)), 10)
 

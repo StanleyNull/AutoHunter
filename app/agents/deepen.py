@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.db.models import Finding, Target
 
-DEEPEN_CAP_DEFAULT = 4  # 单 target 被打回深挖的默认次数（人工 + AI + worker deepen_lead 合计），放宽以救回被截断的多步利用链
+DEEPEN_CAP_DEFAULT = 2  # 单 target 被打回深挖的默认次数（人工 + AI + worker deepen_lead 合计）
 DEEPEN_CAP_MAX = 10
 DEEPEN_CAP = DEEPEN_CAP_DEFAULT  # 兼容旧引用
 
