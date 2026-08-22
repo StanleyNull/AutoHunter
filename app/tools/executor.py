@@ -32,6 +32,9 @@ _FOFA_LOOKUP_MAX_SIZE = 30
 _SESSION_MAX_COOKIES = 50
 _SESSION_MAX_HEADERS = 30
 
+# HTTP 响应体读取硬上限（字节）：防异常超大响应塞爆内存；超限截断响应并提示。
+# _read_limited_response 曾引用此名却无定义，会走到截断分支时抛 NameError。
+_HTTP_MAX_BYTES = int(os.environ.get("WORKER_HTTP_MAX_BYTES", str(1024 * 1024)))
 # 单目标工作目录落地日志体积上限（字节）。24x7 防撞盘：超限后停止写新日志文件，
 # 仍把截断输出回传给 LLM，不影响挖掘，只是不再落地完整证据。
 _WORKDIR_MAX_BYTES = int(os.environ.get("WORKER_WORKDIR_MAX_BYTES", str(50 * 1024 * 1024)))
