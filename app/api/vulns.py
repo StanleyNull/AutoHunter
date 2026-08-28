@@ -12,14 +12,26 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Finding, Review, Task, to_cst_iso
 from app.db.session import get_session
 
 router = APIRouter(prefix="/api/vulns", tags=["vulns"])
+
+# 置顶排序用的等级权重：严重 > 高危 > 中危 > 低危 > 其它。
+# effective_severity = coalesce(Review.user_severity, Review.severity_final)，
+# 存的是中文等级字符串，用 case 映射成整数做 DESC 排序。
+_SEVERITY_RANK = case(
+    (func.coalesce(Review.user_severity, Review.severity_final) == "严重", 4),
+    (func.coalesce(Review.user_severity, Review.severity_final) == "高危", 3),
+    (func.coalesce(Review.user_severity, Review.severity_final) == "中危", 2),
+    (func.coalesce(Review.user_severity, Review.severity_final) == "低危", 1),
+    else_=0,
+)
 
 
 def _base_conds():
@@ -55,6 +67,7 @@ def _vuln_dict(f: Finding, r: Review, task_name: str = "") -> dict:
         "score": r.score,
         "effective_severity": r.user_severity or r.severity_final,
         "submitted": r.submitted,
+        "is_top": bool(getattr(f, "is_top", False)),
         "user_reviewed_at": to_cst_iso(r.user_reviewed_at),
     }
 
@@ -137,7 +150,13 @@ async def list_vulns(
         .join(Review, Review.finding_id == Finding.id)
         .outerjoin(Task, Task.id == Finding.task_id)
         .where(and_(*conds))
-        .order_by(Review.submitted, Review.score.desc(), Finding.created_at.desc())
+        # 排序规则：置顶优先 → 等级降序(高危>中危>低危) → 创建时间降序。
+        # 保证置顶的高危漏洞永远排最前，且对筛选/搜索结果同样生效。
+        .order_by(
+            Finding.is_top.desc(),
+            _SEVERITY_RANK.desc(),
+            Finding.created_at.desc(),
+        )
         .offset(safe_offset)
         .limit(safe_limit)
     )
@@ -150,3 +169,72 @@ async def list_vulns(
         "offset": safe_offset,
         "has_more": safe_offset + len(out) < total,
     }
+
+
+class TopRequest(BaseModel):
+    """单条置顶/取消置顶请求体。"""
+    is_top: bool
+
+
+class BatchTopRequest(BaseModel):
+    """批量置顶/取消置顶请求体。ids 为漏洞 id 列表。"""
+    ids: list[str]
+    is_top: bool
+
+
+# 鉴权说明：本路由所有 PATCH 写操作由 main.py 的 security_middleware 统一拦截，
+# 仅 full 令牌（管理员）可执行；readonly/observer 会被中间件直接 403。
+# 这与项目现有写接口（restore/user_review/invalidate 等）的权限模型完全一致。
+
+
+@router.patch("/batch/top")
+async def batch_top_vulns(req: BatchTopRequest, session: AsyncSession = Depends(get_session)):
+    """批量置顶/取消置顶漏洞。
+
+    参数:
+        req: { ids: list[str], is_top: bool } —— 待操作的漏洞 id 列表与目标置顶状态。
+    返回:
+        { ok: True, success_count: int, failed_ids: list[str] } —— 成功条数与失败 id。
+    """
+    # 参数校验：ids 必须非空且全部为有效字符串（去空白去重）。
+    raw_ids = req.ids or []
+    if not raw_ids:
+        raise HTTPException(400, "ids 不能为空")
+    ids = list(dict.fromkeys(str(i).strip() for i in raw_ids if str(i).strip()))
+    if not ids:
+        raise HTTPException(400, "ids 不能为空")
+    target_value = bool(req.is_top)
+    success_count = 0
+    failed_ids: list[str] = []
+    for vid in ids:
+        f = await session.get(Finding, vid)
+        if not f:
+            failed_ids.append(vid)
+            continue
+        f.is_top = target_value
+        success_count += 1
+    if success_count:
+        await session.commit()
+    return {
+        "ok": True,
+        "success_count": success_count,
+        "failed_ids": failed_ids,
+    }
+
+
+@router.patch("/{vuln_id}/top")
+async def top_vuln(vuln_id: str, req: TopRequest, session: AsyncSession = Depends(get_session)):
+    """单条漏洞置顶/取消置顶。
+
+    参数:
+        vuln_id: 漏洞 id（32 位 UUID hex）。
+        req: { is_top: bool } —— True 置顶，False 取消置顶。
+    返回:
+        { ok: True, id: str, is_top: bool } —— 操作后的最新置顶状态。
+    """
+    f = await session.get(Finding, vuln_id)
+    if not f:
+        raise HTTPException(404, "记录不存在")
+    f.is_top = bool(req.is_top)
+    await session.commit()
+    return {"ok": True, "id": f.id, "is_top": f.is_top}

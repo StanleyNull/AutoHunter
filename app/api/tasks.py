@@ -552,7 +552,13 @@ async def global_hard_targets(
         select(func.count()).select_from(stmt.subquery())
     )).scalar() or 0
     stmt = (
-        stmt.order_by(Target.updated_at.desc(), Target.priority_score.desc())
+        stmt.order_by(
+            # 排序规则：置顶优先 → 更新时间降序 → 优先级降序。
+            # 保证置顶的硬骨头资产永远排最前，且对筛选/搜索结果同样生效。
+            Target.is_top.desc(),
+            Target.updated_at.desc(),
+            Target.priority_score.desc(),
+        )
         .offset(safe_offset)
         .limit(safe_limit)
     )
@@ -577,6 +583,7 @@ async def global_hard_targets(
             "priority_reason": "" if observer else t.priority_reason,
             "dead_reason": "" if observer else t.dead_reason,
             "last_error": "" if observer else t.last_error,
+            "is_top": bool(getattr(t, "is_top", False)),
             "created_at": to_cst_iso(t.created_at),
             "updated_at": to_cst_iso(t.updated_at),
         })

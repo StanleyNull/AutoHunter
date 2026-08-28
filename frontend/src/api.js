@@ -336,6 +336,11 @@ export const api = {
   vulnStats: () => req("GET", "/api/vulns/stats"),
   vulns: (submitted, severity, q, opts = {}) =>
     req("GET", `/api/vulns${qs({ submitted, severity, q, ...opts })}`),
+  vulnTop: (id, is_top) => req("PATCH", `/api/vulns/${id}/top`, { is_top }),
+  vulnBatchTop: (ids, is_top) => req("PATCH", `/api/vulns/batch/top`, { ids, is_top }),
+  // 全局资产（硬骨头库）置顶
+  assetTop: (id, is_top) => req("PATCH", `/api/assets/${id}/top`, { is_top }),
+  assetBatchTop: (ids, is_top) => req("PATCH", `/api/assets/batch/top`, { ids, is_top }),
   // 全局运行异常日志
   runtimeLogStats: () => req("GET", "/api/runtime-logs/stats"),
   runtimeLogs: (level, agent, q, opts = {}) =>

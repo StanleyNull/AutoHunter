@@ -111,6 +111,8 @@ class Target(Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+    # 用户置顶标记：全局资产（硬骨头）库列表中置顶行优先展示（is_top DESC 排序）。
+    is_top: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
 
     task: Mapped["Task"] = relationship(back_populates="targets")
     findings: Mapped[list["Finding"]] = relationship(back_populates="target", cascade="all, delete-orphan")
@@ -154,6 +156,8 @@ class Finding(Base):
     # pending_review / reviewed
     status: Mapped[str] = mapped_column(String(20), default="pending_review", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    # 用户置顶标记：全局漏洞库列表中置顶行优先展示（is_top DESC 排序）。
+    is_top: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
 
     target: Mapped["Target"] = relationship(back_populates="findings")
     review: Mapped["Review | None"] = relationship(back_populates="finding", uselist=False, cascade="all, delete-orphan")

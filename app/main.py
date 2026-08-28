@@ -34,6 +34,7 @@ from app.agent_runtime import (
     WORKER_MAX_CONCURRENCY,
 )
 from app.api import backup, findings, intel, runtime_logs, settings, stream, tasks, update, vulns
+from app.api import assets as assets_api
 from app.backup import run_periodic_backup
 from app.db.session import init_db
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
@@ -210,6 +211,7 @@ app.include_router(stream.router)
 app.include_router(intel.router)
 app.include_router(runtime_logs.router)
 app.include_router(vulns.router)
+app.include_router(assets_api.router)
 app.include_router(update.router)
 
 

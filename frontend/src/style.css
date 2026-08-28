@@ -3948,3 +3948,64 @@ main {
 }
 .engine-key-head i { font-style: normal; font-size: 12px; opacity: 0.65; }
 .engine-key-head i.on { color: var(--ok, #16a34a); opacity: 1; }
+
+/* ---------- 置顶功能：批量操作栏 / 置顶行视觉 / 行内置顶按钮 ---------- */
+/* 批量操作栏：仅 full 令牌可见，与列表工具栏对齐 */
+.pin-batch-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 10px 0 14px; padding: 9px 12px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius);
+  background: var(--nav);
+}
+.pin-sel-all { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.pin-sel-all input { width: 15px; height: 15px; cursor: pointer; }
+.pin-sel-count { font-size: 12px; color: var(--faint); }
+
+/* 行内置顶按钮 + 行内复选框 + 星标：全部绝对定位，脱离 3 列网格流，
+   避免破坏 .intel-row / .hard-row 既有的 grid-template-columns 布局。
+   通过 .pin-row 修饰符作用域，不影响 IntelView 等共享 .intel-row 的视图。 */
+.btn-pin, .ir-top, .pin-batch-bar .btn-ghost {
+  padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  transition: background .12s, border-color .12s, color .12s, opacity .12s;
+}
+.btn-pin:disabled, .ir-top:disabled, .pin-batch-bar .btn-ghost:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-pin {
+  border-color: color-mix(in oklch, #ffd700 45%, var(--border));
+  color: color-mix(in oklch, #b8860b 75%, var(--ink));
+}
+.btn-pin:hover:not(:disabled) { background: rgba(255, 215, 0, 0.12); }
+.pin-batch-bar .btn-ghost:hover:not(:disabled) { border-color: var(--faint); }
+
+.intel-row.pin-row { position: relative; padding-left: 52px; padding-right: 84px; }
+.hard-row.pin-row { position: relative; padding-left: 52px; padding-right: 84px; }
+.hard-row[role="button"] { cursor: pointer; }
+
+.pin-row .pin-mark {
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+  color: #d4a017; font-size: 15px; text-shadow: 0 0 1px rgba(0,0,0,0.15);
+}
+.pin-row .row-check {
+  position: absolute; left: 36px; top: 50%; transform: translateY(-50%);
+  width: 15px; height: 15px; cursor: pointer;
+}
+.pin-row .ir-top {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  padding: 5px 10px; font-size: 12px;
+}
+.ir-top.on {
+  background: rgba(255, 215, 0, 0.16);
+  border-color: color-mix(in oklch, #ffd700 55%, var(--border));
+  color: color-mix(in oklch, #b8860b 80%, var(--ink));
+  font-weight: 600;
+}
+.ir-top:hover:not(:disabled) { border-color: var(--faint); }
+
+/* 置顶行：浅金色背景 + 最左侧星标，置顶的高危项永远排最前 */
+.intel-row.pinned, .hard-row.pinned {
+  background: rgba(255, 215, 0, 0.10);
+  border-color: color-mix(in oklch, #ffd700 35%, var(--border));
+}
+.intel-row.pinned:hover, .hard-row.pinned:hover {
+  background: rgba(255, 215, 0, 0.16);
+}

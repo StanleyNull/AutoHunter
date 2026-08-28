@@ -83,6 +83,10 @@ _MIGRATIONS = [
     ("targets", "auth_status", "JSON"),
     ("tasks", "deepen_cap", "INTEGER DEFAULT 2"),
     ("system_settings", "ui", "JSON DEFAULT '{}'"),
+    # 用户置顶标记：全局漏洞库/资产库列表中置顶行优先展示。
+    # NOT NULL + DEFAULT 0：老库补列时现有行全部置为 False，向前兼容。
+    ("findings", "is_top", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("targets", "is_top", "BOOLEAN DEFAULT 0 NOT NULL"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。
@@ -154,6 +158,12 @@ _SECONDARY_INDEXES = [
     # 看板历史回放：WHERE task_id=? ORDER BY id DESC LIMIT N。
     ("ix_task_events_task_id_id",
      "CREATE INDEX IF NOT EXISTS ix_task_events_task_id_id ON task_events(task_id, id)"),
+    # 置顶排序：全局漏洞库 / 资产库 ORDER BY is_top DESC, created_at/updated_at DESC。
+    # 布尔列基数低，复合索引让置顶行优先走索引扫描，避免全表排。
+    ("ix_findings_is_top_created",
+     "CREATE INDEX IF NOT EXISTS ix_findings_is_top_created ON findings(is_top, created_at)"),
+    ("ix_targets_is_top_updated",
+     "CREATE INDEX IF NOT EXISTS ix_targets_is_top_updated ON targets(is_top, updated_at)"),
 ]
 
 # 废弃的残留列：老 schema 里是 NOT NULL 无默认值，新代码不再写入会导致 INSERT 失败。
