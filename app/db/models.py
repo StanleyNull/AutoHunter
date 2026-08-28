@@ -64,6 +64,7 @@ class Task(Base):
     status: Mapped[str] = mapped_column(String(20), default="created")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+    is_top: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
 
     targets: Mapped[list["Target"]] = relationship(back_populates="task", cascade="all, delete-orphan")
 

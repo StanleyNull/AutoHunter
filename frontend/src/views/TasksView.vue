@@ -13,6 +13,72 @@ const editOpen = ref(false);
 const editingTask = ref(null);
 const writable = computed(() => authRoleRef.value === "full");
 const router = useRouter();
+
+// ===== 任务置顶：选中态 / 操作中态 / 批量栏 =====
+const selected = ref(new Set());       // 勾选的任务 id
+const toggling = ref(new Set());       // 正在置顶/取消置顶中的任务 id（按钮禁用）
+const pageIds = computed(() => tasks.value.map((t) => t.id));
+const allChecked = computed(() =>
+  pageIds.value.length > 0 && pageIds.value.every((id) => selected.value.has(id))
+);
+const someChecked = computed(() => pageIds.value.some((id) => selected.value.has(id)));
+
+function toast(msg, ms = 2400) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 260);
+  }, ms);
+}
+function toggleRowChecked(id, checked) {
+  const s = new Set(selected.value);
+  if (checked) s.add(id); else s.delete(id);
+  selected.value = s;   // 整体重新赋值触发响应式
+}
+function toggleAllChecked(checked) {
+  selected.value = checked ? new Set(pageIds.value) : new Set();
+}
+// 单条置顶：按 id 在当前列表就地更新，无刷新。
+// 注意：不能直接改传入的 t —— 任务列表有 5s 轮询，await 期间 t 可能已换成旧引用，
+// 改它不会反映到渲染中的新对象；用 find 拿到当前列表里的同 id 对象再改。
+async function toggleTop(t) {
+  if (toggling.value.has(t.id)) return;
+  const next = !t.is_top;
+  toggling.value = new Set(toggling.value).add(t.id);
+  try {
+    await api.taskTop(t.id, next);
+    const cur = tasks.value.find((x) => x.id === t.id);
+    if (cur) cur.is_top = next;
+    toast(next ? "已置顶" : "已取消置顶");
+  } catch (e) {
+    alert(`置顶失败：${e?.message || e}`);
+  } finally {
+    const s = new Set(toggling.value);
+    s.delete(t.id);
+    toggling.value = s;
+  }
+}
+// 批量置顶：确认弹窗显示选中数量，成功后清空选择
+async function batchTop(isTop) {
+  const ids = [...selected.value];
+  if (!ids.length) return;
+  if (!confirm(`确认${isTop ? "置顶" : "取消置顶"}选中的 ${ids.length} 个任务？`)) return;
+  try {
+    const res = await api.taskBatchTop(ids, isTop);
+    const ok = res?.success_count ?? 0;
+    const fail = res?.failed_ids ?? [];
+    const idSet = new Set(ids);
+    tasks.value.forEach((t) => { if (idSet.has(t.id)) t.is_top = isTop; });
+    toast(`成功${isTop ? "置顶" : "取消置顶"} ${ok} 个任务${fail.length ? `，${fail.length} 个失败` : ""}`);
+    selected.value = new Set();
+  } catch (e) {
+    alert(`批量操作失败：${e?.message || e}`);
+  }
+}
 let pollTimer = null;
 
 const STATUS_LABEL = {
@@ -198,6 +264,7 @@ watch(hasRunning, () => syncPoller());
           <div class="task-actions">
             <span class="sk-bar sk-action"></span>
             <span class="sk-bar sk-action"></span>
+            <span class="sk-bar sk-action"></span>
           </div>
         </div>
       </div>
@@ -207,10 +274,25 @@ watch(hasRunning, () => syncPoller());
       <span class="hint">点顶栏「新建」创建第一个挖掘任务</span>
     </div>
     <div v-else class="task-list">
-      <div v-for="t in tasks" :key="t.id" class="task-card" :class="{ live: t.status === 'running' }"
+      <div v-if="writable" class="pin-batch-bar">
+        <label class="pin-sel-all">
+          <input type="checkbox" :checked="allChecked"
+                 :indeterminate.prop="someChecked && !allChecked"
+                 @change="toggleAllChecked($event.target.checked)" />
+          全选本页
+        </label>
+        <span class="pin-sel-count">已选 {{ selected.size }} 个</span>
+        <button class="btn-pin" type="button" :disabled="!someChecked" @click="batchTop(true)">批量置顶</button>
+        <button class="btn-ghost" type="button" :disabled="!someChecked" @click="batchTop(false)">批量取消置顶</button>
+      </div>
+      <div v-for="t in tasks" :key="t.id" class="task-card"
+        :class="{ live: t.status === 'running', pinned: t.is_top }"
         @click="router.push(`/task/${t.id}`)">
         <div class="task-card-main">
           <div class="tc-title">
+            <input v-if="writable" class="row-check" type="checkbox" :checked="selected.has(t.id)"
+                   @click.stop @change="toggleRowChecked(t.id, $event.target.checked)" />
+            <span v-if="t.is_top" class="pin-mark" aria-hidden="true">★</span>
             <span v-if="t.status === 'running'" class="pulse"></span>
             <b>{{ t.name }}</b>
           </div>
@@ -225,6 +307,10 @@ watch(hasRunning, () => syncPoller());
         <div class="task-card-side">
           <time class="meta task-time">{{ t.created_at.slice(0, 19).replace("T", " ") }}</time>
           <div v-if="writable" class="task-actions">
+            <button class="mini-action pin" type="button" :class="{ on: t.is_top }"
+                    :disabled="toggling.has(t.id)" @click.stop="toggleTop(t)">
+              {{ toggling.has(t.id) ? "…" : (t.is_top ? "取消置顶" : "置顶") }}
+            </button>
             <button class="mini-action" type="button" @click.stop="openEdit(t)">编辑参数</button>
             <button class="mini-action danger" type="button" @click.stop="askDelete(t)">删除</button>
           </div>

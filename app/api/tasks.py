@@ -3,6 +3,7 @@ from __future__ import annotations
 
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -289,6 +290,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         llm_usage={} if observer else usage_snapshot(t.id, model_config.get("model", "")),
         created_at=to_cst_iso(t.created_at), updated_at=to_cst_iso(t.updated_at),
         stats=stats, pending_user_review=pending_user_review,
+        is_top=getattr(t, "is_top", False),
     )
 
 
@@ -495,7 +497,10 @@ async def probe_task_models(
 
 @router.get("", response_model=list[TaskResponse])
 async def list_tasks(request: Request, session: AsyncSession = Depends(get_session)):
-    rows = await session.execute(select(Task).order_by(Task.created_at.desc()))
+    # 置顶任务永远排最前，其次按创建时间倒序（最新在上）。
+    rows = await session.execute(
+        select(Task).order_by(Task.is_top.desc(), Task.created_at.desc())
+    )
     tasks = rows.scalars().all()
     # 一条聚合查询拿到所有任务的「待人工复审」数（AI accepted 且用户 pending），避免 N+1。
     pending_map: dict[str, int] = {}
@@ -508,6 +513,67 @@ async def list_tasks(request: Request, session: AsyncSession = Depends(get_sessi
         pending_map[tid] = cnt
     observer = _is_observer(request)
     return [_task_to_dto(t, pending_user_review=pending_map.get(t.id, 0), observer=observer) for t in tasks]
+
+
+class TaskTopRequest(BaseModel):
+    """置顶/取消置顶请求体。"""
+    is_top: bool
+
+
+class TaskBatchTopRequest(BaseModel):
+    """批量置顶/取消置顶请求体。"""
+    ids: list[str]
+    is_top: bool
+
+
+@router.patch("/batch/top")
+async def batch_top_tasks(req: TaskBatchTopRequest, session: AsyncSession = Depends(get_session)):
+    """批量置顶/取消置顶任务。
+
+    Args:
+        req: 批量请求体，ids 为任务 ID 列表，is_top 为目标置顶状态。
+        session: 数据库会话。
+
+    Returns:
+        成功条数 success_count 与失败 ID 列表 failed_ids。
+    """
+    if not req.ids:
+        raise HTTPException(400, "ids 不能为空")
+    target_value = bool(req.is_top)
+    success_count = 0
+    failed_ids: list[str] = []
+    # 逐条 get 后置位再统一提交：批量操作一个事务，部分失败不影响已成功项。
+    for tid in req.ids:
+        task = await session.get(Task, tid)
+        if not task:
+            failed_ids.append(tid)
+            continue
+        task.is_top = target_value
+        success_count += 1
+    if success_count:
+        await session.commit()
+    return {"ok": True, "success_count": success_count, "failed_ids": failed_ids}
+
+
+@router.patch("/{task_id}/top")
+async def top_task(task_id: str, req: TaskTopRequest, session: AsyncSession = Depends(get_session)):
+    """置顶/取消置顶单个任务。
+
+    Args:
+        task_id: 任务 ID。
+        req: 请求体，is_top 为目标置顶状态。
+        session: 数据库会话。
+
+    Returns:
+        更新后的任务 ID 与置顶状态。
+    """
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    task.is_top = bool(req.is_top)
+    await session.commit()
+    await session.refresh(task)
+    return {"ok": True, "id": task.id, "is_top": task.is_top}
 
 
 @router.get("/hard-targets")

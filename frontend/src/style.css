@@ -3873,6 +3873,29 @@ main {
   font-size: 11.5px;
 }
 
+/* ---------- 任务卡片置顶（卡片为 flex 布局，控件内联，不走 .pin-row 绝对定位） ---------- */
+/* 批量栏作为 .task-list 网格首项：去掉自带 margin，统一由网格 gap 控制间距，避免双重留白 */
+.task-list .pin-batch-bar { margin: 0; }
+.task-card.pinned {
+  background: rgba(255, 215, 0, 0.10);
+  border-color: color-mix(in oklch, #ffd700 35%, var(--border));
+}
+.task-card.pinned:hover { background: rgba(255, 215, 0, 0.16); }
+/* 标题行内：星标 + 勾选框，flex 自然排列，不破坏卡片布局 */
+.tc-title .pin-mark { color: #d4a017; font-size: 15px; flex: 0 0 auto; text-shadow: 0 0 1px rgba(0,0,0,0.15); }
+.task-card .row-check { width: 15px; height: 15px; cursor: pointer; flex: 0 0 auto; }
+/* 置顶按钮高亮态：复用 mini-action 基础样式，置顶时金色描边 */
+.mini-action.pin.on {
+  background: rgba(255, 215, 0, 0.16);
+  border-color: color-mix(in oklch, #ffd700 55%, var(--border));
+  color: color-mix(in oklch, #b8860b 80%, var(--ink));
+  font-weight: 600;
+}
+.mini-action.pin:hover:not(:disabled) {
+  background: rgba(255, 215, 0, 0.10);
+  border-color: color-mix(in oklch, #ffd700 45%, var(--border));
+}
+
 /* ---------- 全局运行异常日志 ---------- */
 .runtime-row.error { border-left-color: var(--danger); }
 .runtime-row.warn { border-left-color: var(--warn); }

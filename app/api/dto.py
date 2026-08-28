@@ -155,6 +155,7 @@ class TaskResponse(BaseModel):
     updated_at: str
     stats: Optional[TaskStats] = None
     pending_user_review: int = 0
+    is_top: bool = False
 
 
 class LLMSettingsDTO(BaseModel):

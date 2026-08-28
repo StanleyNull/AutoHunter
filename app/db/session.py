@@ -87,6 +87,7 @@ _MIGRATIONS = [
     # NOT NULL + DEFAULT 0：老库补列时现有行全部置为 False，向前兼容。
     ("findings", "is_top", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("targets", "is_top", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("tasks", "is_top", "BOOLEAN DEFAULT 0 NOT NULL"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。
@@ -164,6 +165,8 @@ _SECONDARY_INDEXES = [
      "CREATE INDEX IF NOT EXISTS ix_findings_is_top_created ON findings(is_top, created_at)"),
     ("ix_targets_is_top_updated",
      "CREATE INDEX IF NOT EXISTS ix_targets_is_top_updated ON targets(is_top, updated_at)"),
+    ("ix_tasks_is_top_created",
+     "CREATE INDEX IF NOT EXISTS ix_tasks_is_top_created ON tasks(is_top, created_at)"),
 ]
 
 # 废弃的残留列：老 schema 里是 NOT NULL 无默认值，新代码不再写入会导致 INSERT 失败。
