@@ -36,6 +36,16 @@ from app.llm.usage import record_usage
 
 logger = logging.getLogger("autohunter.llm")
 
+# MiniMax-M3 是 thinking 模型，chat template 把思考过程嵌在 content 字段而非放独立 reasoning 字段，污染 reviewer/worker 对结构化 JSON 的解析。剥掉 <think> 块后保留实际回答，模型内部推理不受影响（API 已生成完才剥）。
+_THINK_TAG_RE = re.compile(r"<think>.*?\s*", re.DOTALL)
+
+
+def _strip_thinking_tags(text: str) -> str:
+    if not text:
+        return text
+    return _THINK_TAG_RE.sub("", text).strip()
+
+
 _SECRET_RE = re.compile(
     r"(?:\bsk-[A-Za-z0-9_-]{8,}\b"
     r"|\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}"
@@ -575,6 +585,8 @@ def _dict_to_message(msg: dict[str, Any]) -> SimpleNamespace:
             elif isinstance(p, str):
                 parts.append(p)
         content = "".join(parts)
+    if isinstance(content, str):
+        content = _strip_thinking_tags(content)
     tool_calls = msg.get("tool_calls")
     ns_calls = None
     if isinstance(tool_calls, list) and tool_calls:
@@ -657,6 +669,8 @@ def _coerce_chat_message(resp: Any) -> Any:
         first = choices[0]
         msg = getattr(first, "message", None)
         if msg is not None:
+            if hasattr(msg, "content") and isinstance(msg.content, str):
+                msg.content = _strip_thinking_tags(msg.content)
             return msg
         if isinstance(first, str):
             return SimpleNamespace(content=first, tool_calls=None, role="assistant")
