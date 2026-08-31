@@ -788,10 +788,10 @@ async def list_available_models(
         return {"ok": False, "error": "未配置 API Key，无法拉取模型列表", "models": []}
     from app.llm.client import llm_models_url
     url = llm_models_url(base)
-    from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
+    from app.tools.netguard import SsrfBlocked, _env_llm_allowed_hosts, assert_safe_outbound_url
 
     try:
-        assert_safe_outbound_url(url)
+        assert_safe_outbound_url(url, allow_extra_hosts=_env_llm_allowed_hosts())
     except SsrfBlocked as e:
         return {"ok": False, "error": f"base_url 不被允许：{e}", "models": []}
     headers = {"Authorization": f"Bearer {key}"}

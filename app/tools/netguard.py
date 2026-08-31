@@ -10,6 +10,7 @@ FOFA base_url 探测）——这类请求会把真实 API Key / FOFA Key 放进 
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse
 
@@ -38,10 +39,40 @@ def _ip_is_forbidden(ip: ipaddress._BaseAddress) -> bool:
     )
 
 
-def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = None) -> str:
+def _env_llm_allowed_hosts() -> set[str]:
+    """读取 LLM_ALLOWED_HOSTS env（逗号分隔）：放行 base_url 指向的内网 host/IP/CIDR。
+
+    默认空集 = 拦截所有内网/云元数据（防 SSRF + 防 key 外泄）。
+    本地自部署 LLM（vllm/ollama/llama.cpp/xinference 等）把 host/IP/CIDR 填这里显式放行。
+    """
+    raw = os.environ.get("LLM_ALLOWED_HOSTS", "")
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
+def _ip_in_allowed(ip: ipaddress._BaseAddress, allowed: set[str]) -> bool:
+    """判断 IP 是否命中白名单（支持单 IP / CIDR 网段 / 主机名）。"""
+    ip_str = str(ip)
+    for item in allowed:
+        if "/" in item:
+            try:
+                if ip in ipaddress.ip_network(item, strict=False):
+                    return True
+            except ValueError:
+                continue
+        elif ip_str == item:
+            return True
+    return False
+
+
+def assert_safe_outbound_url(
+    url: str,
+    *,
+    allow_extra_hosts: set[str] | None = None,
+) -> str:
     """校验并返回原 URL；不安全时抛 SsrfBlocked。
 
     allow_extra_hosts：显式放行的 host（如用户在 env 里配置的私有 FOFA 代理域名）。
+    LLM 内网地址通过 env LLM_ALLOWED_HOSTS 配置（支持单 IP / CIDR / 域名）。
     """
     raw = str(url or "").strip()
     if not raw:
@@ -75,6 +106,8 @@ def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = N
     except OSError as exc:
         raise SsrfBlocked(f"主机解析失败: {host}") from exc
 
+    llm_allowed = _env_llm_allowed_hosts()
+
     for info in infos:
         sockaddr = info[4]
         ip_str = sockaddr[0]
@@ -82,6 +115,8 @@ def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = N
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
             raise SsrfBlocked(f"无效 IP: {ip_str}")
+        if _ip_in_allowed(ip, llm_allowed):
+            continue
         if _ip_is_forbidden(ip):
             raise SsrfBlocked(f"目标解析到私有/保留地址({ip_str})，已拦截")
     return raw
