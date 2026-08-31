@@ -15,7 +15,7 @@ from app.api.dto import SettingsUpdateRequest
 from app.config import LLMConfig
 from app.db.session import get_session
 from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent, llm_request_url
-from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
+from app.tools.netguard import SsrfBlocked, _env_llm_allowed_hosts, assert_safe_outbound_url
 from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
 from app.ui_prefs import (
     MAX_WALLPAPER_BYTES,
@@ -287,7 +287,7 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
         result["error_copy"] = _llm_test_error_copy(result)
         return result
     try:
-        assert_safe_outbound_url(url)
+        assert_safe_outbound_url(url, allow_extra_hosts=_env_llm_allowed_hosts())
     except SsrfBlocked as exc:
         result["error"] = f"base_url 不被允许：{exc}"
         result["error_copy"] = _llm_test_error_copy(result)
