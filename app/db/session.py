@@ -89,6 +89,7 @@ _MIGRATIONS = [
     ("targets", "is_top", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("tasks", "is_top", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("tasks", "runtime_stats", "JSON DEFAULT '{}'"),
+    ("system_settings", "proxy", "JSON DEFAULT '{}'"),
 ]
 
 # 唯一索引：目标库(host)/漏洞库(dedup_key)的 DB 级查重兜底。

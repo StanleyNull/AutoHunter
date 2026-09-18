@@ -944,6 +944,20 @@ class Worker:
             self._mark_tool_used(name, rnd)
             return self.executor.update_notes(notes=args.get("notes", ""))
 
+        if name == "rotate_proxy":
+            self._mark_tool_used(name, rnd)
+            reason = (args.get("reason") or "").strip()
+            self._emit("tool_rotate_proxy", round=rnd, reason=reason[:200])
+            result = self.executor.rotate_proxy_tool(reason=reason)
+            if isinstance(result, dict):
+                self._emit(
+                    "proxy_rotated",
+                    round=rnd,
+                    proxy=str(result.get("proxy_label") or result.get("proxy") or ""),
+                    remaining=result.get("remaining"),
+                )
+            return result
+
         if name == "report_intel":
             self._mark_tool_used(name, rnd)
             return self._report_intel(args)
@@ -1111,7 +1125,7 @@ class Worker:
             if sc == 401:
                 return "401 未授权：需要登录态。若已 session_set 过，可能 session 过期了——重新登录或换凭证；若本就是测未授权，401 说明接口有鉴权，换个不需要登录的入口或测越权。"
             if sc == 403:
-                return "403 禁止：常见原因——路径不对(试目录爆破/换路径)、需要特定角色/IP、WAF 拦截(看响应体有无 WAF 特征，用 suggest_waf_bypass)、或缺少 CSRF token。换路径或换攻击面，别死磕同一个 403。"
+                return "403 禁止：常见原因——路径不对(试目录爆破/换路径)、需要特定角色/IP、WAF 拦截(看响应体有无 WAF 特征，用 suggest_waf_bypass)、或缺少 CSRF token。若判断是 WAF 封 IP（换路径/payload 都无效、整站持续 403、拦截页特征明显）→ 调 rotate_proxy 换出口 IP 后重试。否则换路径或换攻击面，别死磕同一个 403。"
             if sc == 404:
                 return "404 不存在：路径不对。从 JS/首页/接口文档里重新找正确路径，或试常见变体(/api/v1/、/api/v2/、大小写、尾斜杠)。"
             if sc in (500, 502, 503):
