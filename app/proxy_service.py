@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import itertools
+import random
 import threading
 import time
 from typing import Any
@@ -33,6 +34,7 @@ _state: dict[str, Any] = {"enabled": False, "by_id": {}, "order": []}
 _health: dict[str, dict[str, float]] = {}
 _rr = itertools.count()
 _seq = itertools.count(1)
+_RANDOM = random.SystemRandom()
 
 
 # ── 文本解析（导入用） ──────────────────────────────────────────
@@ -239,10 +241,11 @@ def available_count(exclude_ids: set[str] | None = None) -> int:
         )
 
 
-def acquire(exclude_ids: set[str] | None = None) -> dict[str, Any] | None:
+def acquire(exclude_ids: set[str] | None = None, randomize: bool = False) -> dict[str, Any] | None:
     """轮转取下一个可用代理。排除 excluded（该目标已用废的）/停用/冷却中。
 
     返回 {"id","url","label"} 或 None（无可用 → 调用方直连兜底）。
+    randomize=True 用于 WAF 封禁后的随机换出口；默认仍按轮转分配。
     """
     exclude = exclude_ids or set()
     now = time.time()
@@ -250,9 +253,10 @@ def acquire(exclude_ids: set[str] | None = None) -> dict[str, Any] | None:
         if not _state["enabled"] or not _state["order"]:
             return None
         n = len(_state["order"])
+        candidate_ids = []
         start = next(_rr) % n
-        for offset in range(n):
-            pid = _state["order"][(start + offset) % n]
+        ordered_ids = [_state["order"][(start + offset) % n] for offset in range(n)]
+        for pid in ordered_ids:
             if pid in exclude:
                 continue
             entry = _state["by_id"].get(pid)
@@ -260,11 +264,16 @@ def acquire(exclude_ids: set[str] | None = None) -> dict[str, Any] | None:
                 continue
             if float((_health.get(pid) or {}).get("cooldown_until") or 0.0) > now:
                 continue
-            return {
-                "id": pid,
-                "url": proxy_url(entry),
-                "label": f"{entry['name']}({entry['protocol']}://{entry['host']}:{entry['port']})",
-            }
+            candidate_ids.append(pid)
+        if not candidate_ids:
+            return None
+        pid = _RANDOM.choice(candidate_ids) if randomize else candidate_ids[0]
+        entry = _state["by_id"][pid]
+        return {
+            "id": pid,
+            "url": proxy_url(entry),
+            "label": f"{entry['name']}({entry['protocol']}://{entry['host']}:{entry['port']})",
+        }
     return None
 
 

@@ -130,6 +130,38 @@ class ExecutorProxyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("HTTP 请求异常", result["error"])
 
+    def test_waf_block_rotates_random_proxy_and_retries_once(self) -> None:
+        ps.apply_config(_pool(_px(1), _px(2), _px(3)))
+        self.ex._proxy_id = "px-1"
+        self.ex._proxy_url = "http://10.0.0.1:8080"
+        blocked = _fake_response()
+        blocked.status_code = 403
+        blocked.headers = {"server": "cloudflare", "cf-ray": "test"}
+        blocked.iter_bytes = lambda: iter([b"Just a moment... Cloudflare"])
+        good = FakeClient([blocked])
+        retried = FakeClient([_fake_response()])
+        with patch.object(ps._RANDOM, "choice", side_effect=lambda items: items[-1]), \
+                patch.object(ToolExecutor, "_get_http_client", side_effect=[good, retried]):
+            result = self.ex.http_request("http://target.example/x")
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["proxy_rotated"])
+        self.assertEqual(self.ex._proxy_id, "px-3")
+        self.assertIn("px-1", self.ex._used_proxy_ids)
+
+    def test_plain_forbidden_does_not_rotate(self) -> None:
+        ps.apply_config(_pool(_px(1), _px(2)))
+        self.ex._proxy_id = "px-1"
+        self.ex._proxy_url = "http://10.0.0.1:8080"
+        response = _fake_response()
+        response.status_code = 403
+        response.headers = {"content-type": "text/plain"}
+        response.iter_bytes = lambda: iter([b"Forbidden"])
+        with patch.object(ToolExecutor, "_get_http_client", return_value=FakeClient([response])):
+            result = self.ex.http_request("http://target.example/x")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("proxy_rotated", result)
+        self.assertEqual(self.ex._proxy_id, "px-1")
+
     def test_rotate_proxy_tool_returns_direct_when_no_more_proxies(self) -> None:
         result = self.ex.rotate_proxy_tool(reason="被封")
         self.assertTrue(result["ok"])

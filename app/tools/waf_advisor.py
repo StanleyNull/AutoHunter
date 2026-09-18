@@ -82,6 +82,28 @@ _SIGNATURES: tuple[WafSignature, ...] = (
 
 
 _BLOCK_STATUSES = {400, 403, 406, 429, 501, 503}
+_STRONG_GENERIC_MARKERS = {"blocked", "firewall", "security violation", "拦截", "阻断", "攻击"}
+
+
+def is_waf_blocked(
+    status_code: int | None,
+    response_headers: dict[str, Any] | None = None,
+    response_body: str = "",
+) -> bool:
+    """判断响应是否有足够明确的 WAF/封禁证据。
+
+    仅凭 403/429 不自动换代理，避免把普通权限不足或限流误判为封 IP。
+    """
+    status = int(status_code or 0)
+    if status not in _BLOCK_STATUSES:
+        return False
+    signature, evidence = _detect_waf(status, _normalize_headers(response_headers or {}), response_body or "")
+    if signature.name == "none":
+        return False
+    if signature.name != "generic":
+        return True
+    evidence_lower = evidence.lower()
+    return any(marker in evidence_lower for marker in _STRONG_GENERIC_MARKERS)
 
 
 def suggest_waf_bypass(

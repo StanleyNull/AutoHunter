@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 from app import proxy_service as ps
 
@@ -45,6 +46,12 @@ class ProxyServiceTests(unittest.TestCase):
         # 再转一轮应重新覆盖全部
         got2 = {ps.acquire()["id"] for _ in range(3)}
         self.assertEqual(got2, {"px-1", "px-2", "px-3"})
+
+    def test_acquire_randomize_uses_random_candidate(self) -> None:
+        ps.apply_config(_cfg(_px(1), _px(2), _px(3)))
+        with patch.object(ps._RANDOM, "choice", return_value="px-3"):
+            got = ps.acquire(randomize=True)
+        self.assertEqual(got["id"], "px-3")
 
     def test_acquire_skips_disabled(self) -> None:
         ps.apply_config(_cfg(_px(1), _px(2, enabled=False)))

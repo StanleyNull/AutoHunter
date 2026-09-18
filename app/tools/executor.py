@@ -26,6 +26,7 @@ from app.tools.decoder import decode_transform as _decode_transform
 from app.tools.guard import CommandBlocked, NeedsConfirm, check_command, check_http_request
 from app.tools.js_analyzer import analyze_javascript as analyze_js_text
 from app.tools.js_analyzer import analyze_url as analyze_js_url
+from app.tools.waf_advisor import is_waf_blocked as _is_waf_blocked
 from app.tools.waf_advisor import suggest_waf_bypass as _suggest_waf_bypass
 
 # 只读测绘查询硬上限：worker 用它确认归属/探攻击面，不是全量测绘，给小额度即可。
@@ -487,7 +488,10 @@ class ToolExecutor:
         old_label = self._proxy_url or "direct"
         got = None
         try:
-            got = proxy_service.acquire(exclude_ids=set(self._used_proxy_ids))
+            got = proxy_service.acquire(
+                exclude_ids=set(self._used_proxy_ids),
+                randomize=True,
+            )
         except Exception:
             got = None
         # 换 client：代理绑定在 httpx.Client 构造参数上，必须重建；cookie jar 从旧 client
@@ -732,6 +736,26 @@ class ToolExecutor:
             result["session_applied"] = session_applied
         if session_updated:
             result["session_cookies_updated"] = session_updated
+        waf_blocked = _is_waf_blocked(resp.status_code, dict(resp.headers), body)
+        if waf_blocked:
+            result["waf_blocked"] = True
+            if not _proxy_retried:
+                old_proxy = self._proxy_url
+                rotation = self._rotate_proxy("自动识别到 WAF 封禁响应", mark_used=True)
+                new_proxy = self._proxy_url
+                if new_proxy and new_proxy != old_proxy:
+                    retried = self.http_request(
+                        url, method=method, headers=raw_headers, data=data,
+                        json_body=json_body, files=files,
+                        follow_redirects=follow_redirects, timeout=timeout,
+                        confirm_destructive=confirm_destructive,
+                        confirm_reason=confirm_reason,
+                        _proxy_retried=True,
+                    )
+                    retried["proxy_rotated"] = True
+                    retried["proxy_rotation_reason"] = rotation["reason"]
+                    return retried
+                result["proxy_rotation"] = rotation
         if hub is not None:
             try:
                 hub.push(self)
