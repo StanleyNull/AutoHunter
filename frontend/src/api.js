@@ -1,4 +1,4 @@
-// 简易 API 客户端
+﻿// 简易 API 客户端
 import { ref } from "vue";
 
 const base = "";
@@ -79,12 +79,12 @@ export function canWrite() {
 export async function loadAuthRole() {
     try {
         const res = await req("GET", "/api/auth/status");
-        authRequiredRef.value = !!res ? .auth_required;
-        if (!res ? .auth_required) {
+        authRequiredRef.value = !!res ?.auth_required;
+        if (!res ?.auth_required) {
             setAuthRole("full");
             return authRoleRef.value;
         }
-        setAuthRole(res ? .role);
+        setAuthRole(res ?.role);
         return authRoleRef.value;
     } catch {
         authReadyRef.value = true;
@@ -100,8 +100,8 @@ export async function verifyToken(token) {
     const cleaned = sanitizeToken(token);
     try {
         const res = await req("GET", "/api/auth/status", undefined, true, cleaned);
-        if (!res ? .auth_required) return "full";
-        return normalizeRole(res ? .role);
+        if (!res ?.auth_required) return "full";
+        return normalizeRole(res ?.role);
     } catch {
         return "none";
     }
@@ -114,7 +114,7 @@ export async function applyAccessToken(token) {
     setApiToken(cleaned);
     try {
         const res = await req("GET", "/api/auth/status");
-        if (!res ? .auth_required) {
+        if (!res ?.auth_required) {
             setAuthRole("full");
             return { ok: true, role: "full" };
         }
