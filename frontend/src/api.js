@@ -1,4 +1,4 @@
-// 简易 API 客户端
+﻿// 简易 API 客户端
 import { ref } from "vue";
 
 const base = "";
