@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
+import ProxyPoolEditor from "../components/ProxyPoolEditor.vue";
 import { copyText, formatLlmTestCopy } from "../clipboard.js";
 import {
   ACCENT_PRESETS,
@@ -836,6 +837,7 @@ const SETTINGS_TABS = [
   { id: "llm", label: "模型", hint: "LLM 通道" },
   { id: "recon", label: "测绘", hint: "引擎与 Key" },
   { id: "runtime", label: "调度", hint: "并发深挖" },
+  { id: "proxy", label: "代理", hint: "WAF 封禁换 IP" },
   { id: "data", label: "数据", hint: "备份磁盘" },
   { id: "update", label: "更新", hint: "版本检查" },
 ];
@@ -1363,6 +1365,14 @@ async function runCleanup() {
             </label>
             <p class="field-hint full">Collector 评分低于此值的目标直接跳过，避免 worker 消耗在垃圾资产上。</p>
           </div>
+        </fieldset>
+
+        <fieldset v-show="settingsTab === 'proxy'" class="settings-block">
+          <legend>
+            <span>代理池</span>
+            <small>挖洞流量出口 IP 池，WAF 封禁时自动/手动换 IP</small>
+          </legend>
+          <ProxyPoolEditor />
         </fieldset>
 
         <fieldset v-show="settingsTab === 'data'" class="settings-block">

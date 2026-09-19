@@ -26,6 +26,7 @@ from app.tools.decoder import decode_transform as _decode_transform
 from app.tools.guard import CommandBlocked, NeedsConfirm, check_command, check_http_request
 from app.tools.js_analyzer import analyze_javascript as analyze_js_text
 from app.tools.js_analyzer import analyze_url as analyze_js_url
+from app.tools.waf_advisor import is_waf_blocked as _is_waf_blocked
 from app.tools.waf_advisor import suggest_waf_bypass as _suggest_waf_bypass
 
 # 只读测绘查询硬上限：worker 用它确认归属/探攻击面，不是全量测绘，给小额度即可。
@@ -259,6 +260,10 @@ class ToolExecutor:
         self._worker_notes: str = ""
         # HTTP 会话复用：持久 httpx.Client（惰性创建），避免同 host 大量请求每次重做 TCP+TLS 握手。
         self._client: Optional[httpx.Client] = None
+        # 代理池状态：当前代理 id/url + 本目标已用废的代理（WAF 封禁记忆，换回必再被封）。
+        self._proxy_id: str = ""
+        self._proxy_url: str = ""
+        self._used_proxy_ids: set[str] = set()
         # 工作目录体积：增量估算 + 周期性全目录校准（见 _write_log），避免每次写日志都全目录扫描。
         self._workdir_bytes: int = self._dir_size()
         self._writes_since_scan: int = 0
@@ -328,6 +333,7 @@ class ToolExecutor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,  # 独立进程组，便于超时整组 kill
+                env={**os.environ, **self._shell_proxy_env()},
             )
             self._active_procs.add(proc)
             deadline = start + timeout
@@ -449,23 +455,131 @@ class ToolExecutor:
         self._writes_since_scan += 1
         return log_file
 
+    # ---- 代理池（WAF 封禁对抗）----
+    def _proxy_log(self, message: str) -> None:
+        """换 IP 动作落工作目录日志（LLM/用户可见的取证线索）。"""
+        self._write_log(f"[proxy] {message}\n")
+
+    def _ensure_proxy(self) -> None:
+        """首次请求前从代理池取一个出口（未启用/无可用 → 直连，不阻断）。"""
+        if self._proxy_id or self._proxy_url:
+            return
+        try:
+            from app import proxy_service
+
+            got = proxy_service.acquire(exclude_ids=set(self._used_proxy_ids))
+        except Exception:
+            return
+        if not got:
+            return
+        self._proxy_id = got["id"]
+        self._proxy_url = got["url"]
+        self._proxy_log(f"启用代理出口 {got['label']}")
+
+    def _rotate_proxy(self, reason: str, mark_used: bool = True) -> dict[str, Any]:
+        """换下一个出口 IP：排除已用废的代理 → 迁移 cookie jar 保登录态 → 关旧连接。
+
+        返回给 LLM 的动作结果：{ok, proxy, reason, remaining}。proxy="direct" 表示无可用代理已回直连。
+        """
+        from app import proxy_service
+
+        if mark_used and self._proxy_id:
+            self._used_proxy_ids.add(self._proxy_id)
+        old_label = self._proxy_url or "direct"
+        got = None
+        try:
+            got = proxy_service.acquire(
+                exclude_ids=set(self._used_proxy_ids),
+                randomize=True,
+            )
+        except Exception:
+            got = None
+        # 换 client：代理绑定在 httpx.Client 构造参数上，必须重建；cookie jar 从旧 client
+        # 取回（_cookie_jar 是唯一真值来源，_fill_client_cookies 每请求重灌，天然迁移）。
+        self.close_http_client()
+        self._proxy_id = ""
+        self._proxy_url = ""
+        if got:
+            self._proxy_id = got["id"]
+            self._proxy_url = got["url"]
+            label = got["label"]
+        else:
+            label = "direct（无可用代理，已回直连）"
+        remaining = -1
+        try:
+            remaining = proxy_service.available_count(exclude_ids=set(self._used_proxy_ids))
+        except Exception:
+            pass
+        self._proxy_log(f"切换出口 IP：{old_label} → {label}（原因：{reason}）")
+        return {
+            "ok": True,
+            "proxy": self._proxy_url or "direct",
+            "proxy_label": label,
+            "reason": reason,
+            "remaining": remaining,
+            "guidance": (
+                f"出口已切换为 {label}。用 http_request 重发被拦的请求验证新 IP 是否可用；"
+                "若仍被封，继续 rotate_proxy。会话 cookie 已保留，无需重新登录。"
+                if got
+                else "代理池已无可用出口（全部冷却/用尽/未启用），已回直连。"
+                "若目标仍封当前 IP，说明需要等冷却或补充代理，先换路径/攻击面继续。"
+            ),
+        }
+
+    def rotate_proxy_tool(self, reason: str = "") -> dict[str, Any]:
+        """rotate_proxy 工具入口（worker 专属）：WAF 封 IP 时由 LLM 决策调用。"""
+        safe_reason = (reason or "WAF 封禁当前出口").strip()[:200]
+        # 上报当前代理"业务性废用"：从本目标的候选里排除（不算连接失败、不进冷却——代理本身没坏）。
+        if self._proxy_id:
+            self._used_proxy_ids.add(self._proxy_id)
+        return self._rotate_proxy(safe_reason, mark_used=False)
+
+    @staticmethod
+    def _is_connection_error(exc: Exception) -> bool:
+        """连接类错误（代理坏了/网络不通）→ 自动换代理；WAF 拦截页不算。"""
+        if isinstance(exc, (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)):
+            return True
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return any(
+            key in text
+            for key in (
+                "proxy", "tunnel", "connection refused", "connection reset",
+                "unreachable", "timed out", "timeout", "ssl",
+            )
+        )
+
     def _get_http_client(self) -> httpx.Client:
         """惰性复用的持久 HTTP client（连接池），避免同 host 大量请求重复 TCP+TLS 握手。
 
         per-request 的 timeout/follow_redirects 在 build_request/send 时逐次覆盖；cookie 每次
         请求前清空再从 self._session_cookies 重灌，保证会话态唯一真值来源、jar 不跨 host 累积。
+        代理池启用时 client 绑定当前出口代理（_ensure_proxy 首次请求前分配）。
         """
+        self._ensure_proxy()
         if self._client is None or self._client.is_closed:
             self._client = httpx.Client(
                 verify=False,
                 timeout=20,
                 follow_redirects=False,
                 headers={"User-Agent": BROWSER_UA},
+                proxy=self._proxy_url or None,
                 limits=httpx.Limits(
                     max_keepalive_connections=8, max_connections=32, keepalive_expiry=30.0
                 ),
             )
         return self._client
+
+    def _shell_proxy_env(self) -> dict[str, str]:
+        """run_shell 的代理环境变量：curl/python 等会读；nmap/sqlmap 需各自 --proxy 参数。"""
+        self._ensure_proxy()
+        if not self._proxy_url:
+            return {}
+        return {
+            "HTTP_PROXY": self._proxy_url,
+            "HTTPS_PROXY": self._proxy_url,
+            "ALL_PROXY": self._proxy_url,
+            "NO_PROXY": "127.0.0.1,localhost",
+        }
 
     def close_http_client(self) -> None:
         # 经 kill_processes 调用。正常完成时无 in-flight 请求；取消路径（cancel_running →
@@ -491,10 +605,14 @@ class ToolExecutor:
         timeout: int = 20,
         confirm_destructive: Any = False,
         confirm_reason: str = "",
+        _proxy_retried: bool = False,
     ) -> dict[str, Any]:
         # LLM 可能把 headers 传成非 dict 形态（list["K: V"] / "K: V\nK2: V2" / None），
         # 直接喂给 dict()/httpx 会抛 "dictionary update sequence element..." 崩掉整个 agent。
         # 这里统一规范化成 dict，容错所有 agent 的 http_request 调用。
+        # 代理轮换重试要原样回传【原始入参】：下面 _pop_header 会把 Cookie 从 headers 里
+        # 移走，若重试传规范化后的 dict，LLM 显式带的 Cookie 会静默丢失。
+        raw_headers = headers
         headers = _normalize_headers(headers)
         incoming_cookie = _pop_header(headers, "Cookie")
         overlay = _parse_cookie_header(incoming_cookie)
@@ -519,6 +637,9 @@ class ToolExecutor:
 
         req: httpx.Request | None = None
         try:
+            # 显式分配代理出口（_get_http_client 内也会兜底调用；这里提前调用保证
+            # client 构造前 _proxy_url 已就绪，且不依赖 client 惰性创建路径）。
+            self._ensure_proxy()
             client = self._get_http_client()
             host = _host_from_url(url) or self._target_host()
             try:
@@ -558,7 +679,33 @@ class ToolExecutor:
             # 而不是只读最终 resp.cookies；再兜底吸收 client.cookies jar 里的全部。
             session_updated = self._absorb_redirect_chain(resp, client)
         except Exception as e:
+            # 连接类错误（代理挂了/网络不通）→ 自动换下一个代理重发一次；WAF 拦截页不算。
+            if not _proxy_retried and self._proxy_id and self._is_connection_error(e):
+                try:
+                    from app import proxy_service
+
+                    proxy_service.report_failure(self._proxy_id)
+                except Exception:
+                    pass
+                self._proxy_log(f"代理连接失败（{type(e).__name__}），自动切换出口重试")
+                self._used_proxy_ids.add(self._proxy_id)
+                self._rotate_proxy(f"连接失败: {type(e).__name__}", mark_used=False)
+                return self.http_request(
+                    url, method=method, headers=raw_headers, data=data,
+                    json_body=json_body, files=files,
+                    follow_redirects=follow_redirects, timeout=timeout,
+                    confirm_destructive=confirm_destructive,
+                    confirm_reason=confirm_reason,
+                    _proxy_retried=True,
+                )
             return {"ok": False, "error": f"HTTP 请求异常: {e}", "url": url}
+        if self._proxy_id:
+            try:
+                from app import proxy_service
+
+                proxy_service.report_success(self._proxy_id)
+            except Exception:
+                pass
 
         # 原始请求行（取证/格式参考）。响应报文不再单独回传：状态码 + response_headers +
         # body 已结构化提供，raw_response 会与它们 100% 重复，是当轮就纯冗余的双份大文本。
@@ -589,6 +736,26 @@ class ToolExecutor:
             result["session_applied"] = session_applied
         if session_updated:
             result["session_cookies_updated"] = session_updated
+        waf_blocked = _is_waf_blocked(resp.status_code, dict(resp.headers), body)
+        if waf_blocked:
+            result["waf_blocked"] = True
+            if not _proxy_retried:
+                old_proxy = self._proxy_url
+                rotation = self._rotate_proxy("自动识别到 WAF 封禁响应", mark_used=True)
+                new_proxy = self._proxy_url
+                if new_proxy and new_proxy != old_proxy:
+                    retried = self.http_request(
+                        url, method=method, headers=raw_headers, data=data,
+                        json_body=json_body, files=files,
+                        follow_redirects=follow_redirects, timeout=timeout,
+                        confirm_destructive=confirm_destructive,
+                        confirm_reason=confirm_reason,
+                        _proxy_retried=True,
+                    )
+                    retried["proxy_rotated"] = True
+                    retried["proxy_rotation_reason"] = rotation["reason"]
+                    return retried
+                result["proxy_rotation"] = rotation
         if hub is not None:
             try:
                 hub.push(self)

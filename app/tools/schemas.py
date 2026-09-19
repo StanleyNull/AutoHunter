@@ -335,6 +335,19 @@ SESSION_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "rotate_proxy",
+            "description": "切换出口 IP（代理池）。当判定被 WAF 封 IP/限频时调用：整站持续 403/429、换路径换 payload 都无效、且页面是 WAF 拦截页（用 suggest_waf_bypass 看过指纹）。调用后出口 IP 立即更换、会话 cookie 保留，用 http_request 重发请求验证。仅封 IP 场景使用，普通 403（路径不对/缺权限）不要调。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "为什么要换 IP，如「整站 403 且响应体是 Cloudflare 拦截页，换 payload 无效」"},
+                },
+            },
+        },
+    },
 ]
 
 
