@@ -65,6 +65,9 @@ _STREAM_IMPORTANT_KINDS = frozenset({
     "worker_start", "worker_finish", "worker_cancelled", "worker_auto_finish",
     "finding_submitted", "finding_duplicate", "finding_invalid",
     "target_done", "target_requeued", "timeout", "auto_deepen", "salvage",
+    # 硬骨头库人工动作 + 基础设施停摆：都是用户需要看见的状态变化
+    # （停摆目标不在硬骨头库里，活动流是它唯一的显性出口）。
+    "target_stalled", "stalled_released", "target_deepen", "target_deleted",
     "coverage_reported", "site_followups_spawned",
     "review_start", "review_done", "review_error", "review_deferred", "review_cancelled",
     "reproduce_start", "reproduce_done",
@@ -332,6 +335,9 @@ async def _compute_stats(session: AsyncSession, task_id: str) -> TaskStats:
             stats.dead += cnt
         elif status == "skipped":
             stats.skipped += cnt
+        elif status == "stalled":
+            # 基础设施停摆：既不是已完成也不是硬骨头，端点恢复后会自动回队。
+            stats.stalled += cnt
 
     # findings 两项计数合并为一次扫表（conditional aggregation）：
     # findings_total 排除 superseded（被打回深挖让位的旧线索，不算真实漏洞）。
@@ -1161,6 +1167,9 @@ async def list_hosts(
             rollup = "done"
         elif any(s == "dead" for s in statuses):
             rollup = "dead"
+        elif any(s == "stalled" for s in statuses):
+            # 因 LLM/网络停摆的目标不是「已跳过」，别让它显示成低分跳过（#63）。
+            rollup = "stalled"
         else:
             rollup = "skipped"
         pick = max(items, key=lambda x: ((x.updated_at or x.created_at), x.priority_score or 0))

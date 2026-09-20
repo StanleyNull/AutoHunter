@@ -286,6 +286,8 @@ const IMPORTANT_KINDS = new Set([
   "finding_submitted", "finding_duplicate", "finding_invalid",
   "worker_start", "worker_finish", "worker_cancelled", "worker_auto_finish",
   "target_done", "target_requeued", "timeout", "auto_deepen", "salvage",
+  // 硬骨头库人工动作 + 基础设施停摆：不放进白名单就会从活动流里消失。
+  "target_stalled", "stalled_released", "target_deepen", "target_deleted",
   "review_start", "review_done", "review_error", "review_deferred", "review_cancelled",
   "reproduce_start", "reproduce_done",
   "killsweep_start", "killsweep_done", "killsweep_error", "killsweep_dedup",
@@ -308,6 +310,8 @@ const NOISE_KINDS = new Set([
 ]);
 const LOG_INFO_IMPORTANT = new Set([
   "target_done", "target_requeued", "timeout", "auto_deepen", "salvage",
+  // 刷新后回放历史时也要保留（与后端 _STREAM_IMPORTANT_KINDS 对齐）。
+  "target_stalled", "stalled_released", "target_deepen", "target_deleted",
   "review_done", "review_deferred", "review_cancelled",
   "reclaim", "recover", "workers_cancelled", "quota_stop",
   "killsweep_done", "killsweep_dedup", "killsweep_error", "killsweep_cancelled", "killsweep_retry",
@@ -1178,7 +1182,8 @@ const checkedHosts = computed(() => Number(stats.value.hosts_checked || 0));
 const totalHosts = computed(() => Number(stats.value.hosts_total || 0));
 const totalTargets = computed(() =>
   (stats.value.queued ?? 0) + (stats.value.scanning ?? 0) +
-  (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
+  (stats.value.done ?? 0) + (stats.value.dead ?? 0) +
+  (stats.value.skipped ?? 0) + (stats.value.stalled ?? 0)
 );
 const resolvedTargets = computed(() =>
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)

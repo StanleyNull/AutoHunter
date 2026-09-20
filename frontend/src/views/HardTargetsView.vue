@@ -8,6 +8,7 @@ defineOptions({ name: "HardTargetsView" });
 const router = useRouter();
 const rows = ref([]);
 const initialLoading = ref(true);
+const loaded = ref(false);      // 已加载过一次后，空列表不再反复显示骨架屏
 const refreshing = ref(false);
 const status = ref("all");
 const searchDraft = ref("");
@@ -25,6 +26,15 @@ const toggling = ref(new Set());
 const batchToggling = ref(false);
 const toastMsg = ref("");
 
+// 删除（#61）：二次确认弹窗，确认前只展示将要删除的目标，不会真的动手。
+const deleting = ref(new Set());
+const batchDeleting = ref(false);
+const confirmDelete = ref(null);   // { ids: string[], label: string }
+// 深挖（#62）：带指令回炉，指令为空不给提交。
+const deepenRow = ref(null);
+const deepenDraft = ref("");
+const deepening = ref(false);
+
 function toast(m, ms = 2400) {
   toastMsg.value = m;
   setTimeout(() => { if (toastMsg.value === m) toastMsg.value = ""; }, ms);
@@ -33,6 +43,7 @@ function toast(m, ms = 2400) {
 const STATUS_LABEL = {
   dead: "硬骨头",
   skipped: "已跳过",
+  stalled: "停摆待重试",
 };
 
 const selectedCount = computed(() => selected.value.size);
@@ -43,7 +54,7 @@ const someChecked = computed(() =>
   pageIds.value.some((id) => selected.value.has(id)));
 
 async function load() {
-  if (!rows.value.length) initialLoading.value = true;
+  if (!loaded.value) initialLoading.value = true;
   else refreshing.value = true;
   try {
     const res = await api.hardTargets(status.value, searchText.value, {
@@ -58,6 +69,7 @@ async function load() {
   } finally {
     initialLoading.value = false;
     refreshing.value = false;
+    loaded.value = true;
   }
 }
 
@@ -156,6 +168,81 @@ async function batchTop(isTop) {
   }
 }
 
+// ===== 删除（#61）=====
+// 删除是物理删除、不可撤销，所以统一走弹窗二次确认，并在弹窗里写清后果。
+function askDelete(row) {
+  if (!writable.value || deleting.value.has(row.id)) return;
+  confirmDelete.value = { ids: [row.id], label: row.host || row.url || row.id };
+}
+
+function askBatchDelete() {
+  if (!writable.value || !selectedCount.value) return;
+  confirmDelete.value = { ids: Array.from(selected.value), label: `${selectedCount.value} 条资产` };
+}
+
+async function doDelete() {
+  const payload = confirmDelete.value;
+  if (!payload || !payload.ids.length) return;
+  const single = payload.ids.length === 1;
+  if (!single) batchDeleting.value = true;
+  else deleting.value = new Set(deleting.value).add(payload.ids[0]);
+  try {
+    if (single) {
+      await api.assetDelete(payload.ids[0]);
+      rows.value = rows.value.filter((r) => r.id !== payload.ids[0]);
+      total.value = Math.max(0, total.value - 1);
+      toast("已删除 1 条");
+    } else {
+      const res = await api.assetBatchDelete(payload.ids);
+      const ok = res?.success_count ?? 0;
+      const failed = res?.failed || [];
+      const okSet = new Set(payload.ids.filter((id) => !failed.some((f) => f.id === id)));
+      rows.value = rows.value.filter((r) => !okSet.has(r.id));
+      total.value = Math.max(0, total.value - okSet.size);
+      if (failed.length) {
+        const first = failed[0]?.reason || "该目标当前不允许删除";
+        alert(`成功删除 ${ok} 条，${failed.length} 条未删除（${first}）`);
+      } else {
+        toast(`成功删除 ${ok} 条`);
+      }
+    }
+    confirmDelete.value = null;
+    await load();
+  } catch (e) {
+    alert(`删除失败：${e?.message || e}`);
+  } finally {
+    batchDeleting.value = false;
+    const s = new Set(deleting.value);
+    payload.ids.forEach((id) => s.delete(id));
+    deleting.value = s;
+  }
+}
+
+// ===== 深挖回炉（#62）=====
+function openDeepen(row) {
+  if (!writable.value) return;
+  deepenRow.value = row;
+  deepenDraft.value = "";
+}
+
+async function submitDeepen() {
+  const row = deepenRow.value;
+  const directive = deepenDraft.value.trim();
+  if (!row || !directive || deepening.value) return;
+  deepening.value = true;
+  try {
+    const res = await api.assetDeepen(row.id, directive);
+    deepenRow.value = null;
+    deepenDraft.value = "";
+    toast(res?.message || `已回炉重挖（第 ${res?.deepen_count ?? "?"} 次深挖）`);
+    await load();
+  } catch (e) {
+    alert(`深挖失败：${e?.message || e}`);
+  } finally {
+    deepening.value = false;
+  }
+}
+
 watch(searchDraft, (v) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
@@ -209,6 +296,10 @@ onActivated(() => {
               :disabled="!selectedCount || batchToggling">
         {{ batchToggling ? "处理中…" : "批量取消置顶" }}
       </button>
+      <button class="btn-danger" type="button" @click="askBatchDelete"
+              :disabled="!selectedCount || batchDeleting">
+        {{ batchDeleting ? "删除中…" : "批量删除" }}
+      </button>
     </div>
 
     <div class="hard-stats">
@@ -240,13 +331,23 @@ onActivated(() => {
           <small>优先级 {{ Number(row.priority_score || 0).toFixed(1) }}</small>
           <time>{{ fmtTime(row.updated_at || row.created_at) }}</time>
         </span>
-        <button v-if="writable" class="ir-top" type="button"
-                :class="{ on: row.is_top }"
-                :disabled="toggling.has(row.id)"
-                :title="row.is_top ? '取消置顶' : '置顶'"
-                @click.stop="toggleTop(row)">
-          {{ toggling.has(row.id) ? "…" : (row.is_top ? "取消置顶" : "置顶") }}
-        </button>
+        <span v-if="writable" class="hard-actions" @click.stop>
+          <button class="ir-act" type="button" :disabled="deepening"
+                  title="带定向指令把该目标重新塞回挖掘队列"
+                  @click="openDeepen(row)">深挖</button>
+          <button class="ir-top" type="button"
+                  :class="{ on: row.is_top }"
+                  :disabled="toggling.has(row.id)"
+                  :title="row.is_top ? '取消置顶' : '置顶'"
+                  @click="toggleTop(row)">
+            {{ toggling.has(row.id) ? "…" : (row.is_top ? "取消置顶" : "置顶") }}
+          </button>
+          <button class="ir-del" type="button" :disabled="deleting.has(row.id)"
+                  title="从硬骨头库彻底删除该目标记录"
+                  @click="askDelete(row)">
+            {{ deleting.has(row.id) ? "…" : "删除" }}
+          </button>
+        </span>
       </div>
     </div>
 
@@ -254,6 +355,45 @@ onActivated(() => {
       <button type="button" @click="prevPage" :disabled="page <= 0 || refreshing">上一页</button>
       <span>第 {{ page + 1 }} 页 · {{ page * pageSize + 1 }}-{{ page * pageSize + rows.length }} / {{ total }}</span>
       <button type="button" @click="nextPage" :disabled="!hasMore || refreshing">下一页</button>
+    </div>
+
+    <!-- 删除二次确认：把「删的是什么 / 后果是什么」写清楚，避免误删（#61） -->
+    <div v-if="confirmDelete" class="hard-modal-mask" @click.self="confirmDelete = null">
+      <div class="hard-modal">
+        <h3>确认删除？</h3>
+        <p class="modal-line">即将从硬骨头库删除 <b>{{ confirmDelete.label }}</b>（共 {{ confirmDelete.ids.length }} 条）。</p>
+        <p class="modal-warn">删除是物理删除、不可撤销：目标记录会从库里移除，之后不会再出现在硬骨头库里。</p>
+        <p class="modal-note">已挖到的漏洞不会被删——若该目标还挂着有效漏洞，后端会拒绝删除并提示你先去漏洞库处理。</p>
+        <div class="modal-actions">
+          <button class="btn-ghost" type="button" :disabled="batchDeleting" @click="confirmDelete = null">取消</button>
+          <button class="btn-danger" type="button" :disabled="batchDeleting" @click="doDelete">
+            {{ batchDeleting ? "删除中…" : "确认删除" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 深挖回炉：必须写清这一轮要去打穿什么（#62） -->
+    <div v-if="deepenRow" class="hard-modal-mask" @click.self="deepenRow = null">
+      <div class="hard-modal">
+        <h3>打回深挖回炉</h3>
+        <p class="modal-line">目标：<b>{{ deepenRow.host || deepenRow.url }}</b></p>
+        <p class="modal-note">
+          上次结论：{{ reasonOf(deepenRow) }}。该目标会带着你的指令重新入队并插到队首，
+          占用一次该任务的深挖次数。
+        </p>
+        <label class="modal-field">
+          <span>深挖指令（告诉 worker 这一轮去把什么打穿）</span>
+          <textarea v-model="deepenDraft" rows="3"
+                    placeholder="例如：重点打后台 /uploads 目录的上传点，先拿一个可写 shell 再提权"></textarea>
+        </label>
+        <div class="modal-actions">
+          <button class="btn-ghost" type="button" :disabled="deepening" @click="deepenRow = null">取消</button>
+          <button class="btn-pin" type="button" :disabled="!deepenDraft.trim() || deepening" @click="submitDeepen">
+            {{ deepening ? "提交中…" : "确认回炉" }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <div v-if="toastMsg" class="toast">{{ toastMsg }}</div>

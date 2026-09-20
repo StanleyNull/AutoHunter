@@ -129,6 +129,24 @@ export async function applyAccessToken(token) {
   }
 }
 
+/** 把 FastAPI 的错误响应体（{"detail": "..."}）取成人话，避免把 JSON 原样弹给用户。 */
+function readableError(status, text) {
+  let detail = "";
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      const raw = parsed.detail ?? parsed.message ?? parsed.error;
+      detail = Array.isArray(raw)
+        ? raw.map((item) => (item && item.msg) || String(item)).join("；")
+        : String(raw || "");
+    }
+  } catch { detail = ""; }
+  detail = String(detail || "").trim();
+  if (detail) return detail;
+  const plain = String(text || "").trim();
+  return plain ? `${status} ${plain}` : String(status);
+}
+
 async function req(method, url, body, retriedAuth = false, overrideToken = "") {
   const opt = { method, headers: {} };
   const token = overrideToken || apiToken();
@@ -148,7 +166,7 @@ async function req(method, url, body, retriedAuth = false, overrideToken = "") {
     }
   }
   if (res.status === 403) throw new Error("只读令牌不允许此操作");
-  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  if (!res.ok) throw new Error(readableError(res.status, text));
   if (res.status === 204 || !text) return null;
   try { return JSON.parse(text); }
   catch { return text; }
@@ -176,7 +194,7 @@ async function streamSSE(url, body, onEvent, retriedAuth = false, signal = null)
   if (res.status === 403) throw new Error("当前令牌不允许此操作");
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${text}`);
+    throw new Error(readableError(res.status, text));
   }
   if (!res.body) throw new Error("浏览器不支持流式响应");
 
@@ -243,7 +261,7 @@ async function uploadUiWallpaper(file) {
   const res = await fetch(base + "/api/settings/ui/wallpaper", { method: "POST", headers, body });
   const text = await res.text();
   if (res.status === 403) throw new Error("只读令牌不允许此操作");
-  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  if (!res.ok) throw new Error(readableError(res.status, text));
   try { return JSON.parse(text); }
   catch { throw new Error(text || "上传失败"); }
 }
@@ -261,7 +279,7 @@ async function uploadBackup(file, includeWork) {
   });
   const text = await res.text();
   if (res.status === 403) throw new Error("只读令牌不允许此操作");
-  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  if (!res.ok) throw new Error(readableError(res.status, text));
   try { return JSON.parse(text); }
   catch { return { ok: true, message: text }; }
 }
@@ -346,6 +364,11 @@ export const api = {
   // 全局资产（硬骨头库）置顶
   assetTop: (id, is_top) => req("PATCH", `/api/assets/${id}/top`, { is_top }),
   assetBatchTop: (ids, is_top) => req("PATCH", `/api/assets/batch/top`, { ids, is_top }),
+  // 硬骨头库删除：物理删除目标记录；后端会拒绝「不在库内 / 仍挂有效漏洞」的目标并给出原因。
+  assetDelete: (id) => req("DELETE", `/api/assets/${id}`),
+  assetBatchDelete: (ids) => req("POST", "/api/assets/batch/delete", { ids }),
+  // 硬骨头深挖回炉：带定向指令把目标重新塞回它所属任务的挖掘队列。
+  assetDeepen: (id, directive) => req("POST", `/api/assets/${id}/deepen`, { directive }),
   // 全局运行异常日志
   runtimeLogStats: () => req("GET", "/api/runtime-logs/stats"),
   runtimeLogs: (level, agent, q, opts = {}) =>

@@ -4026,3 +4026,61 @@ main {
 .intel-row.pinned:hover, .hard-row.pinned:hover {
   background: rgba(255, 215, 0, 0.16);
 }
+
+/* 硬骨头库行内操作区：深挖 / 置顶 / 删除。绝对定位脱离 3 列网格流，
+   padding-right 按三个按钮的实际宽度预留，不挤压正文。 */
+.hard-row.pin-row { padding-right: 196px; }
+.hard-actions {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center; gap: 6px;
+}
+.ir-act, .ir-del {
+  padding: 5px 10px; border-radius: 8px; cursor: pointer; font-size: 12px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  transition: background .12s, border-color .12s, color .12s, opacity .12s;
+}
+.ir-act:hover:not(:disabled), .ir-del:hover:not(:disabled) { border-color: var(--faint); }
+.ir-act:disabled, .ir-del:disabled { opacity: .55; cursor: not-allowed; }
+.ir-del { border-color: color-mix(in oklch, #e0483c 45%, var(--border)); color: #c0392b; }
+.ir-del:hover:not(:disabled) { background: rgba(224, 72, 60, 0.12); }
+
+.btn-danger {
+  padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  border: 1px solid color-mix(in oklch, #e0483c 45%, var(--border));
+  background: var(--surface); color: #c0392b;
+  transition: background .12s, border-color .12s, opacity .12s;
+}
+.btn-danger:hover:not(:disabled) { background: rgba(224, 72, 60, 0.12); }
+.btn-danger:disabled { opacity: .55; cursor: not-allowed; }
+
+/* 硬骨头库弹窗：删除二次确认 / 深挖指令输入 */
+.hard-modal-mask {
+  position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
+  padding: 18px; background: rgba(0, 0, 0, 0.38);
+}
+.hard-modal {
+  width: min(480px, 100%); display: grid; gap: 10px;
+  padding: 18px 18px 16px; border-radius: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+}
+.hard-modal h3 { margin: 0; font-size: 15.5px; color: var(--ink); }
+.modal-line { margin: 0; font-size: 13.5px; color: var(--ink); }
+.modal-warn {
+  margin: 0; padding: 9px 11px; border-radius: 9px; font-size: 12.8px; line-height: 1.6;
+  color: #c0392b; background: rgba(224, 72, 60, 0.10);
+  border: 1px solid color-mix(in oklch, #e0483c 35%, var(--border));
+}
+.modal-note { margin: 0; font-size: 12.5px; line-height: 1.65; color: var(--muted); }
+.modal-field { display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.modal-field textarea {
+  width: 100%; padding: 9px 10px; border-radius: 9px; resize: vertical;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--ink);
+  font: inherit; font-size: 13px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+
+@media (max-width: 720px) {
+  .hard-row.pin-row { padding-right: 14px; padding-bottom: 46px; }
+  .hard-actions { top: auto; bottom: 10px; right: 14px; transform: none; }
+}
