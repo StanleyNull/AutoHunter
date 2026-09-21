@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dto import SettingsUpdateRequest
 from app.config import LLMConfig
 from app.db.session import get_session
-from app.llm.client import _is_kimi_coding_endpoint, _resolve_user_agent, llm_request_url
+from app.llm.client import (
+    _is_kimi_coding_endpoint,
+    _resolve_user_agent,
+    extra_llm_headers,
+    llm_request_url,
+)
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
 from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
 from app.ui_prefs import (
@@ -299,6 +304,7 @@ async def _test_llm_one(name: str, provider: LLMConfig) -> dict:
         "Accept": "application/json",
         "User-Agent": _resolve_user_agent(provider.model, provider.base_url),
     }
+    headers.update(extra_llm_headers())
     payload = {
         "model": provider.model,
         "messages": [{"role": "user", "content": "Reply with exactly: ok"}],

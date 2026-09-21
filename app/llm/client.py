@@ -178,6 +178,37 @@ def _stainless_omit_value():
         return ""
 
 
+def _parse_extra_headers(raw: str) -> dict[str, str]:
+    """解析 LLM_EXTRA_HEADERS：JSON 对象，或 key:value[,key:value] 简写。
+
+    用途：给上游网关补自定义请求头。例如 opencode Go（https://opencode.ai/zen/go/v1）
+    要求每个请求都带 x-opencode-session，缺了就回 HTTP 400 MissingSessionID。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        return {str(k).strip(): str(v) for k, v in data.items() if str(k).strip()}
+    out: dict[str, str] = {}
+    for chunk in raw.split(","):
+        if ":" not in chunk:
+            continue
+        key, value = chunk.split(":", 1)
+        key, value = key.strip(), value.strip()
+        if key:
+            out[key] = value
+    return out
+
+
+def extra_llm_headers() -> dict[str, str]:
+    """LLM_EXTRA_HEADERS 环境变量解析出的自定义头（每次调用重读，便于热改）。"""
+    return _parse_extra_headers(os.environ.get("LLM_EXTRA_HEADERS", ""))
+
+
 def _llm_default_headers(model: str, base_url: str) -> dict[str, Any]:
     """OpenAI SDK 的 default_headers：覆盖 UA + 抹掉暴露 SDK 的 x-stainless-* 头。
 
@@ -194,6 +225,8 @@ def _llm_default_headers(model: str, base_url: str) -> dict[str, Any]:
         "X-Stainless-Async", "X-Stainless-Retry-Count", "X-Stainless-Read-Timeout",
     ):
         headers[h] = omit
+    # 自定义头最后合并，允许覆盖 UA 等默认值（例如 opencode Go 的 x-opencode-session）。
+    headers.update(extra_llm_headers())
     return headers
 
 
@@ -1578,6 +1611,7 @@ class LLMClient:
             # 换 UA，绕过中转/2api WAF 对 SDK UA 的 403 封禁。
             "User-Agent": _resolve_user_agent(self.config.model, self.config.base_url),
         }
+        headers.update(extra_llm_headers())
         return payload, headers
 
     @staticmethod

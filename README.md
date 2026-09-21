@@ -369,6 +369,8 @@ body="管理" && org="China Education and Research Network Center"
 | `LLM_BASE_URL` | 默认 DeepSeek | 模型接口地址（OpenAI 兼容一般含 `/v1`） | 默认 `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 默认 deepseek-chat | 模型名（推荐支持 tool calling；不支持也能用，见 `AUTOHUNTER_TOOL_COMPAT`） | 按厂商填写 |
 | `LLM_PROTOCOL` | 默认 `auto` | `auto` / `openai_chat` / `anthropic_messages` | 控制台「设置」也可改 |
+| `LLM_USER_AGENT` | 可选 | LLM 请求 UA：`auto` 按模型族自动伪装 / `browser` 伪装 Chrome / 任意自定义串 | 中转站按 SDK UA 拦 403 时覆盖 |
+| `LLM_EXTRA_HEADERS` | 可选 | 追加自定义请求头，JSON 对象或 `key:value[,key:value]`；OpenAI / Anthropic / 「测试连接」都生效 | 如 opencode Go 要求每会话带 `x-opencode-session` |
 | `AUTOHUNTER_TOOL_COMPAT` | 默认 `auto` | 工具调用兼容：`auto` 原生优先、硬报错自动切提示词模拟；`prompt` 强制模拟（哑模型用）；`native` 仅原生 | 模型不支持 function calling 时改 `prompt` |
 | `FOFA_KEY` | ⭐ 推荐 | 资产测绘，自动搜集目标 | [FOFA 个人中心](https://fofa.info/) |
 | `FOFA_BASE_URL` | 可选 | 自定义 FOFA API 端点（私有/镜像/代理） | 默认 `https://fofa.info` |
