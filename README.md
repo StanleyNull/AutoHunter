@@ -119,6 +119,13 @@
         <sub><b>LLYHXX</b></sub>
       </a><br /><sup>List Pinning</sup>
     </td>
+    <td align="center" width="100">
+  <a href="https://github.com/Windsweet97">
+    <img src="https://github.com/Windsweet97.png" width="72" height="72" alt="Windsweet97" /><br />
+    <sub><b>Windsweet97</b></sub>
+  </a><br />
+  <sup>Helper</sup>
+</td>
   </tr>
 </table>
 
