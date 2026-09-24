@@ -48,6 +48,7 @@ from app.settings_service import (
     llm_client_for_task,
     resolve_engine_config,
     resolve_engine_name,
+    resolve_llm_providers,
     resolve_llm_runtime_mode,
     resolve_worker_prompt_version,
 )
@@ -151,6 +152,26 @@ KILLSWEEP_DEDUP_SCAN_LIMIT = int(os.environ.get("KILLSWEEP_DEDUP_SCAN_LIMIT", "2
 # 同一目标因临时 LLM 错误回队的最大次数（内存级，不耗 retry_count）。
 # 超过则置 dead 收敛，避免模型持续抽风时目标无限回队空转。
 MAX_TRANSIENT_LLM_REQUEUE = int(os.environ.get("MAX_TRANSIENT_LLM_REQUEUE", "5"))
+# 「端侧基础设施问题」（LLM 端点/网络/网关/401/400 配置错）判定：这类失败不是目标的锅，
+# 目标没被真正挖过，不该进硬骨头库污染回捞判断（#63）。
+# failure_kind 由 worker 在 LLMError 上原样带出，是唯一可靠的归因信号。
+_INFRA_FAILURE_KINDS = frozenset({
+    "provider_cooldown", "rate_limit", "timeout", "network", "upstream",
+    "unknown", "blocked", "invalid_request", "auth",
+    "model_behavior", "tool_argument",
+})
+# worker 明确写明「目标不可稳定验证」的收敛文案（不携带 failure_kind，只能按文本兜底）。
+_INFRA_SUMMARY_MARKERS = (
+    "网络/超时失败", "目标当前不可稳定验证",
+)
+# 同一目标因基础设施问题回队的最大次数（内存级，不耗 retry_count）。
+# 超了也不置 dead，而是转入 stalled 停摆态：等端点/网络恢复后自动回队继续挖。
+MAX_INFRA_REQUEUE = int(os.environ.get("MAX_INFRA_REQUEUE", "8"))
+# 单次把 stalled 目标放回队列的最大条数，避免端点刚恢复时一次性洪水式派发。
+STALLED_RELEASE_BATCH = int(os.environ.get("STALLED_RELEASE_BATCH", "20"))
+# 周期性放行停摆目标的最小间隔（秒）：端点池只要还有可用端点就值得再试一轮，
+# 但不能每个 tick（3s）都试，否则端点还没恢复就会把目标来回空转。
+STALLED_RELEASE_INTERVAL = float(os.environ.get("STALLED_RELEASE_INTERVAL", "300"))
 # FOFA 账号无效（key 失效/过期/无 F 点/权限）连续次数达到此阈值 → 自动暂停任务，
 # 避免持续空转刷无效请求。0 表示禁用该保护。
 FOFA_AUTH_FAIL_PAUSE_THRESHOLD = int(os.environ.get("FOFA_AUTH_FAIL_PAUSE_THRESHOLD", "3"))
@@ -408,6 +429,8 @@ class TaskRunner:
         self._llm_provider_retry_after: dict[str, float] = {}
         # 全池不可用是任务级条件；冷却期间不要让其它 queued 目标逐个启动再回队。
         self._llm_pool_retry_after: float = 0
+        # 停摆目标下一次允许放行的时间（loop.time()），避免每个 tick 都去试。
+        self._stalled_release_after: float = 0
 
     def live_workers(self) -> list[dict]:
         return list(self._live.values())
@@ -662,7 +685,11 @@ class TaskRunner:
             )
 
     async def recover(self, session: AsyncSession) -> None:
-        """重启恢复：assigned/scanning → queued（超重试上限则转 dead 硬骨头库）；不动已有 Finding/Review。"""
+        """重启恢复：assigned/scanning → queued（超重试上限则转 dead 硬骨头库）；不动已有 Finding/Review。
+
+        基础设施停摆（stalled）的目标也在这里放回队列：任务重启通常意味着用户已经处理过
+        模型/网络问题，不放行的话它们会永久卡在 stalled（进程内的冷却标记已经丢了）。
+        """
         rows = (await session.execute(
             select(Target).where(
                 Target.task_id == self.task_id, Target.status.in_(["assigned", "scanning"])
@@ -675,11 +702,13 @@ class TaskRunner:
                 recovered += 1
             else:
                 killed += 1
+        released = await self._release_stalled_targets(session)
         await session.commit()
         await self._log(
             session, "orchestrator", "recover",
-            f"重启恢复：{recovered} 个进行中目标回退队列，{killed} 个超过重试上限转入硬骨头库",
-            recovered=recovered, killed=killed,
+            f"重启恢复：{recovered} 个进行中目标回退队列，{killed} 个超过重试上限转入硬骨头库"
+            + (f"，{released} 个基础设施停摆目标放回队列" if released else ""),
+            recovered=recovered, killed=killed, released=released,
         )
 
     async def run_forever(self) -> None:
@@ -711,6 +740,8 @@ class TaskRunner:
             if not task or task.status in ("paused", "stopped"):
                 return
             self._is_enterprise = is_enterprise_src(task.src_type)
+            # 停摆目标的自愈：端点池有可用端点时定期放它们回队列（#63）。
+            await self._maybe_release_stalled(session, task)
 
             # 先清掉被 stop/取消打断留下的「正在入队 x/y」中间态，避免看板永久假卡死。
             # 必须放在派发/搜集之前：_pop_queued 探活可能很慢，不能等 refill 才清。
@@ -877,7 +908,10 @@ class TaskRunner:
         now = loop.time()
         if self._llm_pool_retry_after > now:
             return None
-        self._llm_pool_retry_after = 0
+        if self._llm_pool_retry_after:
+            # 端点池刚从「全池冷却」恢复：把因基础设施问题停摆的目标放回队列。
+            self._llm_pool_retry_after = 0
+            await self._release_stalled_targets(session)
         if self._queue_prefilter_retry_after:
             self._queue_prefilter_retry_after = {
                 tid: until for tid, until in self._queue_prefilter_retry_after.items() if until > now
@@ -1428,6 +1462,96 @@ class TaskRunner:
         self._escalation_inflight.clear()
         self._escalation_cancel_events.clear()
         self._live_escalations.clear()
+
+    @staticmethod
+    def _is_infra_failure(result: dict) -> bool:
+        """一次 worker 失败是否属于「端侧基础设施问题」（模型/网络/网关/配置）。
+
+        这类失败意味着目标根本没被真正挖过——失败跟目标自身无关。把它当 dead 收进
+        硬骨头库，会让用户误判为「这个站打不动/垃圾资产」，属于典型的误传（#63）。
+        """
+        kind = str(result.get("failure_kind") or "").strip()
+        if kind in _INFRA_FAILURE_KINDS:
+            return True
+        summary = str(result.get("summary") or "")
+        if summary and any(m in summary for m in _INFRA_SUMMARY_MARKERS):
+            return True
+        if not kind:
+            return False
+        return TaskRunner._is_transient_worker_error(f"{result.get('error') or ''} {kind}")
+
+    def _park_target_for_infra(self, tgt: Target, reason: str) -> None:
+        """基础设施问题且回队预算耗尽：转入 stalled 停摆态，而不是 dead。
+
+        stalled 不在硬骨头库（dead/skipped）里、不占已完成统计、不消耗 retry_count，
+        端点恢复后由 _release_stalled_targets 自动放回队列继续挖。
+        """
+        tgt.status = "stalled"
+        tgt.verdict = ""
+        tgt.assigned_worker = ""
+        tgt.heartbeat_at = None
+        tgt.dead_reason = ""
+        tgt.last_error = reason[:500]
+
+    @staticmethod
+    def _pool_has_usable_endpoint(providers: list) -> bool:
+        """端点池里是否还有「没在冷却/没判死」的端点。
+
+        健康快照里没有记录的端点视为可用（还没失败过）。全部处于 cooldown/failed
+        时才返回 False——这时把停摆目标放回队列只会让它们白跑一轮。
+        """
+        if not providers:
+            return False
+        from app.llm.health import provider_ref, snapshot
+
+        state = snapshot()
+        for provider in providers:
+            row = state.get(provider_ref(
+                provider.base_url, provider.model, provider.api_key, provider.protocol
+            )) or {}
+            if str(row.get("status") or "ok") not in ("cooldown", "failed"):
+                return True
+        return False
+
+    async def _maybe_release_stalled(self, session: AsyncSession, task: Task) -> None:
+        """周期性给停摆目标一次机会：端点池只要还有可用端点就放它们回队列。"""
+        now = asyncio.get_running_loop().time()
+        if now < self._stalled_release_after:
+            return
+        self._stalled_release_after = now + STALLED_RELEASE_INTERVAL
+        if self._llm_pool_retry_after > now:
+            return
+        try:
+            providers = resolve_llm_providers(task)
+        except Exception:
+            providers = []
+        if not self._pool_has_usable_endpoint(providers):
+            return
+        await self._release_stalled_targets(session)
+
+    async def _release_stalled_targets(self, session: AsyncSession) -> int:
+        """端点/网络恢复后，把停摆的目标放回队列。返回实际放行条数。"""
+        rows = (await session.execute(
+            select(Target)
+            .where(Target.task_id == self.task_id, Target.status == "stalled")
+            .order_by(Target.priority_score.desc(), Target.created_at)
+            .limit(STALLED_RELEASE_BATCH)
+        )).scalars().all()
+        if not rows:
+            return 0
+        for tgt in rows:
+            tgt.status = "queued"
+            tgt.verdict = ""
+            tgt.assigned_worker = ""
+            tgt.heartbeat_at = None
+            self._transient_llm_requeue.pop(tgt.id, None)
+        await session.commit()
+        await self._log(
+            session, "orchestrator", "stalled_released",
+            f"LLM 端点/网络已恢复，{len(rows)} 个停摆目标已放回队列",
+            level="info", count=len(rows),
+        )
+        return len(rows)
 
     def _queue_or_dead_after_attempt(self, tgt: Target, reason: str) -> bool:
         """失败/恢复后的统一回队策略。返回 True=回队，False=终态 dead。
@@ -2508,6 +2632,18 @@ class TaskRunner:
                 and not findings
                 and self._is_quota_error(error_text)
             )
+            # 基础设施类失败（模型/网络/网关/鉴权配置）：目标没被真正挖过，
+            # 失败跟目标无关。只允许回队或停摆，绝不允许进硬骨头库（#63）。
+            # worker 收敛文案里明确写了「网络/超时失败」的，同样按基础设施处理
+            # （那种收敛走 no_vuln 出口，不携带 failure_kind，只能按文本识别）。
+            infra_summary = not findings and any(m in summary_text for m in _INFRA_SUMMARY_MARKERS)
+            infra_failure = infra_summary or (
+                verdict == Verdict.error.value
+                and not findings
+                and not quota_llm_error
+                and not provider_cooldown
+                and self._is_infra_failure(result)
+            )
             transient_llm_error = (
                 verdict == Verdict.error.value
                 and not findings
@@ -2527,6 +2663,10 @@ class TaskRunner:
             worker_requeue_info = None
             # 临时错误回队有上限：模型持续抽风时不能让目标无限空转。
             transient_exhausted = False
+            if infra_failure and not provider_cooldown and not quota_llm_error:
+                # 基础设施失败复用「临时错误回队」通道：不消耗 retry_count、不进终态，
+                # 预算耗尽后再转 stalled 停摆（而不是 dead 污染硬骨头库）。
+                transient_llm_error = True
             if transient_llm_error:
                 cnt = self._transient_llm_requeue.get(target_id, 0) + 1
                 self._transient_llm_requeue[target_id] = cnt
@@ -2701,6 +2841,12 @@ class TaskRunner:
                 tgt.heartbeat_at = None
                 tgt.last_error = ""
                 tgt.dead_reason = ""
+            elif verdict == Verdict.no_vuln.value and infra_failure:
+                # worker 因为网络/模型超时自动收敛（文案写明「网络/超时失败」）：这类
+                # no_vuln 不是目标真的没洞，而是根本没验证成，不能当硬骨头记进去（#63）。
+                self._park_target_for_infra(
+                    tgt, f"LLM/网络不可用，目标未被真正验证：{summary_text or 'worker 收敛'}"
+                )
             elif verdict == Verdict.no_vuln.value:
                 # 自动深挖回火：worker 突破了入口但没打穿，给了 deepen_lead → 带定向指令再派一轮
                 # （复用 deepen_count + 任务 deepen_cap 防死循环；优先于收敛/重试/dead）。
@@ -2769,6 +2915,11 @@ class TaskRunner:
                     tgt.dead_reason = ""
                     self._apply_resume_context(tgt, result)
                     worker_requeue_info = (tgt.host, "worker 超时", tgt.retry_count)
+                elif infra_failure:
+                    # 超时是模型/网络侧超时（failure_kind=timeout），不是目标打不动。
+                    self._park_target_for_infra(
+                        tgt, f"LLM/网络超时且重试无效：{error_text or summary_text or 'worker 超时'}"
+                    )
                 else:
                     tgt.status = "dead"
                     tgt.assigned_worker = ""
@@ -2776,14 +2927,19 @@ class TaskRunner:
                     tgt.last_error = ""
                     tgt.dead_reason = "超时×重试仍无果"
             elif transient_exhausted:
-                tgt.status = "dead"
-                tgt.assigned_worker = ""
-                tgt.heartbeat_at = None
-                tgt.last_error = error_text[:500]
-                tgt.dead_reason = (
-                    f"LLM 持续异常：临时错误回队已达上限 {MAX_TRANSIENT_LLM_REQUEUE} 次，模型服务可能不稳定"
-                )[:300]
+                # 临时/基础设施错误反复回队仍失败：这是模型服务的问题，不是目标的锅。
+                # 以前这里直接置 dead，把「模型抽风」误传成硬骨头资产（#63）；
+                # 现在转入 stalled，端点恢复后自动回队。
+                self._park_target_for_infra(
+                    tgt,
+                    f"LLM 持续异常：临时错误回队已达上限 "
+                    f"{max(MAX_TRANSIENT_LLM_REQUEUE, MAX_INFRA_REQUEUE)} 次，模型服务可能不稳定",
+                )
                 self._transient_llm_requeue.pop(target_id, None)
+            elif infra_failure:
+                self._park_target_for_infra(
+                    tgt, f"LLM/网络侧失败，尚未重试：{error_text or summary_text or 'worker 异常'}"
+                )
             else:
                 tgt.status = "dead"  # error：置 dead 并记因，避免无声卡死
                 tgt.assigned_worker = ""
@@ -2796,6 +2952,14 @@ class TaskRunner:
             # LLM 端点池：本目标退出冷却态时清理其任务级 retry_after（PR #12）。
             if not provider_cooldown:
                 self._llm_provider_retry_after.pop(target_id, None)
+            # 本轮模型真的动起来了（出结论/出洞）⇒ 端点已可用：顺手把停摆的目标放出去，
+            # 否则没有全池冷却事件时它们会一直挂在 stalled 没人捞（#63 的兜底）。
+            endpoint_proved_healthy = (
+                not infra_failure and not provider_cooldown and not quota_llm_error
+                and (verdict in (Verdict.found.value, Verdict.no_vuln.value) or bool(findings))
+            )
+            if endpoint_proved_healthy:
+                await self._release_stalled_targets(session)
             # 深挖回炉终态救回：目标已置 dead 且本轮没产出可替代的新 finding 时，把被
             # superseded 的深挖前身复位为可人工复审——避免「AI 判定值得深挖」的好线索在
             # 深挖没打穿后永久沉底、对所有人工面板不可见（对应问题：打回深挖未升级丢洞）。
@@ -2834,9 +2998,16 @@ class TaskRunner:
                                 f"目标 {host} {reason}，回队重试(第 {count}/{MAX_RETRY} 次)",
                                 level="info", target_id=target_id, verdict="retry", findings=0)
             elif transient_exhausted:
-                await self._log(session, "worker", "target_done",
-                                f"目标 {tgt.host} 因 LLM 持续异常收敛置 dead（回队达上限 {MAX_TRANSIENT_LLM_REQUEUE} 次）",
-                                level="warn", target_id=target_id, verdict="dead", findings=0)
+                await self._log(session, "worker", "target_stalled",
+                                f"目标 {tgt.host} 因 LLM 持续异常停摆（回队达上限 "
+                                f"{MAX_TRANSIENT_LLM_REQUEUE} 次），已转 stalled 待端点恢复，"
+                                f"不计入硬骨头库",
+                                level="warn", target_id=target_id, verdict="stalled", findings=0)
+            elif infra_failure:
+                await self._log(session, "worker", "target_stalled",
+                                f"目标 {tgt.host} 因 LLM/网络侧失败停摆（非目标问题），"
+                                f"已转 stalled 待端点恢复，不计入硬骨头库",
+                                level="warn", target_id=target_id, verdict="stalled", findings=0)
             else:
                 await self._log(session, "worker", "target_done",
                                 f"目标 {tgt.host} 完成: {verdict}, {len(findings)} 个漏洞",

@@ -210,6 +210,8 @@ class WorkerDirectiveInjectionTests(unittest.TestCase):
         worker.target = "https://example.invalid"
         worker.src_type = "enterprise"
         worker.prompt_version = "test"
+        # run() 会读 src_rules 拼 system prompt；__new__ 跳过 __init__，这里要自己补上。
+        worker.src_rules = ""
         worker.cancel_event = threading.Event()
         worker.findings = []
         worker._finished = None

@@ -2,6 +2,7 @@ import threading
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -31,7 +32,11 @@ class WorkerLlmSoftRetryTest(unittest.TestCase):
         ))
 
     def test_interrupt_keeps_resume_context(self):
-        w = worker_mod.Worker("https://example.com", cancel_event=threading.Event())
+        # 显式给一个假的 llm：Worker() 不传 llm 时会去建真实 LLMClient，没配 Key 就抛异常；
+        # 本用例只验证中断续挖上下文，不需要真客户端。
+        w = worker_mod.Worker(
+            "https://example.com", llm=Mock(), cancel_event=threading.Event()
+        )
 
         class FakeExecutor:
             def export_resume_state(self):

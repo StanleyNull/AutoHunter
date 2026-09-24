@@ -49,7 +49,10 @@ _REQUEST_TIMEOUT = float(os.environ.get("LLM_REQUEST_TIMEOUT", "120"))
 # 失败重试次数（网络抖动/限流/5xx）；默认 4 次（含网络抖动场景多给几次机会）。
 _MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "4"))
 # 端点池：同端点先轻量重试几次再切下一个（避免一次网络毛刺就换模型丢上下文）。
-_POOL_SAME_PROVIDER_RETRIES = int(os.environ.get("LLM_POOL_SAME_PROVIDER_RETRIES", "1"))
+# 默认 0：池里有别的端点时，端点报错就直接换下一个，而不是在这个端点上反复报错/反复
+# 等退避——用户配多个端点就是为了出错能自动换（#64）。确实需要在同端点上重试的部署
+# 可以把 LLM_POOL_SAME_PROVIDER_RETRIES 设成 1 或更大。
+_POOL_SAME_PROVIDER_RETRIES = int(os.environ.get("LLM_POOL_SAME_PROVIDER_RETRIES", "0"))
 _RR_LOCK = threading.Lock()
 # Smooth weighted round-robin current weights, keyed by pool/rank/provider.
 # The state is intentionally process-local; the production process runs one Uvicorn worker.
