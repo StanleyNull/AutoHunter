@@ -44,12 +44,14 @@ from app.events import bus
 from app.maintenance.cleanup import TRACE_FINE_KINDS, prune_target_traces
 from app.engines.meter import persist_engine_usage
 from app.llm.client import LLMClient
+from app.llm.health import provider_slot_available
 from app.llm.usage import persist_usage
 from app.settings_service import (
     llm_client_for_task,
     resolve_engine_config,
     resolve_engine_name,
     resolve_llm_runtime_mode,
+    resolve_llm_providers,
     resolve_worker_prompt_version,
 )
 from app.schemas import Finding as FindingSchema
@@ -409,6 +411,7 @@ class TaskRunner:
         self._llm_provider_retry_after: dict[str, float] = {}
         # 全池不可用是任务级条件；冷却期间不要让其它 queued 目标逐个启动再回队。
         self._llm_pool_retry_after: float = 0
+        self._llm_dispatch_waiting: bool = False
 
     def live_workers(self) -> list[dict]:
         return list(self._live.values())
@@ -883,6 +886,26 @@ class TaskRunner:
             self._llm_provider_retry_after = {
                 tid: until for tid, until in self._llm_provider_retry_after.items() if until > now
             }
+        # A known unavailable model must not start another worker merely to
+        # rediscover the same cooldown after bootstrapping the target session.
+        task = await session.get(Task, self.task_id)
+        providers = [
+            p for p in resolve_llm_providers(task)
+            if p.api_key and getattr(p, "enabled", True)
+        ]
+        if providers and not any(
+            provider_slot_available(p.base_url, p.model, p.api_key, p.protocol)
+            for p in providers
+        ):
+            if not self._llm_dispatch_waiting:
+                await self._log(
+                    session, "orchestrator", "llm_dispatch_wait",
+                    "可用模型正在冷却或进行恢复探测，暂缓派发；目标保留在队列中，恢复后自动继续",
+                    level="warn",
+                )
+            self._llm_dispatch_waiting = True
+            return None
+        self._llm_dispatch_waiting = False
         candidates = (await session.execute(
             select(Target).where(Target.task_id == self.task_id, ready_queue_clause())
             .order_by(Target.priority_score.desc(), Target.created_at).limit(QUEUE_DISPATCH_CANDIDATE_LIMIT)
@@ -2844,7 +2867,11 @@ class TaskRunner:
             elif provider_cooldown:
                 retry_after = max(1, int(result.get("retry_after_seconds") or 0))
                 task_row = await session.get(Task, self.task_id)
-                pool_mode = resolve_llm_runtime_mode(task_row) == "pool"
+                providers = [
+                    p for p in resolve_llm_providers(task_row)
+                    if p.api_key and getattr(p, "enabled", True)
+                ]
+                pool_mode = resolve_llm_runtime_mode(task_row) == "pool" and len(providers) > 1
                 cooldown_label = "模型端点池冷却" if pool_mode else "LLM 暂时不可用"
                 await self._log(session, "worker", "target_requeued",
                                 f"目标 {tgt.host} 因{cooldown_label}回队，约 {retry_after} 秒后重试: "
