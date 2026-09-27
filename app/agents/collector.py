@@ -27,6 +27,7 @@ from app.agents.manual_targets import parse_manual_targets
 from app.agents.prompts import is_enterprise_src
 from app.agents.scope_anchors import extract_enterprise_domains, extract_scope_anchors
 from app.db.models import Target, Task
+from app.queue_policy import ready_queue_clause
 from app.engines import get_engine, QuakeRateLimitError
 from app.engines.translator import (
     looks_like_fofa_syntax,
@@ -318,7 +319,7 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     """补充目标。返回新入队数量。队列够则不补。"""
     queued = (await session.execute(
         select(func.count()).select_from(Target).where(
-            Target.task_id == task.id, Target.status == "queued")
+            Target.task_id == task.id, ready_queue_clause())
     )).scalar() or 0
     if queued >= low_watermark:
         # 上次大批量入队若被 stop/取消打断，看板会永久停在「正在入队 8000/8025」。
@@ -748,6 +749,7 @@ async def _fofa_collect(
         _is_daily_limit = any(m in err_lower for m in (
             "820041", "每日", "上限", "每天限制", "daily limit", "daily_limit",
             "exceeded daily", "daily quota", "每天额度",
+            "今日调用次数已用完", "今日查询次数已用完",
         ))
         if _is_daily_limit:
             dl_count = int(cfg.get("daily_limit_count", 0)) + 1

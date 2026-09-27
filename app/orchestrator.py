@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from sqlalchemy import select
@@ -39,6 +39,7 @@ from app.agent_runtime import (
 )
 from app.db.models import CST, Finding, Killsweep, Review, Target, Task, TaskEvent
 from app.db.session import SessionLocal
+from app.queue_policy import ready_queue_clause
 from app.events import bus
 from app.maintenance.cleanup import TRACE_FINE_KINDS, prune_target_traces
 from app.engines.meter import persist_engine_usage
@@ -168,6 +169,7 @@ QUEUE_LIVENESS_CACHE_TTL = float(os.environ.get("QUEUE_LIVENESS_CACHE_TTL", "300
 QUEUE_LOW_SUCCESS_SKIP = os.environ.get("QUEUE_LOW_SUCCESS_SKIP", "1").lower() not in {"0", "false", "no"}
 QUEUE_LOW_SUCCESS_SCORE_THRESHOLD = float(os.environ.get("QUEUE_LOW_SUCCESS_SCORE_THRESHOLD", "-3.5"))
 QUEUE_TRANSIENT_PREFILTER_COOLDOWN = float(os.environ.get("QUEUE_TRANSIENT_PREFILTER_COOLDOWN", "900"))
+QUEUE_TRANSIENT_PREFILTER_MAX_FAILURES = max(1, int(os.environ.get("QUEUE_TRANSIENT_PREFILTER_MAX_FAILURES", "3")))
 QUEUE_DISPATCH_CANDIDATE_LIMIT = max(30, int(os.environ.get("QUEUE_DISPATCH_CANDIDATE_LIMIT", "120")))
 # 同款簇冷却只需要「在途 + 最近死/跳过」，禁止每次派发把任务全表 dead/skipped 灌进内存。
 QUEUE_CLUSTER_HISTORY_LIMIT = max(100, int(os.environ.get("QUEUE_CLUSTER_HISTORY_LIMIT", "800")))
@@ -402,8 +404,7 @@ class TaskRunner:
         self._is_enterprise: bool = False
         # 派发前探活缓存：刚确认存活的 queued 目标短时间内不重复发包。
         self._queue_liveness_ok_until: dict[str, float] = {}
-        # 5xx 等临时预筛失败不进终态 skipped，只做短冷却，稍后再探。
-        self._queue_prefilter_retry_after: dict[str, float] = {}
+        # 5xx 临时预筛的计数/冷却保存在 Target，进程重启不重置重试预算。
         # 端点池全部冷却时按 worker 返回的 retry-after 暂缓该目标，不消耗普通重试次数。
         self._llm_provider_retry_after: dict[str, float] = {}
         # 全池不可用是任务级条件；冷却期间不要让其它 queued 目标逐个启动再回队。
@@ -878,16 +879,12 @@ class TaskRunner:
         if self._llm_pool_retry_after > now:
             return None
         self._llm_pool_retry_after = 0
-        if self._queue_prefilter_retry_after:
-            self._queue_prefilter_retry_after = {
-                tid: until for tid, until in self._queue_prefilter_retry_after.items() if until > now
-            }
         if self._llm_provider_retry_after:
             self._llm_provider_retry_after = {
                 tid: until for tid, until in self._llm_provider_retry_after.items() if until > now
             }
         candidates = (await session.execute(
-            select(Target).where(Target.task_id == self.task_id, Target.status == "queued")
+            select(Target).where(Target.task_id == self.task_id, ready_queue_clause())
             .order_by(Target.priority_score.desc(), Target.created_at).limit(QUEUE_DISPATCH_CANDIDATE_LIMIT)
         )).scalars().all()
         if not candidates:
@@ -933,8 +930,6 @@ class TaskRunner:
         skipped_cooldown = 0
         eligible: list[Target] = []
         for target in candidates:
-            if self._queue_prefilter_retry_after.get(target.id, 0) > now:
-                continue
             if self._llm_provider_retry_after.get(target.id, 0) > now:
                 continue
             key = target_cluster.target_cluster_key(target.host or target.url, target.title, target.org)
@@ -973,6 +968,7 @@ class TaskRunner:
         skipped_low_success = 0
         skipped_loopback = 0
         deferred_transient = 0
+        exhausted_transient = 0
         selected: tuple[Target, dict] | None = None
         # 小批探活：不必每次把最多 120 个候选全探完才派发一个 worker。
         # 高分优先的小批里一旦找到可打目标就立刻返回，剩余候选留给下一轮，
@@ -983,7 +979,7 @@ class TaskRunner:
             for target in batch:
                 probe = liveness.get(target.id) or {"alive": False}
                 if not probe.get("alive"):
-                    self._queue_prefilter_retry_after.pop(target.id, None)
+                    target.prefilter_retry_at = None
                     target.status = "dead"
                     target.verdict = "unreachable"
                     target.assigned_worker = ""
@@ -996,7 +992,7 @@ class TaskRunner:
                 skip_reason = self._low_success_skip_reason(target, probe)
                 if skip_reason:
                     if "回环" in skip_reason:
-                        self._queue_prefilter_retry_after.pop(target.id, None)
+                        target.prefilter_retry_at = None
                         target.status = "skipped"
                         target.verdict = "skip_loopback"
                         target.assigned_worker = ""
@@ -1006,16 +1002,12 @@ class TaskRunner:
                         skipped_loopback += 1
                         continue
                     if self._is_transient_prefilter_reason(skip_reason):
-                        self._queue_prefilter_retry_after[target.id] = now + QUEUE_TRANSIENT_PREFILTER_COOLDOWN
-                        target.status = "queued"
-                        target.verdict = ""
-                        target.assigned_worker = ""
-                        target.heartbeat_at = None
-                        target.last_error = skip_reason[:500]
-                        target.dead_reason = ""
-                        deferred_transient += 1
+                        if self._defer_transient_prefilter(target, skip_reason):
+                            deferred_transient += 1
+                        else:
+                            exhausted_transient += 1
                         continue
-                    self._queue_prefilter_retry_after.pop(target.id, None)
+                    target.prefilter_retry_at = None
                     target.status = "skipped"
                     target.verdict = "skip_low_success"
                     target.assigned_worker = ""
@@ -1033,7 +1025,8 @@ class TaskRunner:
 
         if selected:
             target, probe = selected
-            self._queue_prefilter_retry_after.pop(target.id, None)
+            target.prefilter_retry_at = None
+            target.prefilter_fail_count = 0
             target.status = "assigned"
             target.assigned_worker = f"w-{target.id[:8]}"
             target.heartbeat_at = _now()
@@ -1043,6 +1036,7 @@ class TaskRunner:
             if alive_url and alive_url != target.url:
                 target.url = alive_url
             await session.commit()
+            await self._log_prefilter_exhausted(session, exhausted_transient)
             if removed_unreachable:
                 await self._log(
                     session, "orchestrator", "target_unreachable",
@@ -1070,6 +1064,9 @@ class TaskRunner:
                 )
             return target
 
+        if exhausted_transient:
+            await session.commit()
+            await self._log_prefilter_exhausted(session, exhausted_transient)
         if skipped_cooldown:
             await session.commit()
             await self._log(
@@ -1107,6 +1104,37 @@ class TaskRunner:
                 cooldown_seconds=QUEUE_TRANSIENT_PREFILTER_COOLDOWN,
             )
         return None
+
+    @staticmethod
+    def _defer_transient_prefilter(target: Target, reason: str) -> bool:
+        """Bound consecutive prefilter failures without consuming worker retries."""
+        target.prefilter_fail_count = int(target.prefilter_fail_count or 0) + 1
+        target.assigned_worker = ""
+        target.heartbeat_at = None
+        target.last_error = reason[:500]
+        if target.prefilter_fail_count >= QUEUE_TRANSIENT_PREFILTER_MAX_FAILURES:
+            target.status = "dead"
+            target.verdict = "prefilter_retry_exhausted"
+            target.prefilter_retry_at = None
+            target.dead_reason = (
+                f"派发前服务异常连续 {target.prefilter_fail_count} 次，停止自动重试；"
+                f"未完成漏洞检测，服务恢复后可加入手动清单复测。{reason}"
+            )[:300]
+            return False
+        target.status = "queued"
+        target.verdict = ""
+        target.dead_reason = ""
+        target.prefilter_retry_at = _now() + timedelta(seconds=QUEUE_TRANSIENT_PREFILTER_COOLDOWN)
+        return True
+
+    async def _log_prefilter_exhausted(self, session: AsyncSession, count: int) -> None:
+        if count:
+            await self._log(
+                session, "orchestrator", "target_prefilter_exhausted",
+                f"{count} 个目标服务异常重试达到上限，转入硬骨头库（未完成漏洞检测）",
+                level="warn", exhausted=count,
+                max_failures=QUEUE_TRANSIENT_PREFILTER_MAX_FAILURES,
+            )
 
     async def _probe_queued_liveness(self, targets: list[Target]) -> dict[str, dict]:
         if not targets:

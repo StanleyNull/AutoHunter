@@ -98,6 +98,9 @@ class Target(Base):
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     verdict: Mapped[str] = mapped_column(String(20), default="")       # found / no_vuln / error
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 派发前临时服务故障与 worker 重试分开计数；UTC 冷却时间跨重启保留。
+    prefilter_fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    prefilter_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 硬骨头库：仅记录终态 dead/skipped 的原因，便于审计与回捞
     dead_reason: Mapped[str] = mapped_column(String(300), default="")
     # 非终态最近错误：临时 LLM/网络/恢复回队等，不再污染 dead_reason
