@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from app.llm.client import (
     LLMClient,
     LLMError,
+    _apply_emulated_tool_calls,
     _classify_error,
     _coerce_chat_message,
     _strip_thinking_tags,
@@ -34,6 +35,16 @@ class CoerceChatMessageTests(unittest.TestCase):
     def test_dict_message(self):
         out = _coerce_chat_message({"choices": [{"message": {"content": "x", "tool_calls": None}}]})
         self.assertEqual(out.content, "x")
+
+    def test_sdk_wrapper_data_payload(self):
+        # Some DeepSeek-compatible gateways leave ChatCompletion.choices empty
+        # and put the actual OpenAI payload in the SDK object's ``data`` field.
+        resp = SimpleNamespace(
+            choices=None,
+            data={"choices": [{"message": {"content": "wrapped"}}]},
+        )
+        out = _coerce_chat_message(resp)
+        self.assertEqual(out.content, "wrapped")
 
     def test_sse_string(self):
         raw = 'data: {"choices":[{"message":{"content":"sse"}}]}\n\ndata: [DONE]\n'
@@ -108,6 +119,42 @@ class StripThinkingTagsTests(unittest.TestCase):
         self.assertEqual(out.content, '{"verdict":"accepted"}')
         self.assertIs(out.tool_calls, calls)
         self.assertEqual(out.tool_calls[0].function.arguments, args)
+
+    def test_text_tool_call_accepts_argument_alias(self):
+        out = _apply_emulated_tool_calls(SimpleNamespace(
+            content='```json\n{"tool_calls":[{"name":"http_request",'
+                    '"argument":{"url":"https://example.com"}}]}\n```',
+            tool_calls=None,
+        ))
+        self.assertEqual(out.tool_calls[0].function.name, "http_request")
+        self.assertEqual(json.loads(out.tool_calls[0].function.arguments)["url"], "https://example.com")
+
+    def test_dsml_text_tool_call_is_coerced(self):
+        text = (
+            '准备侦察。<｜｜DSML｜｜ calls>\n'
+            '<｜｜DSML｜｜ invoke name="http_request">\n'
+            '<｜｜DSML｜｜ parameter name="method" string="true">GET'
+            '</｜｜DSML｜｜ parameter>\n'
+            '<｜｜DSML｜｜ parameter name="url" string="true">https://example.com'
+            '</｜｜DSML｜｜ parameter>\n'
+            '<｜｜DSML｜｜ /invoke>\n<｜｜DSML｜｜ /calls>'
+        )
+        out = _apply_emulated_tool_calls(SimpleNamespace(content=text, tool_calls=None))
+        self.assertEqual(out.content, "准备侦察。")
+        self.assertEqual(out.tool_calls[0].function.name, "http_request")
+        args = json.loads(out.tool_calls[0].function.arguments)
+        self.assertEqual(args, {"method": "GET", "url": "https://example.com"})
+
+    def test_dsml_json_argument_fallback(self):
+        text = (
+            '<｜｜DSML｜｜ invoke name="http_request">\n'
+            '<｜｜DSML｜｜ parameter name="arguments">'
+            '{"url":"https://example.com","method":"GET"}'
+            '</｜｜DSML｜｜ parameter>'
+        )
+        out = _apply_emulated_tool_calls(SimpleNamespace(content=text, tool_calls=None))
+        self.assertEqual(out.tool_calls[0].function.name, "http_request")
+        self.assertEqual(json.loads(out.tool_calls[0].function.arguments)["method"], "GET")
 
     def test_messages_response_strips_text_keeps_tool_use(self):
         out = LLMClient._parse_messages_response({

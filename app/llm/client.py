@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import uuid
+from html import unescape
 from typing import Any, Callable, Optional
 from types import SimpleNamespace
 
@@ -111,6 +112,7 @@ def _is_kimi_coding_endpoint(base_url: str) -> bool:
     "invalid temperature: only 1 is allowed for this model"。
     """
     return "api.kimi.com/coding" in str(base_url or "").lower()
+
 
 # 浏览器 UA（伪装成 Chrome，绕过 Cloudflare/WAF 对 SDK UA 的封禁）
 _BROWSER_UA = (
@@ -552,7 +554,12 @@ def _extract_emulated_calls(obj: Any) -> list[Any] | None:
         name = fn.get("name") or it.get("name")
         if not name:
             continue
-        args = fn.get("arguments", it.get("arguments", {}))
+        # Some gateways/models use the singular ``argument`` field even though
+        # the OpenAI-compatible shape calls it ``arguments``.
+        args = fn.get(
+            "arguments",
+            fn.get("argument", it.get("arguments", it.get("argument", {}))),
+        )
         args_str = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
         calls.append(SimpleNamespace(
             id="call_" + uuid.uuid4().hex[:24],
@@ -560,6 +567,93 @@ def _extract_emulated_calls(obj: Any) -> list[Any] | None:
             function=SimpleNamespace(name=str(name), arguments=args_str),
         ))
     return calls or None
+
+
+_DSML_TAG_RE = re.compile(r"<[^>\r\n]*DSML[^>\r\n]*>", re.IGNORECASE)
+_DSML_INVOKE_RE = re.compile(
+    r"<[^>\r\n]*DSML[^>\r\n]*\binvoke\b[^>\r\n]*\bname\s*=\s*"
+    r"(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))[^>\r\n]*>",
+    re.IGNORECASE,
+)
+_DSML_PARAM_RE = re.compile(
+    r"<[^>\r\n]*DSML[^>\r\n]*\bparameter\b(?P<attrs>[^>]*)>"
+    r"(?P<value>[\s\S]*?)"
+    r"</[^>\r\n]*DSML[^>\r\n]*\b/?parameter\b[^>\r\n]*>",
+    re.IGNORECASE,
+)
+_DSML_NAME_RE = re.compile(
+    r"\bname\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))", re.IGNORECASE
+)
+
+
+def _parse_dsml_tool_calls(text: str) -> tuple[str, list[Any] | None]:
+    """Parse DeepSeek-style DSML tool calls embedded in assistant text.
+
+    A few OpenAI-compatible gateways expose a thinking model's native call as
+    text such as ``<...DSML... invoke name="http_request">`` rather than
+    populating ``message.tool_calls``.  Keep this parser deliberately narrow:
+    only an ``invoke`` with at least one named parameter becomes a tool call.
+    """
+    if not isinstance(text, str) or "dsml" not in text.lower() or "invoke" not in text.lower():
+        return text, None
+    invokes = list(_DSML_INVOKE_RE.finditer(text))
+    if not invokes:
+        return text, None
+    calls: list[Any] = []
+    for index, match in enumerate(invokes):
+        name = next((part for part in match.groups() if part), "").strip()
+        body_end = invokes[index + 1].start() if index + 1 < len(invokes) else len(text)
+        body = text[match.end():body_end]
+        # DeepSeek's DSML output may be truncated at the closing tag, or put
+        # the arguments in a single JSON parameter instead of one parameter
+        # element per field. Keep the invocation usable in both cases.
+        args: dict[str, Any] = {}
+        for param in _DSML_PARAM_RE.finditer(body):
+            name_match = _DSML_NAME_RE.search(param.group("attrs") or "")
+            if not name_match:
+                continue
+            param_name = next((part for part in name_match.groups() if part), "").strip()
+            raw_value = unescape(param.group("value") or "").strip()
+            attrs = (param.group("attrs") or "").lower()
+            value: Any = raw_value
+            if 'string="true"' not in attrs and "string='true'" not in attrs:
+                try:
+                    value = json.loads(raw_value)
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            if param_name.lower() in {"arguments", "argument", "args", "parameters"} and isinstance(value, dict):
+                args.update(value)
+            else:
+                args[param_name] = value
+        if not args:
+            for raw_json in re.findall(r"\{[\s\S]*?\}", body):
+                try:
+                    parsed = json.loads(raw_json)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(parsed, dict):
+                    args.update(parsed)
+                    break
+        if name:
+            calls.append(SimpleNamespace(
+                id="call_" + uuid.uuid4().hex[:24],
+                type="function",
+                function=SimpleNamespace(
+                    name=name,
+                    arguments=json.dumps(args, ensure_ascii=False),
+                ),
+            ))
+    if not calls:
+        return text, None
+    tags = list(_DSML_TAG_RE.finditer(text))
+    if tags:
+        # Remove the complete DSML block while preserving any prose before or
+        # after it. Parameter values are inside this span and must not leak
+        # into the assistant message as if they were a final answer.
+        content = (text[:tags[0].start()] + text[tags[-1].end():]).strip()
+    else:
+        content = text.strip()
+    return content, calls
 
 
 def _parse_emulated_tool_calls(text: str) -> tuple[str, list[Any] | None]:
@@ -625,7 +719,10 @@ def _strip_message_thinking(msg: Any) -> Any:
 def _apply_emulated_tool_calls(msg: Any) -> Any:
     """把模拟模式下的纯文本响应解析成带 tool_calls 的 message。"""
     text = getattr(msg, "content", None) or ""
-    content, calls = _parse_emulated_tool_calls(text)
+    content, calls = _parse_dsml_tool_calls(text)
+    if calls:
+        return SimpleNamespace(content=content, tool_calls=calls, role="assistant")
+    content, calls = _parse_emulated_tool_calls(content)
     if calls:
         return SimpleNamespace(content=content, tool_calls=calls, role="assistant")
     return msg
@@ -702,6 +799,13 @@ def _coerce_chat_message(resp: Any) -> Any:
                 "upstream", "LLM 网关返回错误。",
                 detail=_sanitize_error_detail(str(detail)),
             )
+        # Some gateways wrap an otherwise valid Chat Completions payload in a
+        # top-level ``data`` object. Unwrap it before inspecting choices.
+        nested = resp.get("data")
+        if isinstance(nested, dict) and any(
+            key in nested for key in ("choices", "content", "message", "tool_calls", "data")
+        ):
+            return _coerce_chat_message(nested)
         choices = resp.get("choices")
         if isinstance(choices, list) and choices:
             first = choices[0]
@@ -723,6 +827,17 @@ def _coerce_chat_message(resp: Any) -> Any:
             "upstream", "LLM 响应无法解析为 message。",
             detail=_sanitize_error_detail(str(resp)[:400]),
         )
+
+    # A gateway can return an OpenAI SDK ChatCompletion object whose parsed
+    # fields remain empty while the actual payload lives in ``.data``. This is
+    # the shape emitted by several DeepSeek-compatible proxy endpoints.
+    nested = getattr(resp, "data", None)
+    if nested is not None and nested is not resp and (
+        isinstance(nested, (dict, str, bytes, bytearray))
+        or hasattr(nested, "choices")
+        or hasattr(nested, "content")
+    ):
+        return _coerce_chat_message(nested)
 
     # 标准 ChatCompletion 对象
     choices = getattr(resp, "choices", None)
@@ -1343,7 +1458,13 @@ class LLMClient:
 
         def _finish(msg: Any) -> Any:
             msg = _strip_message_thinking(msg)
-            return _apply_emulated_tool_calls(msg) if prompt_tools else msg
+            # Native-capable endpoints occasionally accept ``tools`` but emit
+            # a textual JSON/DSML call instead of message.tool_calls. Parse
+            # that fallback whenever this request actually had tools, while
+            # leaving ordinary no-tool chat responses untouched.
+            if prompt_tools or (tools_orig and not getattr(msg, "tool_calls", None)):
+                return _apply_emulated_tool_calls(msg)
+            return msg
 
         kwargs: dict[str, Any] = {
             "model": self.config.model,
