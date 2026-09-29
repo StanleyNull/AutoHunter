@@ -15,7 +15,9 @@ import asyncio
 import os
 import re
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +60,9 @@ _ENQUEUE_COMMIT_BATCH = max(50, int(os.environ.get("ENQUEUE_COMMIT_BATCH", "200"
 _EMPTY_STREAK_STOP = max(1, int(os.environ.get("FOFA_EMPTY_STREAK_STOP", "5")))
 # 连续 M 条语法都搜空 → 永久停止搜集（仍允许 intent 至少演化一轮）
 _EMPTY_QUERY_STOP = max(1, int(os.environ.get("FOFA_EMPTY_QUERY_STOP", "2")))
+# 网络或代理短时不可达时，先停止消耗后续 FOFA 页；候选资产仍保留在清单。
+_PREFILTER_PAUSE_SECONDS = max(0, int(os.environ.get("FOFA_PREFILTER_PAUSE_SECONDS", "300")))
+_PREFILTER_PAUSE_MIN_CANDIDATES = max(1, int(os.environ.get("FOFA_PREFILTER_PAUSE_MIN_CANDIDATES", "20")))
 ProgressCallback = Callable[[str, str, dict], Awaitable[None]]
 ProgressReporter = Callable[..., Awaitable[None]]
 
@@ -577,6 +582,12 @@ async def _fofa_collect(
             await progress(phase, text, **payload)
 
     cfg = dict(task.fofa_config or {})
+    pause_until = float(cfg.get("prefilter_pause_until") or 0)
+    if pause_until > time.time():
+        return 0
+    if pause_until:
+        cfg.pop("prefilter_pause_until", None)
+        task.fofa_config = {**cfg}
     defaults = resolve_engine_config(task)
     engine_name = defaults["engine"]
     engine = get_engine(engine_name)
@@ -977,12 +988,15 @@ async def _fofa_collect(
 
     # 机械预筛（并发探活，过滤 CDN/死链/纯前端）
     await report("prefilter", f"正在探活预筛 {len(candidates)} 个候选目标", candidates=len(candidates))
-    survivors = await _prefilter(candidates)
+    survivors, rejected = await _prefilter(candidates)
+    rejected_reasons = await _record_prefilter_rejections(session, task.id, rejected)
     await report(
         "scoring",
-        f"预筛后存活 {len(survivors)} 个，正在评分与归属标注",
+        f"预筛后存活 {len(survivors)} 个，另 {len(rejected)} 个范围内资产已记录为未检测；正在评分与归属标注",
         candidates=len(candidates),
         survivors=len(survivors),
+        prefilter_rejected=len(rejected),
+        prefilter_reasons=dict(rejected_reasons),
     )
 
     # 模式化资产归属标注 + 优先级评分（决定 worker 先打谁，不过滤）
@@ -1096,36 +1110,119 @@ async def _fofa_collect(
     cfg.update(current_query=cur_query, cursor=cursor, history=history,
                last_skipped_low=skipped_low, last_skipped_cluster=skipped_cluster,
                last_skipped_filter=skipped_filter,
+               last_prefilter_rejected=len(rejected),
+               last_prefilter_reasons=dict(rejected_reasons),
                last_dropped_out_of_scope=dropped_oos,
                last_target_filter_total=len(survivors),
                last_target_filter_evaluated=filter_evaluated,
                collector_phase="dispatch",
                collector_phase_text=f"目标过滤完成：入队 {added} 个，过滤 {skipped_filter} 个，低分跳过 {skipped_low} 个")
+    transient_rejected = (
+        rejected_reasons["unreachable"] + rejected_reasons["service_error"]
+    )
+    if (
+        _PREFILTER_PAUSE_SECONDS
+        and len(candidates) >= _PREFILTER_PAUSE_MIN_CANDIDATES
+        and transient_rejected * 10 >= len(candidates) * 9
+    ):
+        cfg["prefilter_pause_until"] = time.time() + _PREFILTER_PAUSE_SECONDS
+        cfg["collector_phase"] = "prefilter_cooldown"
+        cfg["collector_phase_text"] = (
+            f"{transient_rejected}/{len(candidates)} 个候选暂时不可达，"
+            f"暂停搜集 {_PREFILTER_PAUSE_SECONDS} 秒，避免继续消耗测绘页"
+        )
     task.fofa_config = cfg
+    if cfg["collector_phase"] == "prefilter_cooldown":
+        await report(
+            "prefilter_cooldown", cfg["collector_phase_text"],
+            candidates=len(candidates), transient_rejected=transient_rejected,
+            pause_seconds=_PREFILTER_PAUSE_SECONDS,
+        )
     return added
 
 
-async def _prefilter(candidates: list[dict]) -> list[dict]:
-    """并发机械预筛，返回存活、值得挖的资产（带首页探测信息供评分复用）。"""
+def _alternate_http_scheme(url: str) -> str:
+    """派发前探活的协议备选；保留原 host、端口和路径。"""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return ""
+        alternate = "https" if parsed.scheme == "http" else "http"
+        return urlunsplit(parsed._replace(scheme=alternate))
+    except ValueError:
+        return ""
+
+
+def _prefilter_reason_code(reason: str) -> str:
+    if reason.startswith("死链/连接超时/无响应"):
+        return "unreachable"
+    if reason.startswith("服务异常("):
+        return "service_error"
+    if reason.startswith("CDN/"):
+        return "cdn_or_storage"
+    if reason.startswith("纯前端"):
+        return "static_site"
+    return "other"
+
+
+async def _record_prefilter_rejections(
+    session: AsyncSession, task_id: str, rejected: list[tuple[dict, str]],
+) -> Counter[str]:
+    """保留范围内测绘资产；预筛不通过不代表资产不存在或无漏洞。"""
+    reasons: Counter[str] = Counter()
+    for index, (candidate, reason) in enumerate(rejected, 1):
+        reasons[_prefilter_reason_code(reason)] += 1
+        session.add(Target(
+            task_id=task_id,
+            url=candidate["url"], host=candidate["host"],
+            ip=candidate.get("ip", ""), org=candidate.get("org", ""),
+            title=candidate.get("title", ""), source="fofa", status="skipped",
+            verdict="skip_prefilter",
+            dead_reason=f"预筛未进入漏洞检测：{reason}"[:300],
+        ))
+        if index % _ENQUEUE_COMMIT_BATCH == 0:
+            await session.commit()
+    if rejected and len(rejected) % _ENQUEUE_COMMIT_BATCH:
+        await session.commit()
+    return reasons
+
+
+async def _prefilter(candidates: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """返回可挖资产和需保留在清单中的预筛排除资产。"""
     if not candidates:
-        return []
+        return [], []
     sem = asyncio.Semaphore(max(1, _PREFILTER_CONCURRENCY))
 
-    async def one(c: dict):
+    async def one(candidate: dict) -> tuple[bool, str, dict]:
         async with sem:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
+            skip, reason, info = await loop.run_in_executor(
                 COLLECTOR_IO_EXECUTOR,
-                lambda: prefilter.should_skip_ex(c["host"], c["url"]),
+                lambda: prefilter.should_skip_ex(candidate["host"], candidate["url"]),
             )
+            if skip and _prefilter_reason_code(reason) in ("unreachable", "service_error"):
+                alternate = _alternate_http_scheme(candidate["url"])
+                if alternate:
+                    alt_skip, alt_reason, alt_info = await loop.run_in_executor(
+                        COLLECTOR_IO_EXECUTOR,
+                        lambda: prefilter.should_skip_ex(candidate["host"], alternate),
+                    )
+                    if not alt_skip:
+                        candidate["url"] = alternate
+                        return False, "", alt_info
+                    reason = f"{reason}；备用协议：{alt_reason}"
+            return skip, reason, info
 
-    results = await asyncio.gather(*[one(c) for c in candidates])
-    out = []
-    for c, (skip, _reason, info) in zip(candidates, results):
-        if not skip:
-            c["_probe"] = info  # 缓存首页探测，避免评分时重复抓
-            out.append(c)
-    return out
+    results = await asyncio.gather(*(one(candidate) for candidate in candidates))
+    survivors: list[dict] = []
+    rejected: list[tuple[dict, str]] = []
+    for candidate, (skip, reason, info) in zip(candidates, results):
+        if skip:
+            rejected.append((candidate, reason))
+        else:
+            candidate["_probe"] = info  # 缓存首页探测，避免评分时重复抓
+            survivors.append(candidate)
+    return survivors, rejected
 
 
 async def _score_targets(survivors: list[dict], src_type: str = "edusrc") -> None:
