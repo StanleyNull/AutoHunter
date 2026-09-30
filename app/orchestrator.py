@@ -57,10 +57,10 @@ from app.schemas import Verdict
 logger = logging.getLogger("autohunter.orchestrator")
 
 
-def _backfill_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str) -> None:
+def _refresh_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str) -> bool:
     """每次派发按当前任务绑定重算，换/撤凭据不能继续使用入队时的旧值。"""
     if not task_obj:
-        return
+        return False
     bindings = getattr(task_obj, "auth_bindings", None) or []
     try:
         from app.agents.manual_targets import parse_manual_targets
@@ -76,8 +76,10 @@ def _backfill_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str)
                 for key in ("session_cookies", "session_headers", "session_cookie_jar"):
                     resume.pop(key, None)
                 tgt.deepen_context = resume
+            return True
     except Exception:
         logger.debug("auth backfill skipped url=%s", fallback_url, exc_info=True)
+    return False
 
 
 def _now_iso() -> str:
@@ -1969,7 +1971,7 @@ class TaskRunner:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
                 self._live[target_id]["score_reason"] = tgt.priority_reason
-                _backfill_target_auth(tgt, task_obj, url)
+                auth_binding_changed = _refresh_target_auth(tgt, task_obj, url)
                 deepen_context = tgt.deepen_context or None
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
                 target_meta = {
@@ -1979,6 +1981,7 @@ class TaskRunner:
                     "leaked_creds": tgt.leaked_creds or [],
                     "auth_context": tgt.auth_context or None,
                     "user_auth": tgt.auth_context or None,
+                    "auth_binding_changed": auth_binding_changed,
                 }
                 if tgt.auth_status:
                     self._live[target_id]["auth"] = (tgt.auth_status or {}).get("status") or ""

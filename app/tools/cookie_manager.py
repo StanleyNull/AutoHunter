@@ -14,6 +14,7 @@ from app.config import worker_config
 
 _EXPIRED_URL = re.compile(r"(?i)(?:/login|/signin|/cas/login|/sso/|/auth/login)")
 _EXPIRED_BODY = re.compile(r"(?i)(请(?:先)?登录|未登录|登录超时|session expired|unauthorized|重新登录)")
+_LEGACY_AUTH_CONTEXT_REF = "legacy"
 
 
 def site_key(url_or_host: str) -> str:
@@ -87,7 +88,7 @@ class CookieSlot:
         self.last_relogin: float = 0.0
         self.login_in_flight = False
         self.loaded = False
-        # None 表示旧格式/尚未绑定；空字符串表示没有用户凭据。
+        # None/legacy 表示凭据归属未知的旧缓存；空字符串表示已明确无用户凭据。
         self.auth_context_ref: str | None = None
 
 
@@ -181,7 +182,9 @@ class CookieManager:
         with slot.cond:
             return bool(slot.cookies or slot.headers)
 
-    def bind_auth_context(self, task_id: str, host: str, ctx: dict | None) -> tuple[bool, str]:
+    def bind_auth_context(
+        self, task_id: str, host: str, ctx: dict | None, *, invalidate_legacy: bool = False,
+    ) -> tuple[bool, str]:
         """用户绑定变化时替换旧会话；相同绑定保留登录后刷新过的 Cookie。"""
         src = dict(ctx or {})
         material = {k: src.get(k) for k in (
@@ -192,7 +195,17 @@ class CookieManager:
             ref = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
         slot = self.slot(task_id, host)
         with slot.cond:
-            changed = slot.auth_context_ref != ref and (slot.auth_context_ref is not None or bool(ref))
+            legacy_unbound = not ref and not invalidate_legacy and (
+                slot.auth_context_ref == _LEGACY_AUTH_CONTEXT_REF
+                or (slot.auth_context_ref is None and bool(
+                    slot.cookies or slot.cookie_jar or slot.headers or slot.creds
+                ))
+            )
+            if legacy_unbound:
+                ref = _LEGACY_AUTH_CONTEXT_REF
+            changed = slot.auth_context_ref != ref and (
+                slot.auth_context_ref is not None or bool(ref) or invalidate_legacy
+            ) and not legacy_unbound
             if changed:
                 slot.cookies.clear()
                 slot.cookie_jar.clear()
@@ -334,8 +347,10 @@ class CookieHub:
         self._mgr = get_manager()
         self._auth_context_ref: str | None = None
 
-    def bind_auth_context(self, ctx: dict | None) -> bool:
-        changed, self._auth_context_ref = self._mgr.bind_auth_context(self.task_id, self.host, ctx)
+    def bind_auth_context(self, ctx: dict | None, *, invalidate_legacy: bool = False) -> bool:
+        changed, self._auth_context_ref = self._mgr.bind_auth_context(
+            self.task_id, self.host, ctx, invalidate_legacy=invalidate_legacy,
+        )
         return changed
 
     def remember_from_auth_context(self, ctx: dict | None) -> None:

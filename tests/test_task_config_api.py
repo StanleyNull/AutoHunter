@@ -83,6 +83,28 @@ class TaskConfigApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/api/tasks/" + task["id"])
         self.assertFalse(response.json()["fofa_config"]["key_set"])
 
+    async def test_edit_after_default_engine_change_binds_only_new_overrides(self):
+        task = await self.create_task(fofa_config={
+            "key": "old-fofa-fixture", "base_url": "https://old-fofa.invalid",
+        })
+        self.settings["defaults"]["engine"] = "quake"
+        response = await self.client.patch("/api/tasks/" + task["id"], json={
+            "engine_config": {"base_url": "https://new-quake.invalid"},
+        })
+        self.assertFalse(response.json()["fofa_config"]["key_set"])
+        response = await self.client.patch("/api/tasks/" + task["id"], json={
+            "fofa_config": {"key": "new-quake-fixture"},
+        })
+        self.assertTrue(response.json()["fofa_config"]["key_set"])
+
+    async def test_fofa_config_edit_after_default_change_binds_new_key(self):
+        task = await self.create_task(fofa_config={"key": "old-fofa-fixture"})
+        self.settings["defaults"]["engine"] = "quake"
+        response = await self.client.patch("/api/tasks/" + task["id"], json={
+            "fofa_config": {"key": "new-quake-fixture"},
+        })
+        self.assertTrue(response.json()["fofa_config"]["key_set"])
+
     async def test_site_recon_toggle_can_be_edited_both_ways(self):
         task = await self.create_task(
             target_source="site", manual_targets=["https://example.invalid"],

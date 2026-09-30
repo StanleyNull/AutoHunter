@@ -56,6 +56,24 @@ def _clamp_task_concurrency(value: int | None, default: int = 3) -> int:
     return max(1, min(n, _TASK_CONCURRENCY_MAX))
 
 
+def _engine_config_for_update(task: Task, bound_engine: str | None = None) -> dict:
+    """先隔离旧引擎配置，再接收当前引擎的显式覆盖。"""
+    cfg = dict(task.fofa_config or {})
+    saved_engine = bound_engine or cfg.get("engine") or task.engine or "fofa"
+    next_engine = resolve_engine_name(task)
+    if saved_engine != next_engine:
+        for key in (
+            "key", "base_url", "current_query", "history", "empty_streak",
+            "empty_query_streak", "fofa_exhausted", "fofa_auth_fail_count",
+            "daily_limit_count", "daily_limit_until", "daily_limit_exhausted",
+            "last_fofa_error",
+        ):
+            cfg.pop(key, None)
+        cfg["cursor"] = 0
+    cfg["engine"] = next_engine
+    return cfg
+
+
 # Activity Stream 历史回放：过滤高频低价值事件（与前端 BoardView 规则对齐）。
 _STREAM_NOISE_KINDS = frozenset({"refill", "cluster_cooldown_skip", "skip", "ping"})
 _STREAM_IMPORTANT_KINDS = frozenset({
@@ -742,22 +760,9 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
             raise HTTPException(400, "target_source 必须是 fofa/manual/both/site")
         task.target_source = req.target_source
     if req.engine is not None:
-        old_engine = resolve_engine_name(task)
+        bound_engine = (task.fofa_config or {}).get("engine") or task.engine or "fofa"
         task.engine = req.engine
-        next_engine = resolve_engine_name(task)
-        if next_engine != old_engine:
-            cfg = dict(task.fofa_config or {})
-            # Key / URL 与翻页状态均属于旧引擎。新请求的覆盖会在下方重新写入。
-            for key in (
-                "key", "base_url", "current_query", "history", "empty_streak",
-                "empty_query_streak", "fofa_exhausted", "fofa_auth_fail_count",
-                "daily_limit_count", "daily_limit_until", "daily_limit_exhausted",
-                "last_fofa_error",
-            ):
-                cfg.pop(key, None)
-            cfg["cursor"] = 0
-            cfg["engine"] = next_engine
-            task.fofa_config = cfg
+        task.fofa_config = _engine_config_for_update(task, bound_engine)
     if req.manual_targets is not None:
         task.manual_targets = clean_manual_target_list(req.manual_targets)
     if req.auth_bindings is not None:
@@ -855,8 +860,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
 
     if req.engine_config is not None:
         ec_patch = req.engine_config.model_dump(exclude_unset=True)
-        ec_cfg = dict(task.fofa_config or {})
-        ec_cfg["engine"] = resolve_engine_name(task)
+        ec_cfg = _engine_config_for_update(task)
         if "key" in ec_patch and str(ec_patch.get("key") or "").strip():
             ec_cfg["key"] = str(ec_patch["key"]).strip()
         if "base_url" in ec_patch and ec_patch["base_url"] is not None:
@@ -865,8 +869,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
 
     if req.fofa_config is not None:
         patch = req.fofa_config.model_dump(exclude_unset=True)
-        cfg = dict(task.fofa_config or {})
-        cfg.setdefault("engine", task.engine or "fofa")
+        cfg = _engine_config_for_update(task)
         if "key" in patch and str(patch.get("key") or "").strip():
             cfg["key"] = str(patch["key"]).strip()
         if "base_url" in patch and patch["base_url"] is not None:

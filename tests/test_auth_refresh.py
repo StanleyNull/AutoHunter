@@ -9,7 +9,7 @@ from app.agents.auth_bootstrap import resolve_auth_context_for_target
 from app.agents.worker import Worker
 from app.db.models import Target, Task
 from app.llm.client import LLMError
-from app.orchestrator import _backfill_target_auth
+from app.orchestrator import _refresh_target_auth
 from app.tools import cookie_manager
 
 
@@ -37,15 +37,16 @@ class AuthRefreshTests(unittest.TestCase):
             {"target": self.url, "cookie": cookie},
         ], self.url, [self.url])
 
-    def run_worker(self, ctx, deepen_context=None):
+    def run_worker(self, ctx, deepen_context=None, binding_changed=False):
         worker = Worker(self.url, task_id="fixture", llm=StopLLM(),
-                        target_meta={"auth_context": ctx}, deepen_context=deepen_context)
+                        target_meta={"auth_context": ctx, "auth_binding_changed": binding_changed},
+                        deepen_context=deepen_context)
         return worker, worker.run()
 
     def test_next_dispatch_replaces_saved_target_binding(self):
         task = Task(auth_bindings=[{"target": self.url, "cookie": "session=new"}], manual_targets=[self.url])
         target = Target(url=self.url, auth_context=self.context("session=old"))
-        _backfill_target_auth(target, task, self.url)
+        _refresh_target_auth(target, task, self.url)
         self.assertEqual(target.auth_context["cookies"], {"session": "new"})
 
     def test_changed_binding_does_not_restore_old_resume_session(self):
@@ -67,7 +68,7 @@ class AuthRefreshTests(unittest.TestCase):
             "source": "llm_interrupt", "session_cookies": {"session": "old"},
             "worker_notes": "fixture notes",
         })
-        _backfill_target_auth(target, Task(auth_bindings=[], manual_targets=[self.url]), self.url)
+        _refresh_target_auth(target, Task(auth_bindings=[], manual_targets=[self.url]), self.url)
         worker, _ = self.run_worker(target.auth_context, target.deepen_context)
         self.assertIsNone(target.auth_context)
         state = worker.executor.export_resume_state()
@@ -84,3 +85,16 @@ class AuthRefreshTests(unittest.TestCase):
         same_worker.executor.session_set(cookies={"session": "late-refreshed"})
         _, final_result = self.run_worker(self.context("session=new"))
         self.assertEqual(final_result.resume_context["session_cookies"], {"session": "new"})
+
+    def test_removing_binding_invalidates_legacy_persisted_session(self):
+        # 模拟旧版本持久化格式：没有 auth_context_ref。
+        hub = cookie_manager.CookieHub("fixture", self.url)
+        hub.remember_from_auth_context(self.context("session=legacy"))
+        cookie_manager._MANAGER = cookie_manager.CookieManager()
+        # 同站未绑定的 worker 先派发，不能把旧会话标成已撤销的新格式。
+        _, sibling_result = self.run_worker(None)
+        self.assertEqual(sibling_result.resume_context["session_cookies"], {"session": "legacy"})
+        target = Target(url=self.url, auth_context=self.context("session=legacy"))
+        changed = _refresh_target_auth(target, Task(auth_bindings=[], manual_targets=[]), self.url)
+        worker, _ = self.run_worker(target.auth_context, binding_changed=changed)
+        self.assertEqual(worker.executor.export_resume_state()["session_cookies"], {})
