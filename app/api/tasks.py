@@ -33,6 +33,7 @@ from app.settings_service import (
     list_available_models,
     normalize_llm_protocol,
     resolve_engine_config,
+    resolve_engine_name,
     resolve_llm_config,
     resolve_llm_providers,
     resolve_llm_runtime_mode,
@@ -438,10 +439,11 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
     # 引擎配置：合并 engine_config 和向后兼容的 fofa_config
     fofa_cfg = req.fofa_config.model_dump(exclude_defaults=True) if req.fofa_config else {}
     eng_cfg = req.engine_config.model_dump(exclude_defaults=True) if req.engine_config else {}
-    if engine_name and engine_name != "fofa" and eng_cfg.get("key"):
+    if eng_cfg.get("key"):
         fofa_cfg["key"] = eng_cfg["key"]
     if eng_cfg.get("base_url"):
         fofa_cfg["base_url"] = eng_cfg["base_url"]
+    fofa_cfg["engine"] = engine_name or resolve_engine_name()
     inherit_global = req.model_config_data.inherit_global
     raw_providers = list(req.model_config_data.providers or [])
     has_providers = bool(raw_providers)
@@ -740,7 +742,22 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
             raise HTTPException(400, "target_source 必须是 fofa/manual/both/site")
         task.target_source = req.target_source
     if req.engine is not None:
+        old_engine = resolve_engine_name(task)
         task.engine = req.engine
+        next_engine = resolve_engine_name(task)
+        if next_engine != old_engine:
+            cfg = dict(task.fofa_config or {})
+            # Key / URL 与翻页状态均属于旧引擎。新请求的覆盖会在下方重新写入。
+            for key in (
+                "key", "base_url", "current_query", "history", "empty_streak",
+                "empty_query_streak", "fofa_exhausted", "fofa_auth_fail_count",
+                "daily_limit_count", "daily_limit_until", "daily_limit_exhausted",
+                "last_fofa_error",
+            ):
+                cfg.pop(key, None)
+            cfg["cursor"] = 0
+            cfg["engine"] = next_engine
+            task.fofa_config = cfg
     if req.manual_targets is not None:
         task.manual_targets = clean_manual_target_list(req.manual_targets)
     if req.auth_bindings is not None:
@@ -839,6 +856,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     if req.engine_config is not None:
         ec_patch = req.engine_config.model_dump(exclude_unset=True)
         ec_cfg = dict(task.fofa_config or {})
+        ec_cfg["engine"] = resolve_engine_name(task)
         if "key" in ec_patch and str(ec_patch.get("key") or "").strip():
             ec_cfg["key"] = str(ec_patch["key"]).strip()
         if "base_url" in ec_patch and ec_patch["base_url"] is not None:
@@ -848,6 +866,7 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
     if req.fofa_config is not None:
         patch = req.fofa_config.model_dump(exclude_unset=True)
         cfg = dict(task.fofa_config or {})
+        cfg.setdefault("engine", task.engine or "fofa")
         if "key" in patch and str(patch.get("key") or "").strip():
             cfg["key"] = str(patch["key"]).strip()
         if "base_url" in patch and patch["base_url"] is not None:
@@ -861,6 +880,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
             if intent_mode not in {"", "syntax", "intent"}:
                 raise HTTPException(400, "intent_mode 必须是空/syntax/intent")
             cfg["intent_mode"] = intent_mode
+        if "skip_site_recon" in patch and patch["skip_site_recon"] is not None:
+            cfg["skip_site_recon"] = bool(patch["skip_site_recon"])
         if req.fofa_query is not None and req.fofa_query != old_query:
             # 与上方 fofa_query 变更清理保持一致（可能已被清过，幂等）
             cfg.pop("current_query", None)

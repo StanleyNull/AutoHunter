@@ -58,20 +58,24 @@ logger = logging.getLogger("autohunter.orchestrator")
 
 
 def _backfill_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str) -> None:
-    """单站派生 Target 可能没拷 auth_context；启动时从任务凭据区回填。"""
-    if tgt.auth_context or not task_obj:
+    """每次派发按当前任务绑定重算，换/撤凭据不能继续使用入队时的旧值。"""
+    if not task_obj:
         return
-    bindings = getattr(task_obj, "auth_bindings", None)
-    if not bindings:
-        return
+    bindings = getattr(task_obj, "auth_bindings", None) or []
     try:
         from app.agents.manual_targets import parse_manual_targets
         manual = [item["url"] for item in parse_manual_targets(task_obj.manual_targets or [])]
         ctx = auth_bootstrap.resolve_auth_context_for_target(
             bindings, tgt.url or fallback_url, manual,
         )
-        if ctx:
+        if tgt.auth_context != ctx:
             tgt.auth_context = ctx
+            tgt.auth_status = None
+            if tgt.deepen_context:
+                resume = dict(tgt.deepen_context)
+                for key in ("session_cookies", "session_headers", "session_cookie_jar"):
+                    resume.pop(key, None)
+                tgt.deepen_context = resume
     except Exception:
         logger.debug("auth backfill skipped url=%s", fallback_url, exc_info=True)
 
@@ -1965,8 +1969,8 @@ class TaskRunner:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
                 self._live[target_id]["score_reason"] = tgt.priority_reason
-                deepen_context = tgt.deepen_context or None
                 _backfill_target_auth(tgt, task_obj, url)
+                deepen_context = tgt.deepen_context or None
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
                 target_meta = {
                     "school": tgt.school or "", "org": tgt.org or "",
