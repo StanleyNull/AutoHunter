@@ -53,6 +53,7 @@ from app.settings_service import (
 )
 from app.schemas import Finding as FindingSchema
 from app.schemas import Verdict
+from app.tools.cookie_manager import CookieHub
 
 logger = logging.getLogger("autohunter.orchestrator")
 
@@ -69,6 +70,10 @@ def _refresh_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str) 
             bindings, tgt.url or fallback_url, manual,
         )
         if tgt.auth_context != ctx:
+            # 必须在提交 Target 新绑定前清理共享缓存；暂停/重派不能丢失撤销操作。
+            CookieHub(task_obj.id or tgt.task_id, tgt.url or fallback_url).bind_auth_context(
+                ctx, invalidate_legacy=True,
+            )
             tgt.auth_context = ctx
             tgt.auth_status = None
             if tgt.deepen_context:
@@ -1971,7 +1976,7 @@ class TaskRunner:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
                 self._live[target_id]["score_reason"] = tgt.priority_reason
-                auth_binding_changed = _refresh_target_auth(tgt, task_obj, url)
+                _refresh_target_auth(tgt, task_obj, url)
                 deepen_context = tgt.deepen_context or None
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
                 target_meta = {
@@ -1981,7 +1986,6 @@ class TaskRunner:
                     "leaked_creds": tgt.leaked_creds or [],
                     "auth_context": tgt.auth_context or None,
                     "user_auth": tgt.auth_context or None,
-                    "auth_binding_changed": auth_binding_changed,
                 }
                 if tgt.auth_status:
                     self._live[target_id]["auth"] = (tgt.auth_status or {}).get("status") or ""

@@ -180,9 +180,7 @@ class Worker:
         if not isinstance(ctx, dict):
             ctx = None
         hub = self._cookie_hub
-        self._auth_context_changed = hub.bind_auth_context(
-            ctx, invalidate_legacy=bool(self.target_meta.get("auth_binding_changed")),
-        )
+        self._auth_context_changed = hub.bind_auth_context(ctx)
         if not ctx and hub.creds().get("username") and hub.creds().get("password"):
             stored = hub.creds()
             ctx = {

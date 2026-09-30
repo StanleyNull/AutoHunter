@@ -37,14 +37,14 @@ class AuthRefreshTests(unittest.TestCase):
             {"target": self.url, "cookie": cookie},
         ], self.url, [self.url])
 
-    def run_worker(self, ctx, deepen_context=None, binding_changed=False):
+    def run_worker(self, ctx, deepen_context=None):
         worker = Worker(self.url, task_id="fixture", llm=StopLLM(),
-                        target_meta={"auth_context": ctx, "auth_binding_changed": binding_changed},
+                        target_meta={"auth_context": ctx},
                         deepen_context=deepen_context)
         return worker, worker.run()
 
     def test_next_dispatch_replaces_saved_target_binding(self):
-        task = Task(auth_bindings=[{"target": self.url, "cookie": "session=new"}], manual_targets=[self.url])
+        task = Task(id="fixture", auth_bindings=[{"target": self.url, "cookie": "session=new"}], manual_targets=[self.url])
         target = Target(url=self.url, auth_context=self.context("session=old"))
         _refresh_target_auth(target, task, self.url)
         self.assertEqual(target.auth_context["cookies"], {"session": "new"})
@@ -68,7 +68,7 @@ class AuthRefreshTests(unittest.TestCase):
             "source": "llm_interrupt", "session_cookies": {"session": "old"},
             "worker_notes": "fixture notes",
         })
-        _refresh_target_auth(target, Task(auth_bindings=[], manual_targets=[self.url]), self.url)
+        _refresh_target_auth(target, Task(id="fixture", auth_bindings=[], manual_targets=[self.url]), self.url)
         worker, _ = self.run_worker(target.auth_context, target.deepen_context)
         self.assertIsNone(target.auth_context)
         state = worker.executor.export_resume_state()
@@ -95,6 +95,19 @@ class AuthRefreshTests(unittest.TestCase):
         _, sibling_result = self.run_worker(None)
         self.assertEqual(sibling_result.resume_context["session_cookies"], {"session": "legacy"})
         target = Target(url=self.url, auth_context=self.context("session=legacy"))
-        changed = _refresh_target_auth(target, Task(auth_bindings=[], manual_targets=[]), self.url)
-        worker, _ = self.run_worker(target.auth_context, binding_changed=changed)
+        _refresh_target_auth(target, Task(id="fixture", auth_bindings=[], manual_targets=[]), self.url)
+        worker, _ = self.run_worker(target.auth_context)
+        self.assertEqual(worker.executor.export_resume_state()["session_cookies"], {})
+
+    def test_revocation_survives_dispatch_without_starting_worker(self):
+        cookie_manager.CookieHub("fixture", self.url).remember_from_auth_context(
+            self.context("session=legacy"),
+        )
+        target = Target(url=self.url, auth_context=self.context("session=legacy"))
+        task = Task(id="fixture", auth_bindings=[], manual_targets=[])
+        self.assertTrue(_refresh_target_auth(target, task, self.url))
+        # 暂停/并发位超时导致 Worker 未启动，重启后再次派发。
+        cookie_manager._MANAGER = cookie_manager.CookieManager()
+        self.assertFalse(_refresh_target_auth(target, task, self.url))
+        worker, _ = self.run_worker(target.auth_context)
         self.assertEqual(worker.executor.export_resume_state()["session_cookies"], {})
