@@ -55,6 +55,8 @@ def _set_sqlite_pragma(dbapi_connection, _connection_record):
 # 轻量自动迁移：新增列时无需删库（demo 友好）
 # (table, column, "TYPE DEFAULT ...")
 _MIGRATIONS = [
+    ("targets", "prefilter_fail_count", "INTEGER DEFAULT 0 NOT NULL"),
+    ("targets", "prefilter_retry_at", "DATETIME"),
     ("reviews", "user_status", "VARCHAR(20) DEFAULT 'pending'"),
     ("reviews", "user_severity", "VARCHAR(10)"),
     ("reviews", "user_notes", "TEXT DEFAULT ''"),

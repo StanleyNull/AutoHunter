@@ -175,6 +175,26 @@ def acquire_provider_slot(
         return True, "ready"
 
 
+def provider_slot_available(
+    base_url: str, model: str, api_key: str = "", protocol: str = "auto"
+) -> bool:
+    """Check admission for a new client without reserving a recovery probe."""
+    ref = provider_ref(base_url, model, api_key, protocol)
+    with _LOCK:
+        row = _HEALTH.get(ref)
+        if not row:
+            return True
+        _refresh_expired_probes(row, _now())
+        if _transport_status(row) in {"failed", "cooldown"}:
+            return False
+        if row.get("half_open_inflight"):
+            return False
+        behavior = str(row.get("behavior_status") or "ok")
+        if behavior in {"failed", "cooldown"}:
+            return False
+        return not (behavior == "half_open" and row.get("behavior_probe_owner"))
+
+
 def provider_retry_after_seconds(
     base_url: str, model: str, api_key: str = "", protocol: str = "auto"
 ) -> int:
@@ -196,7 +216,9 @@ def provider_retry_after_seconds(
         if row.get("behavior_probe_owner"):
             delays.append(min(5.0, float(row.get("behavior_probe_until_ts") or 0) - now_ts))
     positive = [delay for delay in delays if delay > 0]
-    return max(1, int(math.ceil(min(positive)))) if positive else 1
+    # All gates on this endpoint must reopen before it can be retried. The
+    # caller separately chooses the earliest available endpoint in the pool.
+    return max(1, int(math.ceil(max(positive)))) if positive else 1
 
 
 def mark_provider_ok(
