@@ -1499,7 +1499,9 @@ function onDrawerUpdated() {
 function evTime(ev) {
   const d = parseEventTs(ev._displayTs || ev.ts);
   if (!d) return "-";
-  return d.toLocaleTimeString("zh-CN", { hour12: false });
+  const date = `${d.getMonth() + 1}/${d.getDate()}`;
+  const time = d.toLocaleTimeString("zh-CN", { hour12: false });
+  return `${date} ${time}`;
 }
 function parseEventTs(ts) {
   if (!ts) return null;
