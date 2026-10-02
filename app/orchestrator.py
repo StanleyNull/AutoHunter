@@ -53,27 +53,38 @@ from app.settings_service import (
 )
 from app.schemas import Finding as FindingSchema
 from app.schemas import Verdict
+from app.tools.cookie_manager import CookieHub
 
 logger = logging.getLogger("autohunter.orchestrator")
 
 
-def _backfill_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str) -> None:
-    """单站派生 Target 可能没拷 auth_context；启动时从任务凭据区回填。"""
-    if tgt.auth_context or not task_obj:
-        return
-    bindings = getattr(task_obj, "auth_bindings", None)
-    if not bindings:
-        return
+def _refresh_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str) -> bool:
+    """每次派发按当前任务绑定重算，换/撤凭据不能继续使用入队时的旧值。"""
+    if not task_obj:
+        return False
+    bindings = getattr(task_obj, "auth_bindings", None) or []
     try:
         from app.agents.manual_targets import parse_manual_targets
         manual = [item["url"] for item in parse_manual_targets(task_obj.manual_targets or [])]
         ctx = auth_bootstrap.resolve_auth_context_for_target(
             bindings, tgt.url or fallback_url, manual,
         )
-        if ctx:
+        if tgt.auth_context != ctx:
+            # 必须在提交 Target 新绑定前清理共享缓存；暂停/重派不能丢失撤销操作。
+            CookieHub(task_obj.id or tgt.task_id, tgt.url or fallback_url).bind_auth_context(
+                ctx, invalidate_legacy=True,
+            )
             tgt.auth_context = ctx
+            tgt.auth_status = None
+            if tgt.deepen_context:
+                resume = dict(tgt.deepen_context)
+                for key in ("session_cookies", "session_headers", "session_cookie_jar"):
+                    resume.pop(key, None)
+                tgt.deepen_context = resume
+            return True
     except Exception:
         logger.debug("auth backfill skipped url=%s", fallback_url, exc_info=True)
+    return False
 
 
 def _now_iso() -> str:
@@ -1965,8 +1976,8 @@ class TaskRunner:
                 tgt.status = "scanning"
                 self._live[target_id]["score"] = tgt.priority_score
                 self._live[target_id]["score_reason"] = tgt.priority_reason
+                _refresh_target_auth(tgt, task_obj, url)
                 deepen_context = tgt.deepen_context or None
-                _backfill_target_auth(tgt, task_obj, url)
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
                 target_meta = {
                     "school": tgt.school or "", "org": tgt.org or "",

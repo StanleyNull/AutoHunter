@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -58,6 +59,13 @@ def _unlink(path: str) -> None:
         pass
 
 
+def _temporary_archive(prefix: str) -> str:
+    """每个请求独占临时文件；下载显示名仍可使用时间戳。"""
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".tar.gz", dir=bak.staging_dir())
+    os.close(fd)
+    return path
+
+
 def _schedule_restart() -> None:
     def delayed_restart():
         time.sleep(2)
@@ -90,8 +98,7 @@ def export_backup(
     _require_full(request)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     kind = "full" if include_work else "db"
-    stage = bak.staging_dir()
-    tmp_path = str(stage / f"ah-export-{kind}-{ts}.tar.gz")
+    tmp_path = _temporary_archive(f"ah-export-{kind}-")
     try:
         bak.create_archive(tmp_path, include_work=include_work)
     except Exception as exc:  # noqa: BLE001
@@ -134,7 +141,7 @@ def restore_backup(
     if suffix not in {".gz", ".tgz"} and not (file.filename or "").endswith(".tar.gz"):
         # 仍允许无后缀；后面 tar 打开会再校验
         pass
-    tmp_path = str(bak.staging_dir() / f"ah-restore-up-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz")
+    tmp_path = _temporary_archive("ah-restore-up-")
     try:
         with open(tmp_path, "wb") as tmp:
             while True:
