@@ -907,33 +907,58 @@ class LLMClientPoolTests(StateResetMixin, unittest.TestCase):
 
         self.assertEqual(seen_models, [primary.model, primary.model])
 
-    def test_pool_mode_does_not_retry_bad_endpoint_before_failover(self) -> None:
-        primary = _provider("fast-primary")
-        secondary = _provider("fast-secondary")
-        first_client = Mock()
-        second_client = Mock()
-        first_client.chat.completions.create.side_effect = client_module.LLMError(
-            "network", "primary unavailable"
-        )
-        second_client.chat.completions.create.side_effect = client_module.LLMError(
-            "network", "secondary unavailable"
-        )
+    def test_pool_mode_honors_same_provider_retry_budget(self) -> None:
+        for retries, attempts, delays in ((0, 1, []), (1, 2, [1, 1])):
+            with self.subTest(retries=retries):
+                primary = _provider(f"retry-{retries}-primary")
+                secondary = _provider(f"retry-{retries}-secondary")
+                first_client = Mock()
+                second_client = Mock()
+                first_client.chat.completions.create.side_effect = client_module.LLMError(
+                    "network", "primary unavailable"
+                )
+                second_client.chat.completions.create.side_effect = client_module.LLMError(
+                    "network", "secondary unavailable"
+                )
 
+                with (
+                    patch.object(client_module, "_POOL_SAME_PROVIDER_RETRIES", retries),
+                    patch.object(
+                        client_module.LLMClient,
+                        "_build_client",
+                        side_effect=[first_client, second_client],
+                    ),
+                    patch.object(client_module.time, "sleep") as sleep,
+                ):
+                    llm = client_module.LLMClient(providers=[primary, secondary])
+                    with self.assertRaises(client_module.LLMError):
+                        llm.chat([{"role": "user", "content": "mock request"}])
+
+                self.assertEqual(first_client.chat.completions.create.call_count, attempts)
+                self.assertEqual(second_client.chat.completions.create.call_count, attempts)
+                self.assertEqual([args.args[0] for args in sleep.call_args_list], delays)
+                self.assertIs(llm.selected_provider, secondary)
+
+    def test_pool_retry_recovers_without_switching_provider(self) -> None:
+        primary = _provider("recover-primary")
+        secondary = _provider("recover-secondary")
+        sdk_client = Mock()
+        sdk_client.chat.completions.create.side_effect = [
+            client_module.LLMError("network", "transient failure"),
+            {"choices": [{"message": {"role": "assistant", "content": "recovered"}}]},
+        ]
         with (
-            patch.object(
-                client_module.LLMClient,
-                "_build_client",
-                side_effect=[first_client, second_client],
-            ),
+            patch.object(client_module, "_POOL_SAME_PROVIDER_RETRIES", 1),
+            patch.object(client_module.LLMClient, "_build_client", return_value=sdk_client),
             patch.object(client_module.time, "sleep") as sleep,
         ):
             llm = client_module.LLMClient(providers=[primary, secondary])
-            with self.assertRaises(client_module.LLMError):
-                llm.chat([{"role": "user", "content": "mock request"}])
+            response = llm.chat([{"role": "user", "content": "mock request"}])
 
-        self.assertEqual(first_client.chat.completions.create.call_count, 1)
-        self.assertEqual(second_client.chat.completions.create.call_count, 1)
-        sleep.assert_not_called()
+        self.assertEqual(response.content, "recovered")
+        self.assertIs(llm.selected_provider, primary)
+        self.assertEqual(sdk_client.chat.completions.create.call_count, 2)
+        sleep.assert_called_once_with(1)
 
     def test_all_cooling_providers_return_retry_delay_without_calling_network(self) -> None:
         providers = [_provider("cooldown-a"), _provider("cooldown-b")]

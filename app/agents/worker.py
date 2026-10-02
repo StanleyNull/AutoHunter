@@ -210,7 +210,14 @@ class Worker:
                 )
             if result is None and ctx:
                 with hub.login_turn() as action:
-                    if action == "reuse" and hub.apply(self.executor):
+                    if action == "timeout":
+                        result = auth_bootstrap.AuthAttemptResult(
+                            used=False, matched=True, status="unused",
+                            kinds=list(ctx.get("kinds") or []), matched_by="shared",
+                            binding_target="全局会话",
+                            reason="等待共享登录超时，原登录仍在进行；跳过本次登录",
+                        )
+                    elif action == "reuse" and hub.apply(self.executor):
                         names = sorted(getattr(self.executor, "_session_cookies", {}).keys())[:30]
                         result = auth_bootstrap.AuthAttemptResult(
                             used=True, matched=True, status="injected",
