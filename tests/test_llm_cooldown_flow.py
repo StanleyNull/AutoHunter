@@ -18,6 +18,8 @@ class WorkerCooldownTests(unittest.TestCase):
         worker.target = "https://example.invalid"
         worker.src_type = "enterprise"
         worker.prompt_version = "test"
+        # run() 会读 src_rules 拼 system prompt；__new__ 跳过 __init__，这里要自己补上。
+        worker.src_rules = ""
         worker.cancel_event = threading.Event()
         worker.findings = []
         worker._js_tool_enabled = False
@@ -25,7 +27,11 @@ class WorkerCooldownTests(unittest.TestCase):
         worker._duplicate_block = Mock(return_value="")
         worker._emit = Mock()
         worker._route_rounds = Mock(return_value=(1, 1))
-        worker.executor = SimpleNamespace(session_status_block=Mock(return_value=""))
+        worker.executor = SimpleNamespace(
+            session_status_block=Mock(return_value=""),
+            # LLM 中断收尾会导出续挖上下文，夹具要给一个可调用的实现。
+            export_resume_state=Mock(return_value={}),
+        )
         worker.llm = SimpleNamespace(
             chat=Mock(side_effect=LLMError("provider_cooldown", "all providers cooling", retry_after=17))
         )
@@ -67,6 +73,8 @@ class OrchestratorCooldownTests(unittest.IsolatedAsyncioTestCase):
             last_error="",
             dead_reason="",
             retry_count=2,
+            # worker 结果落库时会读任务模型配置来区分「端点池/单端点」的日志文案。
+            model_config_json={},
         )
         session = SimpleNamespace(get=AsyncMock(return_value=target), commit=AsyncMock(), add=Mock())
         runner = TaskRunner("task-1")

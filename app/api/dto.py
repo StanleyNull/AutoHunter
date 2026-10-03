@@ -122,6 +122,8 @@ class TaskStats(BaseModel):
     done: int = 0
     dead: int = 0
     skipped: int = 0
+    # 因 LLM/网络等端侧基础设施问题停摆、等端点恢复后自动回队的目标数（不计入硬骨头库）。
+    stalled: int = 0
     findings_total: int = 0
     pending_review: int = 0
     accepted: int = 0

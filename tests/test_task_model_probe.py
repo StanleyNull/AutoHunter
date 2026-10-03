@@ -113,9 +113,13 @@ class TaskModelProbeTests(unittest.TestCase):
         ):
             result = asyncio.run(tasks_api.probe_task_models("task-1", body, session))
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["models"], [])
-        probe.assert_not_awaited()
+        # 端点变了就不再复用任务里保存的 Key：仍然可以探测（可能能从系统设置里
+        # 解析出该端点的同身份 Key），但绝不能把旧端点的 Key 发过去。
+        self.assertIsNotNone(result)
+        probe.assert_awaited_once()
+        sent = probe.await_args.kwargs
+        self.assertEqual(sent.get("api_key"), "")
+        self.assertNotIn(FAKE_SECRET, json.dumps(sent, default=str))
 
     def test_task_probe_does_not_send_saved_key_to_changed_protocol(self) -> None:
         session = SimpleNamespace(get=AsyncMock(return_value=_task()))
@@ -132,9 +136,12 @@ class TaskModelProbeTests(unittest.TestCase):
         ):
             result = asyncio.run(tasks_api.probe_task_models("task-1", body, session))
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["models"], [])
-        probe.assert_not_awaited()
+        # 同上：协议变了同样不复用旧 Key，只允许用同身份解析出来的 Key（这里为空）。
+        self.assertIsNotNone(result)
+        probe.assert_awaited_once()
+        sent = probe.await_args.kwargs
+        self.assertEqual(sent.get("api_key"), "")
+        self.assertNotIn(FAKE_SECRET, json.dumps(sent, default=str))
 
     def test_task_probe_without_base_uses_bound_task_endpoint(self) -> None:
         session = SimpleNamespace(get=AsyncMock(return_value=_task()))
