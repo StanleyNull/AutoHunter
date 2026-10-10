@@ -977,6 +977,12 @@ class TaskRunner:
         # 小批探活：不必每次把最多 120 个候选全探完才派发一个 worker。
         # 高分优先的小批里一旦找到可打目标就立刻返回，剩余候选留给下一轮，
         # 避免一堆慢/死站把空闲 worker 卡在调度阶段。
+        #
+        # 关键：探活走网络 IO（每个目标最长 QUEUE_LIVENESS_TIMEOUT），期间必须把本
+        # session 的写事务先 commit 收尾。否则事务横跨数秒网络 IO——BEGIN IMMEDIATE 下
+        # 等于把全库写锁占住数秒，其它 worker/心跳/API 全部撞 SQLITE_BUSY。
+        # 目标状态改动都在内存里累积，commit 后事务即结束，后续 await 网络不再持锁。
+        await session.commit()
         for i in range(0, len(eligible), QUEUE_LIVENESS_BATCH_SIZE):
             batch = eligible[i:i + QUEUE_LIVENESS_BATCH_SIZE]
             liveness = await self._probe_queued_liveness(batch)

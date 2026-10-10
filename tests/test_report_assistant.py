@@ -77,38 +77,33 @@ class ReportAssistantTest(unittest.TestCase):
             def chat(self, *_args, **_kwargs):
                 raise LLMError("rate_limit", "LLM 请求被限流，请稍后重试或降低并发。")
 
-        old_llm = findings._llm_for_task
-        findings._llm_for_task = lambda _task: BoomLLM()
-        try:
-            finding = SimpleNamespace(
-                id="f1",
-                target_url="https://example.com",
-                title="t",
-                vuln_type="xss",
-                owner="demo",
-                severity_claimed="高危",
-                description="",
-                affected_scope="",
-                steps=[],
-                poc="",
-                raw_request="",
-                raw_response="",
-                evidence={},
-                kill_chain=[],
-                self_check={},
-                assistant_messages=[],
-            )
-            result = findings._run_report_assistant(
-                f=finding,
-                r=None,
-                task=SimpleNamespace(id="t1", model_config_json={}),
-                req=findings.ReportAssistantRequest(message="帮我看下证据"),
-                cancel_event=threading.Event(),
-            )
-            self.assertIn("限流", result["answer"])
-            self.assertTrue(result["answer"].startswith("报告助手暂不可用："))
-        finally:
-            findings._llm_for_task = old_llm
+        finding = SimpleNamespace(
+            id="f1",
+            target_url="https://example.com",
+            title="t",
+            vuln_type="xss",
+            owner="demo",
+            severity_claimed="高危",
+            description="",
+            affected_scope="",
+            steps=[],
+            poc="",
+            raw_request="",
+            raw_response="",
+            evidence={},
+            kill_chain=[],
+            self_check={},
+            assistant_messages=[],
+        )
+        result = findings._run_report_assistant(
+            f=finding,
+            r=None,
+            llm=BoomLLM(),
+            req=findings.ReportAssistantRequest(message="帮我看下证据"),
+            cancel_event=threading.Event(),
+        )
+        self.assertIn("限流", result["answer"])
+        self.assertTrue(result["answer"].startswith("报告助手暂不可用："))
 
     def test_normalize_proposed_edits_keeps_usable_fields(self):
         out = findings._normalize_proposed_edits({

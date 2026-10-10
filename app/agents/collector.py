@@ -355,6 +355,12 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     cluster_state = await _existing_cluster_state(session, task.id)
     added = 0
 
+    # 关键：到这里为止都是纯读/内存操作（count + 两次 SELECT）。进入下面的网络 IO
+    # （LLM 生成语法、测绘引擎检索、探活预筛、评分）之前，必须先把本 session 的写事务
+    # 收口。BEGIN IMMEDIATE 下写锁持有到事务结束——一旦事务横跨这些网络 await（每个
+    # 数秒），写锁就被占住数十秒，其它 worker/心跳/tick/API 全部撞 SQLITE_BUSY。
+    await session.commit()
+
     # 单站协作：同一个真实 host 按路线拆成多个 worker，不走 FOFA 翻页。
     if task.target_source == "site":
         added += await _site_collect(session, task, progress)
@@ -561,6 +567,9 @@ async def _site_collect(
                 auth_context=_auth_context_for(task, url),
             ))
             added += 1
+        # 每个 host 收口一次，把长事务切成许多短事务（BEGIN IMMEDIATE 下必须如此，
+        # 否则写锁被占满整库）。
+        await session.commit()
     return added
 
 
@@ -642,6 +651,9 @@ async def _fofa_collect(
             task.fofa_config = {**cfg}
             return 0
         prev_query = cur_query
+        # 生成新语法要调 LLM（网络 IO）。BEGIN IMMEDIATE 下写锁持有到 commit，
+        # 必须在跨网络 await 之前把当前事务收口，否则写锁被占满整库。
+        await session.commit()
         new_q, reason = await _resolve_query(task, llm)
         if not new_q:
             cfg["fofa_exhausted"] = True
@@ -707,6 +719,9 @@ async def _fofa_collect(
         cfg.pop("engine_cursor", None)
     cfg["translated_query"] = native_query
 
+    # 测绘引擎检索是网络 IO。BEGIN IMMEDIATE 下写锁持有到 commit，必须在这次跨网络
+    # await 之前收口当前事务，否则写锁被占满整库（其它 worker/心跳/API 全撞 SQLITE_BUSY）。
+    await session.commit()
     try:
         res = await engine.search(
             key,
@@ -976,6 +991,11 @@ async def _fofa_collect(
     cfg.pop("fofa_exhausted", None)
 
     # 机械预筛（并发探活，过滤 CDN/死链/纯前端）
+    #
+    # 关键：预筛/评分/过滤器/归属标注全是网络 IO（每个候选最多数秒），必须在进入之前
+    # 把本 session 的写事务 commit 收尾。BEGIN IMMEDIATE 下写锁持有到事务结束，若让事务
+    # 横跨这几段网络 IO，写锁会被占住数十秒，其它 worker/心跳/tick 全部撞 SQLITE_BUSY。
+    await session.commit()
     await report("prefilter", f"正在探活预筛 {len(candidates)} 个候选目标", candidates=len(candidates))
     survivors = await _prefilter(candidates)
     await report(
@@ -1102,6 +1122,10 @@ async def _fofa_collect(
                collector_phase="dispatch",
                collector_phase_text=f"目标过滤完成：入队 {added} 个，过滤 {skipped_filter} 个，低分跳过 {skipped_low} 个")
     task.fofa_config = cfg
+    # 入队写入收口：把前面累积的目标 INSERT + 配置更新一次性提交。
+    # （上面 report() 的持久化 commit 会顺带提交这些改动；这里显式 commit 是为了
+    #  覆盖 added=0、无 report 的路径，保证返回时事务边界干净。）
+    await session.commit()
     return added
 
 

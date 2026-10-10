@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -20,7 +21,7 @@ from app.agents.deepen import apply_deepen, deepen_cap_for
 from app.agents.write_proof import looks_like_write_op
 from app.settings_service import llm_client_for_task
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
-from app.db.session import get_session
+from app.db.session import SessionLocal, get_session
 from app.events import bus
 from app.killsweep_status import killsweep_retryable
 from app.llm.client import LLMClient, LLMError
@@ -29,6 +30,8 @@ from app.tools.executor import ToolExecutor
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+logger = logging.getLogger("autohunter.api.findings")
 
 router = APIRouter(prefix="/api", tags=["findings"])
 
@@ -689,6 +692,24 @@ def _llm_for_task(task: Task) -> LLMClient:
     return llm_client_for_task(task)
 
 
+def _detach_assistant_inputs(
+    session: AsyncSession,
+    f: Finding,
+    r: Review | None,
+    task: Task,
+) -> None:
+    """在会话释放前，把报告助手要用到的 ORM 对象从 session 摘出（detach）。
+
+    助手最长跑 300s（在线程里），期间绝不能持有 AsyncSession：session 跨线程长时间存活
+    时，配合显式 BEGIN IMMEDIATE 会把写锁占满整库；即使不持锁也会钉住读快照，让 WAL
+    checkpoint 推不动、WAL 无限增长。这里先保证所有要用的列都已加载，再 expunge 摘除；
+    线程里只读这些普通属性，不触发任何懒加载，也不碰 DB。
+    """
+    for obj in (f, r, task):
+        if obj is not None:
+            session.expunge(obj)
+
+
 def _assistant_context(f: Finding, r: Review | None, task: Task | None = None) -> str:
     rv = r
     edits = (rv.user_edits if rv else None) or {}
@@ -919,14 +940,15 @@ def _assistant_unavailable_message(exc: BaseException) -> str:
 def _run_report_assistant(
     f: Finding,
     r: Review | None,
-    task: Task,
+    llm: LLMClient,
     req: ReportAssistantRequest,
     cancel_event: threading.Event,
     emit=None,
 ) -> dict:
     """运行报告助手；emit(event:dict) 可选回调，每完成一步就推一条事件用于流式展示。
 
-    使用与 Worker 相同的 llm_client_for_task：任务/全局端点池、failover、冷却均生效。
+    llm 由调用方在请求协程里构造好再传入：构造 LLMClient 只依赖 task 的普通列，
+    提前到会话释放前完成，线程内就不再触碰任何 ORM/DB 对象（见两个端点里的说明）。
     LLMError（含池内全部端点失败）在此收敛为 answer，避免 SSE 路径把异常吞成「已完成」。
     """
     tool_logs: list[dict] = []
@@ -940,9 +962,8 @@ def _run_report_assistant(
                 pass
 
     try:
-        llm = _llm_for_task(task)
         executor = ToolExecutor(f"report_assistant_{f.target_url or f.id}", cancel_event=cancel_event)
-        messages = _build_assistant_messages(f, r, req, task)
+        messages = _build_assistant_messages(f, r, req, None)
         return _run_report_assistant_loop(llm, executor, messages, tool_logs, cancel_event, _emit)
     except (LLMError, RuntimeError) as e:
         msg = _assistant_unavailable_message(e)
@@ -1119,6 +1140,12 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
     if not persisted:
         persisted = _default_assistant_messages()
     llm_req = ReportAssistantRequest(message=msg, history=persisted[-_ASSISTANT_HISTORY_TURNS:])
+    # LLM 客户端只依赖 task 的普通列，在会话释放前构造好，线程里不再触碰 DB。
+    llm = _llm_for_task(task)
+    # 关键：把三个 ORM 对象从会话摘出并结束事务，线程运行期间（最长 300s）不持有任何
+    # 连接/锁。否则配合显式 BEGIN IMMEDIATE 会把写锁占满整库、并钉住 WAL checkpoint。
+    _detach_assistant_inputs(session, f, r, task)
+    await session.rollback()
 
     loop = asyncio.get_running_loop()
     tool_logs = []
@@ -1129,7 +1156,7 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
     await assistant_sem.acquire()
     try:
         future = loop.run_in_executor(
-            AGENT_EXECUTOR, lambda: _run_report_assistant(f, r, task, llm_req, cancel_event),
+            AGENT_EXECUTOR, lambda: _run_report_assistant(f, r, llm, llm_req, cancel_event),
         )
     except BaseException:
         assistant_sem.release()
@@ -1153,14 +1180,22 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
         assistant_content = _assistant_unavailable_message(e)
     except Exception as e:
         assistant_content = _assistant_unavailable_message(e)
-    f.assistant_messages = _sanitize_assistant_messages(
+    new_messages = _sanitize_assistant_messages(
         persisted + [{"role": "user", "content": msg}, {"role": "assistant", "content": assistant_content}],
     )
-    await session.commit()
+    # 用全新的短会话落库历史（原注入会话已在启动线程前释放）。
+    try:
+        async with SessionLocal() as s2:
+            row = await s2.get(Finding, finding_id)
+            if row is not None:
+                row.assistant_messages = new_messages
+                await s2.commit()
+    except Exception:
+        logger.warning("persist assistant messages failed finding=%s", finding_id, exc_info=True)
     return {
         "answer": assistant_content,
         "tool_logs": tool_logs,
-        "messages": f.assistant_messages,
+        "messages": new_messages,
     }
 
 
@@ -1188,6 +1223,13 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
     if not persisted:
         persisted = _default_assistant_messages()
     llm_req = ReportAssistantRequest(message=msg, history=persisted[-_ASSISTANT_HISTORY_TURNS:])
+    # LLM 客户端只依赖 task 的普通列，在会话释放前构造好，线程里不再触碰 DB。
+    llm = _llm_for_task(task)
+    # 关键：把三个 ORM 对象从会话摘出并结束事务。SSE 会一直挂着连接直到助手跑完
+    # （最长 300s），绝不能在这期间持有 session——否则配合显式 BEGIN IMMEDIATE 会把
+    # 写锁占满整库、并钉住 WAL checkpoint 让 WAL 无限增长。摘出后线程只读普通属性。
+    _detach_assistant_inputs(session, f, r, task)
+    await session.rollback()
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
@@ -1203,7 +1245,7 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
         try:
             future = loop.run_in_executor(
                 AGENT_EXECUTOR,
-                lambda: _run_report_assistant(f, r, task, llm_req, cancel_event, emit=_emit),
+                lambda: _run_report_assistant(f, r, llm, llm_req, cancel_event, emit=_emit),
             )
         except BaseException:
             assistant_sem.release()
@@ -1273,16 +1315,21 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
                 final_answer = "已完成。"
             suffix = f"\n\n（已执行 {tool_count} 个辅助动作）" if tool_count else ""
             stored = final_answer + suffix
+            new_messages = _sanitize_assistant_messages(
+                persisted + [
+                    {"role": "user", "content": msg},
+                    {"role": "assistant", "content": stored},
+                ],
+            )
+            # 用全新的短会话落库历史（原注入会话已在启动线程前释放）。
             try:
-                f.assistant_messages = _sanitize_assistant_messages(
-                    persisted + [
-                        {"role": "user", "content": msg},
-                        {"role": "assistant", "content": stored},
-                    ],
-                )
-                await session.commit()
+                async with SessionLocal() as s2:
+                    row = await s2.get(Finding, finding_id)
+                    if row is not None:
+                        row.assistant_messages = new_messages
+                        await s2.commit()
             except Exception:
-                await session.rollback()
+                logger.warning("persist assistant messages failed finding=%s", finding_id, exc_info=True)
             yield _sse({
                 "type": "done",
                 "answer": stored,

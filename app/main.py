@@ -37,7 +37,7 @@ from app.agent_runtime import (
 from app.api import backup, findings, intel, proxy, runtime_logs, settings, stream, tasks, update, vulns
 from app.api import assets as assets_api
 from app.backup import run_periodic_backup
-from app.db.session import init_db
+from app.db.session import init_db, run_periodic_wal_checkpoint
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
 from app.orchestrator import manager
 from app.settings_service import init_settings_cache
@@ -126,6 +126,7 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(run_periodic_cleanup())
     memory_task = asyncio.create_task(run_periodic_memory_reclaim())
     backup_task = asyncio.create_task(run_periodic_backup())
+    wal_task = asyncio.create_task(run_periodic_wal_checkpoint())
     await init_db()
     await init_settings_cache()
     await init_proxy_cache()
@@ -158,7 +159,8 @@ async def lifespan(app: FastAPI):
         cleanup_task.cancel()
         memory_task.cancel()
         backup_task.cancel()
-        for t in (lag_monitor, cleanup_task, memory_task, backup_task):
+        wal_task.cancel()
+        for t in (lag_monitor, cleanup_task, memory_task, backup_task, wal_task):
             try:
                 await t
             except asyncio.CancelledError:

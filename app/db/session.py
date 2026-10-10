@@ -1,6 +1,7 @@
 """异步数据库会话管理（SQLite + aiosqlite）。"""
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import AsyncGenerator
@@ -9,6 +10,8 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models import Base
+
+logger = logging.getLogger("autohunter.db")
 
 DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).resolve().parent.parent.parent / "data" / "autohunter.db"))
 Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -32,24 +35,53 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 # 一遇写锁立刻 SQLITE_BUSY）。24x7 下 orchestrator 写事件 + N 个 heartbeat +
 # API 读 + worker 落库高并发，这几项是缓解锁竞争性价比最高的优化。
 _CONNECT_PRAGMAS = (
-    "PRAGMA busy_timeout=5000;",          # 写锁最多等 5s 再报错，吸收瞬时竞争
+    # 写锁最多等 30s 再报错。BEGIN IMMEDIATE 下每次写都要拿全库写锁，24x7 高并发下
+    # 单次持锁偶尔会到数秒（几十个 session 排队）。5s 太短，会在排队时直接抛
+    # SQLITE_BUSY（表现为 tick error / worker crashed 的 database is locked）。
+    # 30s 覆盖最坏排队，正常路径毫秒级返回，不影响吞吐。可用 DB_BUSY_TIMEOUT_MS 覆盖。
+    f"PRAGMA busy_timeout={os.environ.get('DB_BUSY_TIMEOUT_MS', '30000')};",
     "PRAGMA synchronous=NORMAL;",         # WAL 下安全，显著降低写延迟
     "PRAGMA foreign_keys=ON;",
     "PRAGMA cache_size=-16000;",          # 约 16MB page cache；每条连接一份，不能再开 64MB
     "PRAGMA mmap_size=67108864;",         # 64MB mmap，避免把整库映射进 cgroup
     "PRAGMA temp_store=MEMORY;",          # ORDER BY/GROUP BY 临时表走内存
     "PRAGMA wal_autocheckpoint=1000;",
+    # checkpoint 后把 WAL 截断回 0 字节，避免 24x7 下 WAL 只增不减（历史上曾涨到 11GB）。
+    "PRAGMA journal_size_limit=268435456;",  # 256MB：checkpoint 后回收多余空间
 )
 
 
 @event.listens_for(engine.sync_engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, _connection_record):
+    # 关键：关闭 pysqlite 的「隐式 BEGIN」，改由下方 begin 事件发显式 BEGIN IMMEDIATE。
+    #
+    # 默认（isolation_level=""）下，SQLAlchemy 延迟到第一条语句才开事务，而多数 session
+    # 的第一条语句是 SELECT——于是拿到的是一个「读事务」。WAL 模式下读事务会固定一个
+    # 快照；只要此后任何其它连接提交过写（N 个 worker 心跳/落库 + API 写），快照即失效，
+    # 该 session 再要写（尤其 ORM autoflush）就得做「读→写升级」，而升级遇到失效快照会
+    # 立即返回 SQLITE_BUSY_SNAPSHOT(517)——busy_timeout 对升级失败【完全不生效】。
+    # 现象就是 worker 在 session.get() 之后、_build_duplicate_history 的 autoflush 处
+    # 抛 “database is locked” 而整条协程崩溃。
+    #
+    # isolation_level=None 让 SQLAlchemy 自己发 BEGIN；配合 begin 事件的 BEGIN IMMEDIATE，
+    # 事务一开就拿到写锁，从此不存在「读→写升级」，busy_timeout 也恢复正常生效。
+    dbapi_connection.isolation_level = None
     cursor = dbapi_connection.cursor()
     try:
         for pragma in _CONNECT_PRAGMAS:
             cursor.execute(pragma)
+        # WAL 是库级持久设置，但每条新连接显式确认一次，杜绝任何非 WAL 连接混入。
+        cursor.execute("PRAGMA journal_mode=WAL;")
     finally:
         cursor.close()
+
+
+@event.listens_for(engine.sync_engine, "begin")
+def _begin_immediate(conn):
+    # 显式 BEGIN IMMEDIATE：事务起点即取写锁，消除 WAL 读→写升级失败（SQLITE_BUSY_SNAPSHOT）。
+    # 注意：BEGIN IMMEDIATE 会把写锁持有到事务结束，因此绝不能让 session 在事务中途
+    # await 长时间的外部 IO（如报告助手 300s 线程）——那会把写锁占满导致全库写阻塞。
+    conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 # 轻量自动迁移：新增列时无需删库（demo 友好）
@@ -271,3 +303,64 @@ async def _auto_migrate(conn) -> None:
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
         yield session
+
+
+# 周期 checkpoint 间隔（秒）。默认 300s；设为 0 关闭。24x7 写不断时被动 checkpoint
+# 推不动，靠这个把 WAL 定期截断回收。
+WAL_CHECKPOINT_INTERVAL = float(os.environ.get("AUTOHUNTER_WAL_CHECKPOINT_INTERVAL", "300"))
+
+
+async def checkpoint_wal(mode: str = "TRUNCATE") -> dict | None:
+    """执行一次 WAL checkpoint，回收 WAL 空间。
+
+    24x7 下 worker/心跳/API 的写几乎从不间断，SQLite 的被动 checkpoint 很难推进到把
+    WAL 清空，导致 .db-wal 只增不减（历史上曾涨到 11GB）。定期主动 checkpoint：
+    - PASSIVE：只尽力推进，不阻塞写，但可能推不动（有读者时停在旧帧）；
+    - TRUNCATE：checkpoint 后把 WAL 截断回 0 字节，能真正回收磁盘。
+
+    用独立的原始 aiosqlite 连接执行——刻意绕过 SQLAlchemy 引擎：本模块给引擎挂了
+    「begin → BEGIN IMMEDIATE」事件，而 wal_checkpoint 不能在已开启的事务里跑
+    （会报 database table is locked）。裸连接没有这个包装，PRAGMA 直接生效。
+    失败只告警不抛——清理是尽力而为。
+    返回 {busy, log, checkpointed}；busy=1 表示有活跃读者/写者导致没能推进到位（正常，
+    下一轮再试）。失败返回 None。
+    """
+    import aiosqlite
+
+    try:
+        conn = await aiosqlite.connect(DB_PATH, timeout=5.0)
+        try:
+            await conn.execute("PRAGMA busy_timeout=5000;")
+            cursor = await conn.execute(f"PRAGMA wal_checkpoint({mode});")
+            row = await cursor.fetchone()
+            await cursor.close()
+        finally:
+            await conn.close()
+        if not row:
+            return None
+        return {"busy": int(row[0]), "log": int(row[1]), "checkpointed": int(row[2])}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("WAL checkpoint(%s) 失败：%s", mode, exc)
+        return None
+
+
+async def run_periodic_wal_checkpoint() -> None:
+    """后台周期 TRUNCATE checkpoint，把 WAL 截断回收，避免只增不减。
+
+    interval<=0 时关闭。首拍延迟一个 interval 再跑（启动时刚 init_db，不必立刻截断）。
+    TRUNCATE 需短暂写锁：拿不到就 busy=1 跳过，下一轮再试——绝不阻塞主流程。
+    """
+    import asyncio
+
+    interval = WAL_CHECKPOINT_INTERVAL
+    if interval <= 0:
+        logger.info("WAL 周期 checkpoint 已关闭（AUTOHUNTER_WAL_CHECKPOINT_INTERVAL=0）")
+        return
+    while True:
+        await asyncio.sleep(interval)
+        result = await checkpoint_wal("TRUNCATE")
+        if result and result.get("checkpointed"):
+            logger.info(
+                "WAL checkpoint: 已回收 log=%d checkpointed=%d busy=%d",
+                result.get("log", 0), result.get("checkpointed", 0), result.get("busy", 0),
+            )
