@@ -53,18 +53,18 @@ _CONNECT_PRAGMAS = (
 
 @event.listens_for(engine.sync_engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, _connection_record):
-    # 关键：关闭 pysqlite 的「隐式 BEGIN」，改由下方 begin 事件发显式 BEGIN IMMEDIATE。
+    # SQLite 在 WAL 下的稳定策略是：
+    # 1. 每条连接都显式设置 busy_timeout / WAL / cache 等必要 PRAGMA；
+    # 2. 不在全局 engine 上强制 "BEGIN IMMEDIATE"；
+    # 3. 让写事务尽量短，并在跨 await / 网络 IO 前显式 commit。
     #
-    # 默认（isolation_level=""）下，SQLAlchemy 延迟到第一条语句才开事务，而多数 session
-    # 的第一条语句是 SELECT——于是拿到的是一个「读事务」。WAL 模式下读事务会固定一个
-    # 快照；只要此后任何其它连接提交过写（N 个 worker 心跳/落库 + API 写），快照即失效，
-    # 该 session 再要写（尤其 ORM autoflush）就得做「读→写升级」，而升级遇到失效快照会
-    # 立即返回 SQLITE_BUSY_SNAPSHOT(517)——busy_timeout 对升级失败【完全不生效】。
-    # 现象就是 worker 在 session.get() 之后、_build_duplicate_history 的 autoflush 处
-    # 抛 “database is locked” 而整条协程崩溃。
+    # 强制 BEGIN IMMEDIATE 会让每个 session 一开始就拿到全库写锁；如果事务跨过数秒
+    # 网络请求（LLM / 测绘 / 代理调用）才 commit，其他 worker / heartbeat / API 的写
+    # 请求都会排队并最终报 database is locked。WAL 能缓解读写并发，但不能掩盖长事务
+    # 持有写锁的事实。
     #
-    # isolation_level=None 让 SQLAlchemy 自己发 BEGIN；配合 begin 事件的 BEGIN IMMEDIATE，
-    # 事务一开就拿到写锁，从此不存在「读→写升级」，busy_timeout 也恢复正常生效。
+    # 因此这里保留 WAL + busy_timeout，允许 SQLAlchemy 在正常事务边界上工作，而不是
+    # 把写锁钉在整个 session 生命周期上。
     dbapi_connection.isolation_level = None
     cursor = dbapi_connection.cursor()
     try:
@@ -76,12 +76,17 @@ def _set_sqlite_pragma(dbapi_connection, _connection_record):
         cursor.close()
 
 
-@event.listens_for(engine.sync_engine, "begin")
-def _begin_immediate(conn):
-    # 显式 BEGIN IMMEDIATE：事务起点即取写锁，消除 WAL 读→写升级失败（SQLITE_BUSY_SNAPSHOT）。
-    # 注意：BEGIN IMMEDIATE 会把写锁持有到事务结束，因此绝不能让 session 在事务中途
-    # await 长时间的外部 IO（如报告助手 300s 线程）——那会把写锁占满导致全库写阻塞。
-    conn.exec_driver_sql("BEGIN IMMEDIATE")
+# NOTE:
+#   我们不再在全局 engine 上挂 "BEGIN IMMEDIATE"。SQLite 的写锁是事务级的，
+#   任何事务在跨 await/网络 IO 前未提交，都会把写锁保留到事务结束，导致其它
+#   worker / API / heartbeat 全部撞 SQLITE_BUSY。真正的稳定方案是：
+#   - 保持 WAL + busy_timeout，避免瞬时写冲突；
+#   - 让每个写交易尽量短、在网络 IO 前显式 commit；
+#   - 不强制所有 session 在 begin 时拿全库写锁。
+#
+#   这和此前“避免读→写升级”的思路不同：读→写升级问题可以通过短事务和及时 commit
+#   来解决；在整个应用中强制 BEGIN IMMEDIATE 只会把锁时间放大，反而制造更大的
+#   database is locked 风险。
 
 
 # 轻量自动迁移：新增列时无需删库（demo 友好）
