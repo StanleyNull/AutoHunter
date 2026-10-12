@@ -373,17 +373,25 @@ def resolve_engine_name(task: Task | None = None) -> str:
     return str(eff.get("engine") or get_default_engine())
 
 
+def _task_engine_config(engine_name: str, task: Task | None) -> dict:
+    """任务覆盖绑定到保存时的引擎，不能随全局默认引擎一起串用。"""
+    if task is None:
+        return {}
+    cfg = task.fofa_config or {}
+    # 老任务未标记归属：显式 engine 优先；更早的空 engine 任务只兼容 FOFA。
+    bound_engine = cfg.get("engine") or task.engine or "fofa"
+    return cfg if bound_engine == engine_name else {}
+
+
 def resolve_engine_key(engine_name: str, task: Task | None = None) -> str:
     """获取指定引擎的 API Key（任务级 > DB缓存 > 环境变量）。
 
     FOFA 引擎额外兼容旧版 fofa section（key 保存在 row.fofa 而非 row.engines）。
     """
     eff = effective_settings()
-    # 任务级 fofa_config 兼容旧版
-    if engine_name == "fofa" and task:
-        cfg = task.fofa_config or {}
-        if cfg.get("key"):
-            return str(cfg["key"])
+    cfg = _task_engine_config(engine_name, task)
+    if cfg.get("key"):
+        return str(cfg["key"])
     eng_cfg = eff.get("engines", {}).get(engine_name, {})
     key = str(eng_cfg.get("key") or "")
     # FOFA 兼容旧版 fofa section
@@ -400,11 +408,9 @@ def resolve_engine_base_url(engine_name: str, task: Task | None = None) -> str:
     engine = get_engine(engine_name)
     default = engine.get_default_base_url() if engine else ""
     eff = effective_settings()
-    # 任务级 fofa_config 兼容旧版
-    if engine_name == "fofa" and task:
-        cfg = task.fofa_config or {}
-        if cfg.get("base_url"):
-            return str(cfg["base_url"])
+    cfg = _task_engine_config(engine_name, task)
+    if cfg.get("base_url"):
+        return str(cfg["base_url"])
     eng_cfg = eff.get("engines", {}).get(engine_name, {})
     base = str(eng_cfg.get("base_url") or "")
     # FOFA 兼容旧版 fofa section

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -13,6 +14,7 @@ from app.config import worker_config
 
 _EXPIRED_URL = re.compile(r"(?i)(?:/login|/signin|/cas/login|/sso/|/auth/login)")
 _EXPIRED_BODY = re.compile(r"(?i)(请(?:先)?登录|未登录|登录超时|session expired|unauthorized|重新登录)")
+_LEGACY_AUTH_CONTEXT_REF = "legacy"
 
 
 def site_key(url_or_host: str) -> str:
@@ -86,6 +88,8 @@ class CookieSlot:
         self.last_relogin: float = 0.0
         self.login_in_flight = False
         self.loaded = False
+        # None/legacy 表示凭据归属未知的旧缓存；空字符串表示已明确无用户凭据。
+        self.auth_context_ref: str | None = None
 
 
 class CookieManager:
@@ -146,6 +150,9 @@ class CookieManager:
                     if k in ("username", "password", "login_url") and v
                 }
             slot.status = str(data.get("status") or "")[:40]
+            ref = data.get("auth_context_ref")
+            if isinstance(ref, str):
+                slot.auth_context_ref = ref
             try:
                 slot.updated_at = float(data.get("updated_at") or 0)
             except (TypeError, ValueError):
@@ -160,6 +167,7 @@ class CookieManager:
             "creds": dict(slot.creds),
             "status": slot.status,
             "updated_at": slot.updated_at,
+            "auth_context_ref": slot.auth_context_ref,
         }
         try:
             p = self._path(sid)
@@ -173,6 +181,44 @@ class CookieManager:
         slot = self.slot(task_id, host)
         with slot.cond:
             return bool(slot.cookies or slot.headers)
+
+    def bind_auth_context(
+        self, task_id: str, host: str, ctx: dict | None, *, invalidate_legacy: bool = False,
+    ) -> tuple[bool, str]:
+        """用户绑定变化时替换旧会话；相同绑定保留登录后刷新过的 Cookie。"""
+        src = dict(ctx or {})
+        material = {k: src.get(k) for k in (
+            "username", "password", "login_url", "cookies", "headers",
+        )}
+        ref = ""
+        if any(material.values()):
+            ref = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+        slot = self.slot(task_id, host)
+        with slot.cond:
+            legacy_unbound = not ref and not invalidate_legacy and (
+                slot.auth_context_ref == _LEGACY_AUTH_CONTEXT_REF
+                or (slot.auth_context_ref is None and bool(
+                    slot.cookies or slot.cookie_jar or slot.headers or slot.creds
+                ))
+            )
+            if legacy_unbound:
+                ref = _LEGACY_AUTH_CONTEXT_REF
+            changed = slot.auth_context_ref != ref and (
+                slot.auth_context_ref is not None or bool(ref) or invalidate_legacy
+            ) and not legacy_unbound
+            if changed:
+                slot.cookies.clear()
+                slot.cookie_jar.clear()
+                slot.headers.clear()
+                slot.creds.clear()
+                slot.status = ""
+                slot.updated_at = 0.0
+                slot.last_relogin = 0.0
+            slot.auth_context_ref = ref
+            if changed and ctx:
+                self.remember_from_auth_context(task_id, host, ctx)
+            self._save(task_id, host, slot)
+            return changed, ref
 
     def remember_creds(
         self,
@@ -218,9 +264,11 @@ class CookieManager:
                 slot.headers.update({str(k): str(v)[:4096] for k, v in headers.items() if k})
             self._save(task_id, host, slot)
 
-    def apply(self, executor: Any, task_id: str, host: str) -> bool:
+    def apply(self, executor: Any, task_id: str, host: str, *, auth_context_ref: str | None = None) -> bool:
         slot = self.slot(task_id, host)
         with slot.cond:
+            if auth_context_ref is not None and auth_context_ref != slot.auth_context_ref:
+                return False
             if not (slot.cookie_jar or slot.cookies or slot.headers):
                 return False
             jar = [dict(e) for e in slot.cookie_jar]
@@ -236,7 +284,7 @@ class CookieManager:
             return bool(getattr(executor, "_session_cookies", None) or getattr(executor, "_session_headers", None))
         return False
 
-    def ingest(self, executor: Any, task_id: str, host: str, status: str = "") -> None:
+    def ingest(self, executor: Any, task_id: str, host: str, status: str = "", *, auth_context_ref: str | None = None) -> None:
         cookies = dict(getattr(executor, "_session_cookies", None) or {})
         jar = [dict(e) for e in (getattr(executor, "_cookie_jar", None) or [])]
         headers = dict(getattr(executor, "_session_headers", None) or {})
@@ -244,6 +292,8 @@ class CookieManager:
             return
         slot = self.slot(task_id, host)
         with slot.cond:
+            if auth_context_ref is not None and auth_context_ref != slot.auth_context_ref:
+                return
             if jar:
                 slot.cookie_jar = _merge_jar(slot.cookie_jar, jar)
             if cookies:
@@ -295,6 +345,13 @@ class CookieHub:
         self.host = site_key(target)
         self.bootstrapping = False
         self._mgr = get_manager()
+        self._auth_context_ref: str | None = None
+
+    def bind_auth_context(self, ctx: dict | None, *, invalidate_legacy: bool = False) -> bool:
+        changed, self._auth_context_ref = self._mgr.bind_auth_context(
+            self.task_id, self.host, ctx, invalidate_legacy=invalidate_legacy,
+        )
+        return changed
 
     def remember_from_auth_context(self, ctx: dict | None) -> None:
         self._mgr.remember_from_auth_context(self.task_id, self.host, ctx)
@@ -303,10 +360,10 @@ class CookieHub:
         return self._mgr.has_session(self.task_id, self.host)
 
     def apply(self, executor: Any) -> bool:
-        return self._mgr.apply(executor, self.task_id, self.host)
+        return self._mgr.apply(executor, self.task_id, self.host, auth_context_ref=self._auth_context_ref)
 
     def ingest(self, executor: Any, status: str = "") -> None:
-        self._mgr.ingest(executor, self.task_id, self.host, status=status)
+        self._mgr.ingest(executor, self.task_id, self.host, status=status, auth_context_ref=self._auth_context_ref)
 
     def login_turn(self, timeout: float = 90.0):
         return self._mgr.login_turn(self.task_id, self.host, timeout=timeout)
@@ -314,11 +371,15 @@ class CookieHub:
     def creds(self) -> dict[str, str]:
         slot = self._mgr.slot(self.task_id, self.host)
         with slot.cond:
+            if self._auth_context_ref is not None and self._auth_context_ref != slot.auth_context_ref:
+                return {}
             return dict(slot.creds)
 
     def can_relogin(self) -> bool:
         slot = self._mgr.slot(self.task_id, self.host)
         with slot.cond:
+            if self._auth_context_ref is not None and self._auth_context_ref != slot.auth_context_ref:
+                return False
             creds = slot.creds
             if not (creds.get("username") and creds.get("password")):
                 return False
