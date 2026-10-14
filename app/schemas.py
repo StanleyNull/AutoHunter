@@ -33,6 +33,8 @@ class SelfCheck(BaseModel):
     scanner_only_no_poc: bool = Field(False, description="是否仅扫描器出结果但无法给出利用方法（会被忽略）")
     is_public_interface: bool = Field(False, description="该接口是否本就是面向公众的公开接口（若是，访问它通常不构成漏洞）")
     info_leak_hits_strict_list: bool = Field(False, description="若属信息泄露类：泄露数据是否命中当前 SRC 模式的高价值敏感数据口径")
+    recon_anon_leak: bool = Field(False, description="发现是否源自侦察期匿名可访问端点泄露的敏感数据（审核降过杀救援锚点）")
+    recon_waf_present: bool = Field(False, description="侦察期已确认目标存在 WAF/风控拦截（审核降过杀救援锚点，这类发现常因被拦而证据残缺）")
 
 
 class Evidence(BaseModel):
