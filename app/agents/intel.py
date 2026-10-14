@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +64,9 @@ _MAX_PER_KIND = int(os.environ.get("INTEL_MAX_PER_KIND", "4"))
 _MAX_INJECT_CHARS = int(os.environ.get("INTEL_MAX_INJECT_CHARS", "1800"))
 # 内容字段写入前的硬截断（防异常超长）
 _MAX_FIELD = 300
+# 情报有效期（秒）：last_seen 距今超过该值即视为过时，不再注入给后续 Worker。
+# 过时凭证/端点会加大误用与 token 浪费，这里按时间窗口过滤而非全量注入。
+_MAX_AGE_SECONDS = int(os.environ.get("INTEL_MAX_AGE_SECONDS", str(7 * 24 * 3600)))
 
 
 def _now() -> datetime:
@@ -186,12 +189,16 @@ async def lookup_intel(
     try:
         root = (root or "").strip().lower()
         fps = [f for f in (fingerprints or []) if f]
+        # 只检索有效期内的情报；last_seen 在建行时有默认值，不会为 NULL。
+        # SQLite 在 naive DateTime 列上以 naive UTC 存储，这里用相同形态避免 aware/naive 比较出错。
+        fresh_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_MAX_AGE_SECONDS)).replace(tzinfo=None)
 
         # cred / profile 按 root 域命中
         if root:
             for kind in ("cred", "profile"):
                 rows = (await session.execute(
-                    select(Intel).where(Intel.kind == kind, Intel.match_key == root)
+                    select(Intel).where(Intel.kind == kind, Intel.match_key == root,
+                                        Intel.last_seen >= fresh_cutoff)
                     .order_by(Intel.confidence.desc(), Intel.hit_count.desc(), Intel.last_seen.desc())
                     .limit(_MAX_PER_KIND)
                 )).scalars().all()
@@ -201,7 +208,8 @@ async def lookup_intel(
         if fps:
             for kind in ("fingerprint", "endpoint"):
                 rows = (await session.execute(
-                    select(Intel).where(Intel.kind == kind, Intel.match_key.in_(fps))
+                    select(Intel).where(Intel.kind == kind, Intel.match_key.in_(fps),
+                                        Intel.last_seen >= fresh_cutoff)
                     .order_by(Intel.confidence.desc(), Intel.hit_count.desc(), Intel.last_seen.desc())
                     .limit(_MAX_PER_KIND)
                 )).scalars().all()
