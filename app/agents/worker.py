@@ -180,9 +180,8 @@ class Worker:
         if not isinstance(ctx, dict):
             ctx = None
         hub = self._cookie_hub
-        if ctx:
-            hub.remember_from_auth_context(ctx)
-        elif hub.creds().get("username") and hub.creds().get("password"):
+        self._auth_context_changed = hub.bind_auth_context(ctx)
+        if not ctx and hub.creds().get("username") and hub.creds().get("password"):
             stored = hub.creds()
             ctx = {
                 "matched": True,
@@ -712,6 +711,8 @@ class Worker:
         cookies = ctx.get("session_cookies") if isinstance(ctx.get("session_cookies"), dict) else {}
         jar = ctx.get("session_cookie_jar") if isinstance(ctx.get("session_cookie_jar"), list) else []
         headers = ctx.get("session_headers") if isinstance(ctx.get("session_headers"), dict) else {}
+        if getattr(self, "_auth_context_changed", False):
+            cookies, jar, headers = {}, [], {}
         self.executor.restore_resume_state(
             worker_notes=notes,
             session_cookies=cookies,
