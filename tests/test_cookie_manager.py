@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -13,6 +14,65 @@ from app.tools.cookie_manager import CookieHub, looks_expired, site_key  # noqa:
 
 
 class CookieManagerTest(unittest.TestCase):
+    def test_login_wait_timeout_preserves_the_active_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(cookie_manager.worker_config, "work_root", tmp):
+                mgr = cookie_manager.CookieManager()
+                with mgr.login_turn("task-1", "example.edu.cn") as owner_action:
+                    self.assertEqual(owner_action, "login")
+                    for _ in range(2):
+                        with mgr.login_turn("task-1", "example.edu.cn", timeout=1) as action:
+                            self.assertEqual(action, "timeout")
+                with mgr.login_turn("task-1", "example.edu.cn") as action:
+                    self.assertEqual(action, "login")
+
+    def test_waiting_worker_reuses_completed_login(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(cookie_manager.worker_config, "work_root", tmp):
+                mgr = cookie_manager.CookieManager()
+                slot = mgr.slot("task-1", "example.edu.cn")
+                waiting = threading.Event()
+                actions = []
+                errors = []
+                real_wait = slot.cond.wait
+
+                def wait(timeout):
+                    waiting.set()
+                    return real_wait(timeout)
+
+                def waiter():
+                    try:
+                        with mgr.login_turn("task-1", "example.edu.cn", timeout=2) as action:
+                            actions.append(action)
+                    except Exception as exc:
+                        errors.append(exc)
+
+                thread = threading.Thread(target=waiter, daemon=True)
+                try:
+                    with patch.object(slot.cond, "wait", side_effect=wait):
+                        with mgr.login_turn("task-1", "example.edu.cn"):
+                            thread.start()
+                            self.assertTrue(waiting.wait(1))
+                            mgr.remember_from_auth_context(
+                                "task-1", "example.edu.cn", {"cookies": {"SESSION": "fake-session"}},
+                            )
+                finally:
+                    if thread.ident is not None:
+                        thread.join(3)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(actions, ["reuse"])
+
+    def test_login_exception_releases_turn_for_next_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(cookie_manager.worker_config, "work_root", tmp):
+                mgr = cookie_manager.CookieManager()
+                with self.assertRaisesRegex(RuntimeError, "login failed"):
+                    with mgr.login_turn("task-1", "example.edu.cn"):
+                        raise RuntimeError("login failed")
+                with mgr.login_turn("task-1", "example.edu.cn") as action:
+                    self.assertEqual(action, "login")
+
     def test_site_key_ignores_path(self):
         self.assertEqual(site_key("https://example.edu.cn/druid"), "example.edu.cn")
         self.assertEqual(site_key("https://example.edu.cn/actuator"), "example.edu.cn")

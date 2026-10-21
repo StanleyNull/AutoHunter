@@ -258,17 +258,20 @@ class CookieManager:
 
     @contextmanager
     def login_turn(self, task_id: str, host: str, timeout: float = 90.0) -> Iterator[str]:
+        """Return login/reuse/timeout; only the login turn owns the shared flag."""
         slot = self.slot(task_id, host)
-        deadline = time.time() + max(1.0, timeout)
+        deadline = time.monotonic() + max(1.0, timeout)
         action = "login"
         with slot.cond:
-            while slot.login_in_flight and time.time() < deadline:
-                remain = deadline - time.time()
+            while slot.login_in_flight:
+                remain = deadline - time.monotonic()
                 if remain <= 0:
                     break
                 slot.cond.wait(timeout=min(2.0, remain))
             if slot.cookies or slot.headers:
                 action = "reuse"
+            elif slot.login_in_flight:
+                action = "timeout"
             else:
                 slot.login_in_flight = True
                 action = "login"
