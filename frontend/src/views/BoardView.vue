@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
+import { usePagedList } from "../composables/usePagedList.js";
 import { copyText, formatLlmErrorCopy, isLlmErrorEvent } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
 import { fmtLocalTime } from "../format.js";
@@ -17,7 +18,6 @@ const events = ref([]);
 const liveWorkers = ref([]);       // 在跑 worker 活态
 const liveEscalations = ref([]);   // 扩大危害活态
 const siteCollab = ref(null);      // 单站协作态势（三阶段路线流水线，仅 site 任务）
-const queue = ref([]);             // 复审队列
 const submitItems = ref([]);       // 待提交
 const killsweepItems = ref([]);    // 通杀列
 const rejectedItems = ref([]);     // 已驳回
@@ -25,6 +25,12 @@ const archivedItems = ref([]);     // AI 未采纳归档（ignored/deepen，可�
 const expandedKillsweeps = ref(new Set());
 const searchDraft = ref("");
 const searchText = ref("");
+const reviewPage = usePagedList(
+  () => [props.id, searchText.value.trim()],
+  ([id, search], paging) => api.reviewQueue(id, search, { compact: true, ...paging }),
+);
+const { items: queue, offset: reviewOffset, hasMore: reviewHasMore,
+  loading: reviewLoading, error: reviewError } = reviewPage;
 const submittedFilter = ref(false);
 const drawerId = ref(null);
 const drawerMode = ref("view");
@@ -60,7 +66,7 @@ let ws = null, poll = null, boardPoll = null, searchTimer = null;
 let wsReconnectTimer = null, wsReconnectAttempt = 0, wsIntentionalClose = false;
 let eventRefreshTimer = null, eventRefreshPending = null;
 const LIST_TABS = new Set(["review", "submit", "killsweep", "rejected", "archived"]);
-// 记录哪些列表 tab 已经加载过数据：首屏只拉看板，列表按需加载；后台只刷新看过的列表。
+// 列表按需加载；轮询只刷新当前列表，避免隐藏列表占用请求和渲染资源。
 const loadedTabs = ref(new Set());
 // 内存中按 target 聚合的实时轨迹（WS 推送），配合落库 trace API 做回放。
 const liveTraceByTarget = ref({});
@@ -90,9 +96,7 @@ async function loadTask() {
   if (id === props.id && id === loadedTaskId.value) task.value = t;
 }
 async function loadQueue() {
-  const id = props.id;
-  const rows = await api.reviewQueue(id);
-  if (id === props.id) queue.value = rows.map(withSearchCache);
+  return reviewPage.load();
 }
 async function loadSubmit(opts = {}) {
   const id = props.id;
@@ -155,7 +159,7 @@ async function refreshAll(opts = {}) {
   const includeCurrent = opts.includeCurrent !== false;
   if (background) refreshing.value = true;
   try {
-    const tabs = new Set([...loadedTabs.value].filter(isListTab));
+    const tabs = new Set();
     if (includeCurrent && isListTab(tab.value)) tabs.add(tab.value);
     const jobs = [];
     if (includeTask) jobs.push(loadTask());
@@ -168,17 +172,20 @@ async function refreshAll(opts = {}) {
 }
 
 async function loadTabData(t = tab.value) {
-  if (t === "review") await loadQueue();
+  const id = props.id;
+  if (t === "review") {
+    if (!await loadQueue()) return;
+  }
   else if (t === "submit") await loadSubmit({ reset: true });
   else if (t === "killsweep") await loadKillsweeps();
   else if (t === "rejected") await loadRejected();
   else if (t === "archived") await loadArchived();
   else return;
-  markTabLoaded(t);
+  if (id === props.id) markTabLoaded(t);
 }
 
 function shouldRefreshTab(t) {
-  return tab.value === t || loadedTabs.value.has(t);
+  return tab.value === t;
 }
 
 function scheduleEventRefresh(ev) {
@@ -225,7 +232,7 @@ function closeWs(intentional = false) {
 function resetTaskState(full = true) {
   if (full) {
     task.value = null;
-    queue.value = [];
+    reviewPage.reset();
     submitItems.value = [];
     killsweepItems.value = [];
     rejectedItems.value = [];
@@ -835,16 +842,21 @@ watch(() => task.value?.status, () => {
 });
 
 watch(tab, (t) => {
-  // 已加载过的 tab 直接用内存数据；未打开过的列表按需补拉一次。
-  // 数据新鲜度由 WebSocket 事件后台刷新 + 后台轮询(refreshAll)保证。
+  // 先显示已有数据，再刷新当前列表；隐藏列表不参与定时轮询。
   if (t === "board") return;
-  if (loadedTabs.value.has(t)) return;
-  loadTabData(t);
+  loadTabData(t).catch((e) => toast(`加载失败：${e?.message || e}`));
+});
+
+watch(searchText, () => {
+  const next = new Set(loadedTabs.value);
+  next.delete("review");
+  loadedTabs.value = next;
+  if (tab.value === "review") loadTabData("review");
 });
 
 watch(searchDraft, (v) => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { searchText.value = v; }, 120);
+  searchTimer = setTimeout(() => { searchText.value = v; }, 250);
 });
 
 function elapsed(iso) {
@@ -1101,7 +1113,7 @@ async function fetchAllSubmitReports() {
 }
 
 async function fetchAllReviewReports() {
-  // 走 review-queue 已有 compact/limit/offset：默认裸 list 仍给看板用，导出才拉全字段。
+  // 导出独立遍历全部完整报告，不受列表页码和搜索条件影响。
   return fetchPagedFindingList((offset) => api.reviewQueue(props.id, undefined, {
     compact: false,
     limit: EXPORT_PAGE_SIZE,
@@ -1477,7 +1489,8 @@ function matchSearch(item) {
   const text = stringifyForSearch(item);
   return tokens.every((t) => text.includes(t));
 }
-const filteredQueue = computed(() => queue.value.filter(matchSearch));
+// 复审搜索在服务端覆盖全部报告，不能再用精简字段做客户端二次过滤。
+const filteredQueue = computed(() => queue.value);
 const filteredSubmit = computed(() => submitItems.value.filter(matchSearch));
 const filteredKillsweeps = computed(() => killsweepItems.value.filter(matchSearch));
 const filteredRejected = computed(() => rejectedItems.value.filter(matchSearch));
@@ -1720,14 +1733,15 @@ function parseEventTs(ts) {
         <input v-model="searchDraft" :placeholder="searchPlaceholder" />
       </div>
       <div class="search-stat">
-        <template v-if="searchTokens.length">命中 {{ visibleCount }} / {{ rawCount }}</template>
+        <template v-if="tab === 'review'">本页{{ searchTokens.length ? "命中" : "" }} {{ queue.length }} 条 · 全队列 {{ reviewCount }} 条</template>
+        <template v-else-if="searchTokens.length">命中 {{ visibleCount }} / {{ rawCount }}</template>
         <template v-else>共 {{ rawCount }} 条</template>
       </div>
       <button class="search-clear" :class="{ hidden: !searchDraft.trim() }" @click="clearSearch">清空</button>
     </div>
 
     <!-- 看板 -->
-    <div v-show="tab === 'board'" class="board-grid">
+    <div v-if="tab === 'board'" class="board-grid">
       <div class="board-mobile-switch" role="tablist" aria-label="看板视图">
         <button type="button" role="tab" :aria-selected="boardPanel === 'workers'"
           :class="{ active: boardPanel === 'workers' }" @click="boardPanel = 'workers'">
@@ -1859,7 +1873,7 @@ function parseEventTs(ts) {
     </div>
 
     <!-- 复审队列 -->
-    <div v-show="tab === 'review'" class="list-panel">
+    <div v-if="tab === 'review'" class="list-panel">
       <div class="list-head"><span>复审队列</span><small>AI 采纳后等待人工裁决</small></div>
       <div class="submit-toolbar">
         <small v-if="reviewCount" class="muted">待复审 {{ reviewCount }} 条 · 导出全部，不受搜索框影响</small>
@@ -1891,8 +1905,11 @@ function parseEventTs(ts) {
           :disabled="!reviewCount || bulkWorking"
         >导出 reports.json</button>
       </div>
-      <div v-if="!queue.length" class="empty">没有待复审的漏洞（AI 采纳后会进这里）</div>
-      <div v-else-if="!filteredQueue.length" class="empty">没有匹配当前关键词的复审漏洞</div>
+      <div v-if="reviewError" class="empty" role="alert">
+        {{ reviewError }} <button type="button" @click="loadTabData('review')">重试</button>
+      </div>
+      <div v-else-if="reviewLoading && !queue.length" class="empty" role="status">正在加载复审队列…</div>
+      <div v-else-if="!queue.length" class="empty">{{ searchText.trim() ? "没有匹配当前关键词的复审漏洞" : "没有待复审的漏洞（AI 采纳后会进这里）" }}</div>
       <div v-for="f in filteredQueue" :key="f.id" class="result-row" @click="openReview(f.id)">
         <span class="sev-pill" :class="effectiveSeverity(f)">{{ effectiveSeverity(f) }}</span>
         <div class="rr-main">
@@ -1902,10 +1919,17 @@ function parseEventTs(ts) {
         </div>
         <span class="score">{{ f.review?.score ?? "-" }}</span>
       </div>
+      <div v-if="queue.length || reviewOffset" class="submit-toolbar" aria-label="复审队列分页">
+        <small class="muted">第 {{ Math.floor(reviewOffset / reviewPage.pageSize) + 1 }} 页 · 本页 {{ queue.length }} 条</small>
+        <span v-if="reviewLoading" role="status">加载中…</span>
+        <span class="grow"></span>
+        <button type="button" :disabled="reviewLoading || !reviewOffset" @click="reviewPage.load(reviewOffset - reviewPage.pageSize)">上一页</button>
+        <button type="button" :disabled="reviewLoading || !reviewHasMore" @click="reviewPage.load(reviewOffset + reviewPage.pageSize)">下一页</button>
+      </div>
     </div>
 
     <!-- 待提交 -->
-    <div v-show="tab === 'submit'" class="list-panel">
+    <div v-if="tab === 'submit'" class="list-panel">
       <div class="list-head"><span>待提交</span><small>人工通过后的 SRC 报告池</small></div>
       <div class="submit-toolbar">
         <label class="inline"><input type="checkbox" v-model="submittedFilter" @change="loadTabData('submit')" /> 只看已提交</label>
@@ -1933,7 +1957,7 @@ function parseEventTs(ts) {
     </div>
 
     <!-- 通杀列 -->
-    <div v-show="tab === 'killsweep'" class="list-panel">
+    <div v-if="tab === 'killsweep'" class="list-panel">
       <div class="list-head"><span>通杀列</span><small>{{ autoKillsweep ? "复审通过后自动分析同款系统" : "已关闭自动通杀" }}；失败可直接重启</small></div>
       <div class="submit-toolbar">
         <label class="inline" :title="readonly ? '只读不能改' : '关闭后，新的复审通过不再自动开通杀'">
@@ -2030,7 +2054,7 @@ function parseEventTs(ts) {
     </div>
 
     <!-- 已驳回 -->
-    <div v-show="tab === 'rejected'" class="list-panel">
+    <div v-if="tab === 'rejected'" class="list-panel">
       <div class="list-head"><span>已驳回</span><small>沉淀不收口径，可恢复或继续深挖</small></div>
       <div v-if="!rejectedItems.length" class="empty">还没有被驳回的漏洞（复审点「不通过」会进这里，可回看与恢复）</div>
       <div v-else-if="!filteredRejected.length" class="empty">没有匹配当前关键词的驳回漏洞</div>
@@ -2047,7 +2071,7 @@ function parseEventTs(ts) {
     </div>
 
     <!-- AI 未采纳归档：ignored（疑似误杀）/ deepen 未升级，保留可回看纠错，一键救回复审 -->
-    <div v-show="tab === 'archived'" class="list-panel">
+    <div v-if="tab === 'archived'" class="list-panel">
       <div class="list-head">
         <span>AI 未采纳</span>
         <small>AI 判为非漏洞或深挖未升级的洞，保留在此防误杀，可点开查看、必要时「恢复到复审」</small>

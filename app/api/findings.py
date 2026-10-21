@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
 from app.agents.deepen import apply_deepen, deepen_cap_for
@@ -95,29 +96,66 @@ def _matches_query(data: dict, q: str | None) -> bool:
     return needle in haystack
 
 
+def _compact_finding_query(q):
+    """Do not read/decode report bodies and evidence JSON just to discard them."""
+    return q.options(
+        load_only(
+            Finding.id, Finding.task_id, Finding.target_id, Finding.vuln_type,
+            Finding.title, Finding.severity_claimed, Finding.target_url,
+            Finding.owner, Finding.status, Finding.created_at,
+            Finding.llm_model, Finding.llm_base_url, raiseload=True,
+        ),
+        load_only(
+            Review.verdict, Review.confidence, Review.severity_final, Review.score,
+            Review.in_scope, Review.is_duplicate, Review.reproduced,
+            Review.user_status, Review.user_severity, Review.user_edits,
+            Review.submitted, Review.deepen_directive, raiseload=True,
+        ),
+    )
+
+
 async def _paginated_finding_list(session, q, search, compact, limit, offset, *, post=None):
-    """统一列表：compact + 分页 + 全文搜索（与 submit_list/archived_list 同款语义）。
+    """Compact pages never wait for external ownership lookups.
 
-    默认（limit=0、compact=False）保持向后兼容：返回裸 list、全字段。量大时可传
-    limit/offset 分页（>0 时返回 {items,has_more,limit,offset}）、compact=1 精简重字段。
-    无 search 走 DB 层分页；有 search 因需跨 JSON 字段全文匹配，先全量取再过滤再切片
-    （保证跨页命中，绝不因 DB offset/limit 漏搜）。post(f,r,d) 可给每行追加字段。
+    Search compact pages against complete reports before pagination, retaining
+    the UI's space-separated AND search. Stream batches so a search need not
+    materialize every report at once. Legacy full-field exports remain intact.
     """
-    if limit and not search:
-        q = q.offset(offset).limit(limit + 1)
-    rows = (await session.execute(q)).all()
+    search = (search or "").strip()
 
-    def _mk(f, r):
-        d = _finding_dict(f, r, compact=compact)
+    def _mk(f, r, *, compact_row=compact):
+        d = _finding_dict(f, r, compact=compact_row)
         if post:
             post(f, r, d)
         return d
 
-    out = [_mk(f, r) for f, r in rows]
     if search:
-        out = [d for d in out if _matches_query(d, search)]
+        tokens = search.lower().split() if compact else [search.lower()]
+        out = []
+        matched = 0
+        rows = await session.stream(q.execution_options(yield_per=100))
+        try:
+            async for f, r in rows:
+                full = _mk(f, r, compact_row=False)
+                haystack = json.dumps(full, ensure_ascii=False, default=str).lower()
+                if not all(token in haystack for token in tokens):
+                    continue
+                matched += 1
+                if limit and matched <= offset:
+                    continue
+                out.append(_mk(f, r) if compact else full)
+                if limit and len(out) > limit:
+                    break
+        finally:
+            await rows.close()
+    else:
+        if compact:
+            q = _compact_finding_query(q)
         if limit:
-            out = out[offset:offset + limit + 1]
+            q = q.offset(offset).limit(limit + 1)
+        rows = (await session.execute(q)).all()
+        out = [_mk(f, r) for f, r in rows]
+
     if limit:
         page = out[:limit]
         if not compact:
@@ -326,7 +364,7 @@ async def user_review_queue(task_id: str, search: Optional[str] = Query(None, al
     """用户复审队列：AI accepted 且用户尚未处理（pending）的漏洞。"""
     q = select(Finding, Review).join(Review, Review.finding_id == Finding.id).where(
         Finding.task_id == task_id, Review.verdict == "accepted", Review.user_status == "pending"
-    ).order_by(Review.score.desc())
+    ).order_by(Review.score.desc(), Finding.id)
     return await _paginated_finding_list(session, q, search, compact, limit, offset)
 
 

@@ -213,3 +213,80 @@ class FindingsPaginationTest(unittest.IsolatedAsyncioTestCase):
             out = await fa.user_review_queue(self.tid, search="needlehaystack",
                                              compact=False, limit=0, offset=0, session=s)
         self.assertEqual(len(out), 3)  # 默认非 compact，搜索仍能命中 raw_request 内容
+
+    async def test_compact_page_skips_external_lookup_and_heavy_columns(self):
+        from unittest.mock import AsyncMock, patch
+        from sqlalchemy import event
+        import app.api.findings as fa
+
+        statements = []
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+        event.listen(self.engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            with patch.object(fa, "_resolve_edu_school_async", new_callable=AsyncMock) as lookup:
+                async with self.SL() as s:
+                    out = await fa.user_review_queue(self.tid, search=None, compact=True,
+                                                     limit=2, offset=0, session=s)
+                lookup.assert_not_awaited()
+        finally:
+            event.remove(self.engine.sync_engine, "before_cursor_execute", capture)
+        self.assertEqual(len(out["items"]), 2)
+        self.assertTrue(out["has_more"])
+        query = " ".join(statements).lower()
+        for column in ("findings.raw_response", "findings.evidence", "findings.assistant_messages",
+                       "findings.description", "reviews.reviewer_notes"):
+            self.assertNotIn(column, query)
+        self.assertIn("limit", query)
+
+    async def test_compact_search_covers_body_and_notes_across_pages(self):
+        from sqlalchemy import update
+        from app.db.models import Review
+        import app.api.findings as fa
+        async with self.SL() as s:
+            await s.execute(update(Review).values(user_notes="备注专用词"))
+            await s.commit()
+        async with self.SL() as s:
+            first = await fa.user_review_queue(self.tid, search="needlehaystack 备注专用词",
+                                               compact=True, limit=2, offset=0, session=s)
+        async with self.SL() as s:
+            second = await fa.user_review_queue(self.tid, search="needlehaystack 备注专用词",
+                                                compact=True, limit=2, offset=2, session=s)
+        self.assertEqual(len(first["items"]), 2)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(len(second["items"]), 1)
+        self.assertFalse(second["has_more"])
+        self.assertNotIn(second["items"][0]["id"], [r["id"] for r in first["items"]])
+        self.assertNotIn("raw_request", first["items"][0])
+
+    async def test_compact_search_finds_match_after_unmatched_first_page(self):
+        import app.api.findings as fa
+        async with self.SL() as s:
+            out = await fa.user_review_queue(self.tid, search="T0 needlehaystack",
+                                             compact=True, limit=1, offset=0, session=s)
+        self.assertEqual([r["title"] for r in out["items"]], ["T0"])
+        self.assertFalse(out["has_more"])
+
+    async def test_tied_scores_have_stable_page_order(self):
+        from sqlalchemy import update
+        from app.db.models import Review
+        import app.api.findings as fa
+        async with self.SL() as s:
+            await s.execute(update(Review).values(score=1))
+            await s.commit()
+        ids = []
+        for offset in range(3):
+            async with self.SL() as s:
+                out = await fa.user_review_queue(self.tid, search=None, compact=True,
+                                                 limit=1, offset=offset, session=s)
+                ids.append(out["items"][0]["id"])
+        self.assertEqual(ids, sorted(set(ids)))
+        self.assertEqual(len(ids), 3)
+
+    async def test_whitespace_search_uses_normal_page(self):
+        import app.api.findings as fa
+        async with self.SL() as s:
+            out = await fa.user_review_queue(self.tid, search="  ", compact=True,
+                                             limit=2, offset=2, session=s)
+        self.assertEqual(len(out["items"]), 1)
+        self.assertFalse(out["has_more"])
