@@ -28,7 +28,7 @@ from app.agents import prefilter
 from app.agents import site_collab
 from app.agents import target_cluster
 from app.agents import auth_bootstrap
-from app.agents.deepen import deepen_cap_for  # 任务级深挖上限（人工+AI+lead 合计，防死循环）
+from app.agents.deepen import deepen_cap_for  # 任务级自动深挖上限（防死循环）
 from app.agents.prompts import is_enterprise_src, should_escalate
 from app.agents.reviewer import Reviewer
 from app.agents.worker import Worker

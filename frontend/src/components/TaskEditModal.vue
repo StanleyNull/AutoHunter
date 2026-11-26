@@ -299,7 +299,7 @@ async function save() {
       <div class="settings-grid">
         <label>任务名称 <input v-model="form.name" required /></label>
         <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
-        <label>深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
+        <label>自动深挖上限 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
         <label class="check-line">
           <input type="checkbox" v-model="form.auto_killsweep" />
           复审通过后自动通杀

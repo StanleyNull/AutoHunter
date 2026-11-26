@@ -59,7 +59,7 @@ class Task(Base):
     fofa_config: Mapped[dict] = mapped_column(JSON, default=dict)       # keys/max_pages/page_size/cursor
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
-    deepen_cap: Mapped[int] = mapped_column(Integer, default=2)         # 单目标深挖回炉上限（人工+AI+lead）
+    deepen_cap: Mapped[int] = mapped_column(Integer, default=2)         # 自动回炉截止次数；人工深挖可继续
     auto_killsweep: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # 复审通过后是否自动开通杀
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
