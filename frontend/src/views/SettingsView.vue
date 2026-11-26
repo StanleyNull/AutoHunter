@@ -1360,8 +1360,8 @@ async function runCleanup() {
           </legend>
           <div class="settings-grid">
             <label>新建任务默认并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
-            <label>新建任务默认深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
-            <p class="field-hint full">同一目标被打回深挖的最大次数（人工 + AI 审核 + 自动 deepen_lead 合计）。默认 2，范围 0–10；0 表示关闭回炉。</p>
+            <label>新建任务默认自动深挖上限 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
+            <p class="field-hint full">达到上限后停止 AI 审核触发的深挖与自动回炉，人工仍可继续深挖。默认 2，范围 0–10；0 表示关闭自动回炉。</p>
             <label>低分跳过阈值
               <input v-model="form.skip_score_threshold" type="number" step="1" />
             </label>

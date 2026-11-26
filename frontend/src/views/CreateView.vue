@@ -530,7 +530,7 @@ onMounted(async () => {
           <div class="create-grid">
             <label v-if="!isSiteMode">搜集最大页数 <input v-model="form.max_pages" type="number" /></label>
             <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
-            <label>深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
+            <label>自动深挖上限 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
           </div>
           <label class="check-line">
             <input type="checkbox" v-model="form.auto_killsweep" />
@@ -544,7 +544,7 @@ onMounted(async () => {
             <p class="create-mini">仅 FOFA 生效。Quake / Hunter 等到设置页配 Key。</p>
           </template>
           <p v-else-if="!isSiteMode" class="create-mini">当前不是 FOFA：Key 用设置页「各引擎 API Key」。</p>
-          <p class="create-mini">深挖次数是同一目标被打回的上限（人工 + AI 审核 + 自动），0 表示关闭回炉。</p>
+          <p class="create-mini">达到上限后停止 AI 审核触发的深挖与自动回炉；人工仍可在复审队列继续深挖。0 表示关闭自动回炉。</p>
         </details>
       </div>
 

@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.db.models import Finding, Target
 
-DEEPEN_CAP_DEFAULT = 2  # 单 target 被打回深挖的默认次数（人工 + AI + worker deepen_lead 合计）
+DEEPEN_CAP_DEFAULT = 2  # 自动回炉的默认截止次数；人工深挖可继续进行
 DEEPEN_CAP_MAX = 10
 DEEPEN_CAP = DEEPEN_CAP_DEFAULT  # 兼容旧引用
 
 
 def clamp_deepen_cap(value: object, default: int = DEEPEN_CAP_DEFAULT) -> int:
-    """任务/设置里的深挖次数：0=关闭自动/人工深挖回炉，最大 10。"""
+    """任务/设置里的深挖次数：0=关闭自动回炉，人工深挖不受此限制。"""
     try:
         n = int(value) if value is not None else default
     except (TypeError, ValueError):
@@ -36,13 +36,14 @@ def apply_deepen(session, finding: Finding, tgt: Target | None, directive: str,
 
     session: 调用方持有的 session（同步操作 ORM 对象属性，由调用方 commit）。
     source: 'ai' / 'user'，用于 priority_reason 标注来源。
-    cap: 该任务的深挖上限；缺省用默认值 2。
+    cap: 该任务的自动深挖上限；人工发起的深挖不受此限制。
     """
     limit = clamp_deepen_cap(cap)
     directive = (directive or "").strip()
-    if not tgt or not directive or tgt.deepen_count >= limit:
+    cap_reached = source != "user" and tgt is not None and tgt.deepen_count >= limit
+    if not tgt or not directive or cap_reached:
         finding.status = "reviewed"
-        if tgt and tgt.deepen_count >= limit:
+        if cap_reached:
             why = f"深挖次数已达上限({limit})"
         elif not directive:
             why = "未给深挖指令"
