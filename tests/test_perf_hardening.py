@@ -59,6 +59,50 @@ def test_compact_messages_not_windowed_unchanged():
     assert "_summary" not in msgs[0]
 
 
+def test_compact_boundary_not_clamped_at_task_start(monkeypatch):
+    """开局 cur_round < window 时不得压缩：边界为负，窗口不能比 window 更窄。"""
+    from app.agents import history
+    from app.config import worker_config
+
+    monkeypatch.setattr(worker_config, "history_full_tool_rounds", 4)
+    monkeypatch.setattr(worker_config, "history_compact_chunk", 4)
+    msgs = [{"role": "tool", "tool_call_id": "a", "content": "FULLBODY",
+             "_round": 0, "_tool": "x"}]
+    for cur in (1, 2, 3):  # 第 1 轮起就该看到完整 body（旧实现被 max(0,..) 提前压掉）
+        out = history.compact_messages(msgs, cur)
+        assert out[0]["content"] == "FULLBODY", f"cur_round={cur} 提前压缩了未越窗消息"
+        assert "_summary" not in msgs[0]
+
+
+def test_compact_boundary_quantized_by_chunk(monkeypatch):
+    """边界按 chunk 整数倍推进：同一 chunk 内不改写历史，跨过整倍才推进。"""
+    from app.agents import history
+    from app.config import worker_config
+
+    monkeypatch.setattr(worker_config, "history_full_tool_rounds", 4)
+    monkeypatch.setattr(worker_config, "history_compact_chunk", 4)
+
+    def _msgs():
+        return [
+            {"role": "tool", "tool_call_id": f"c{i}", "content": f"BODY{i}" + "x" * 100,
+             "_round": i, "_tool": "run_shell"}
+            for i in range(5)
+        ]
+
+    # cur=7 → boundary=(7-4)//4*4=0：只有第 0 轮越界，1~3 轮必须保持完整
+    msgs = _msgs()
+    history.compact_messages(msgs, 7)
+    assert "_summary" in msgs[0]
+    for i in (1, 2, 3):
+        assert "_summary" not in msgs[i], f"第 {i} 轮未越界却被改写，chunk 内前缀不稳"
+        assert msgs[i]["content"].startswith(f"BODY{i}")
+    # cur=8 → boundary=4：边界跨到 4，第 4 轮同时被压缩
+    msgs = _msgs()
+    history.compact_messages(msgs, 8)
+    assert "_summary" in msgs[0]
+    assert "_summary" in msgs[4]
+
+
 # ---------- #2C ip138 查询结果按 IP 缓存 ----------
 def test_lookup_ip_is_cached(monkeypatch):
     from app.tools import edu_ip

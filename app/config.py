@@ -48,6 +48,10 @@ class WorkerConfig(BaseModel):
     # 压成一行摘要（保留状态/长度/关键字段，丢弃大 body）。这是省 token 的核心：
     # 模型决策主要依赖最近几轮，远古完整响应每轮重发是 190M 输入的主因。
     history_full_tool_rounds: int = int(os.environ.get("WORKER_HISTORY_FULL_TOOL_ROUNDS", "4"))
+    # 压缩边界量化步长。滑动窗口每轮推进一条，等于每轮都改写历史中间的一条 tool 消息，
+    # 该点之后的前缀缓存随之全部失效。量化后边界每 chunk 轮才推进一次，同一 chunk 内
+    # 不再改写历史，前缀保持稳定。1 = 关闭量化（退回旧的逐轮推进行为）。
+    history_compact_chunk: int = max(1, int(os.environ.get("WORKER_HISTORY_COMPACT_CHUNK", "4")))
     # 硬上限：单目标最大工具调用轮数（LLM 自主决定 finish，这是兜底防失控）
     max_rounds: int = int(os.environ.get("WORKER_MAX_ROUNDS", "90"))
     # 软引导阈值：超过此轮数后每轮催 worker 收尾，减少低价值空转（不硬杀，保质量）
