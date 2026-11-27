@@ -412,6 +412,7 @@ body="管理" && org="China Education and Research Network Center"
 | `AUTOHUNTER_TOOL_COMPAT` | 默认 `auto` | 工具调用兼容：`auto` 原生优先、硬报错自动切提示词模拟；`prompt` 强制模拟（哑模型用）；`native` 仅原生 | 模型不支持 function calling 时改 `prompt` |
 | `FOFA_KEY` | ⭐ 推荐 | 资产测绘，自动搜集目标 | [FOFA 个人中心](https://fofa.info/) |
 | `FOFA_BASE_URL` | 可选 | 自定义 FOFA API 端点（私有/镜像/代理） | 默认 `https://fofa.info` |
+| `OUTBOUND_ALLOWED_HOSTS` | 可选 | 出站白名单（逗号分隔，按 host 精确匹配）。代理开 fake-ip 把公网域名解析到 `198.18.0.0/15`，会报「base_url 不被允许：目标解析到私有/保留地址」，把域名填这里放行 | 例 `opencode.ai,api.deepseek.com`；云元数据地址始终拦截 |
 | `AUTOHUNTER_API_TOKEN` | ⭐ 强烈建议 | 控制台全权限令牌，**不设则任何人可访问** | `install.sh` 自动生成，或自填随机串 |
 | `AUTOHUNTER_HOST_PORT` | 默认 18800 | 对外访问端口 | 按需 |
 
