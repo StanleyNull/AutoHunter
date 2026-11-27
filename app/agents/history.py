@@ -179,8 +179,19 @@ def compact_messages(messages: list[dict[str, Any]], cur_round: int) -> list[dic
     """生成发送给 LLM 的瘦身副本：超窗口的旧 tool 响应压成摘要，剥离内部 _round/_tool 字段。
 
     不带元字段的 tool 消息按 cur_round 处理（视为最新，不压缩）。
+
+    压缩边界按 chunk 量化：只有跨过 chunk 整数倍时边界才推进，同一 chunk 内不再改写
+    任何历史 tool 消息。逐轮推进的滑动窗口会让前缀在每轮都从改写点起全部失效，量化后
+    前缀在 chunk 内保持稳定，缓存命中率显著提升。边界恒 <= cur_round - window，
+    因此完整窗口只会比 window 更宽，不会更窄。
+
+    边界允许为负（开局 cur_round < window 时）：此时 `rnd <= boundary` 对任何实际轮次
+    都不成立，不做压缩。不要在这里把边界钳到 0，那会让第 0 轮的消息提前被摘要，
+    与上面「窗口不会更窄」的约定相悖。
     """
     window = worker_config.history_full_tool_rounds
+    chunk = worker_config.history_compact_chunk
+    boundary = ((cur_round - window) // chunk) * chunk
     out: list[dict[str, Any]] = []
     for m in messages:
         if m.get("role") != "tool":
@@ -193,15 +204,15 @@ def compact_messages(messages: list[dict[str, Any]], cur_round: int) -> list[dic
             "tool_call_id": m.get("tool_call_id"),
             "content": m.get("content", ""),
         }
-        if cur_round - rnd >= window:
-            # 首次越窗时才摘要，并把结果缓存到【原始】消息 m 上跨轮复用，避免旧 tool 消息
+        if rnd <= boundary:
+            # 首次越界时才摘要，并把结果缓存到【原始】消息 m 上跨轮复用，避免旧 tool 消息
             # 每轮都重新 json 解析+压缩（O(rounds²)）。_summary 是内部字段，绝不进 clean、
             # 不泄漏给 LLM、不影响 tool_call_id 配对。
             summ = m.get("_summary")
             if summ is None:
                 summ = summarize_tool_content(m.get("content", ""), tool)
                 m["_summary"] = summ
-            # 越窗后丢掉原始大 body，只留摘要，避免对话历史在进程里只增不减。
+            # 越界后丢掉原始大 body，只留摘要，避免对话历史在进程里只增不减。
             if m.get("content") != summ:
                 m["content"] = summ
             clean["content"] = summ
