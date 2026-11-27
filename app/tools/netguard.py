@@ -12,11 +12,17 @@ Worker/killsweep/report_assistant 主动挖洞的 http_request/run_shell 属于�
 但挖洞请求必须走 `is_loopback_target`：域名若解析到 127.0.0.1/::1，worker 会打到
 AutoHunter 自己，产出「未授权访问 / 泄露漏洞报告」之类假洞（Issue #49）。
 只拦回环与未指定地址，不拦 10/8、192.168/16。
+
+代理软件（Clash/mihomo/sing-box 等）的 fake-ip 模式会把公网域名解析到
+198.18.0.0/15，本模块会把它当成私有地址误杀。用 `OUTBOUND_ALLOWED_HOSTS`
+（逗号分隔，按 hostname 精确匹配）显式放行这类域名；`FOFA_ALLOWED_HOSTS`
+作为兼容别名一并生效。
 """
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
 import socket
 from urllib.parse import urlparse
@@ -46,10 +52,49 @@ def _ip_is_forbidden(ip: ipaddress._BaseAddress) -> bool:
     )
 
 
+def _normalize_host_entry(entry: str) -> str:
+    """把白名单条目归一化成小写 hostname（容忍粘贴成 URL / 带端口 / 带方括号）。"""
+    value = (entry or "").strip().lower()
+    if not value:
+        return ""
+    if "://" in value:
+        try:
+            value = (urlparse(value).hostname or "").strip().lower()
+        except ValueError:
+            return ""
+    elif value.startswith("["):
+        end = value.find("]")
+        if end > 0:
+            value = value[1:end]
+    elif value.count(":") == 1:
+        left, right = value.rsplit(":", 1)
+        if right.isdigit():
+            value = left
+    return value.rstrip(".")
+
+
+def _env_allowed_hosts() -> set[str]:
+    """读取环境变量白名单；每次调用时读取，容器重启/测试改 env 都即时生效。"""
+    raw = " ".join(
+        (
+            os.environ.get("OUTBOUND_ALLOWED_HOSTS", ""),
+            os.environ.get("FOFA_ALLOWED_HOSTS", ""),
+        )
+    )
+    hosts: set[str] = set()
+    for part in re.split(r"[,;\s]+", raw):
+        host = _normalize_host_entry(part)
+        if host:
+            hosts.add(host)
+    return hosts
+
+
 def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = None) -> str:
     """校验并返回原 URL；不安全时抛 SsrfBlocked。
 
     allow_extra_hosts：显式放行的 host（如用户在 env 里配置的私有 FOFA 代理域名）。
+    环境变量 OUTBOUND_ALLOWED_HOSTS / FOFA_ALLOWED_HOSTS 的白名单同样生效，
+    用于放行被代理 fake-ip 解析到 198.18.0.0/15 的公网域名。
     """
     raw = str(url or "").strip()
     if not raw:
@@ -68,12 +113,12 @@ def assert_safe_outbound_url(url: str, *, allow_extra_hosts: set[str] | None = N
     if not host:
         raise SsrfBlocked("URL 缺少主机名")
 
-    extra = {h.strip().lower() for h in (allow_extra_hosts or set()) if h}
-    if host in extra:
-        return raw
-
     if host in _METADATA_HOSTS:
         raise SsrfBlocked("目标为云元数据地址，已拦截")
+
+    extra = {_normalize_host_entry(h) for h in (allow_extra_hosts or set()) if h}
+    if host in (extra | _env_allowed_hosts()):
+        return raw
 
     # 逐个解析出的 IP 校验（含 IPv6、DNS 到内网的情形）。
     from app.urlnorm import safe_port
