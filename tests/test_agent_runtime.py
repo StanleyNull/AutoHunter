@@ -27,7 +27,16 @@ class AutoWorkerBaseTests(unittest.TestCase):
         self.assertEqual(_auto_worker_base_from(64, 256.0), 32)
 
     def test_memory_bound_small_ram(self):
-        self.assertEqual(_auto_worker_base_from(8, 2.0), 4)
+        self.assertEqual(_auto_worker_base_from(8, 2.0), 5)
+
+    def test_4c4g_not_over_constrained_by_memory(self):
+        # 4C/3.6G 是常见云主机规格：按 250MB/槽位算 by_mem=14，最终由 CPU 档 12 收口。
+        # 早期按 500MB/槽位会把这里压到 7，实测同规格跑 18~20 路时 load 仍低于 1。
+        self.assertEqual(_auto_worker_base_from(4, 3.6), 12)
+
+    def test_memory_no_longer_dominates_normal_box(self):
+        # 8C/8G：by_mem=32 时不应再成为瓶颈，应跟 CPU 档 20 走。
+        self.assertEqual(_auto_worker_base_from(8, 8.0), 20)
 
     def test_unknown_memory_uses_cpu_only(self):
         self.assertEqual(_auto_worker_base_from(4, 0), 12)
