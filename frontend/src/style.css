@@ -1788,6 +1788,26 @@ main {
   bottom: calc(72px + env(safe-area-inset-bottom, 0px));
 }
 
+/* 工作目录卡片内的二级区块（容器内 /tmp） */
+.workdir-subpanel {
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.workdir-subpanel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.workdir-subpanel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.workdir-subpanel-path {
+  font-size: 12px;
+  color: var(--muted, #888);
+}
 /* ---------- 工作目录管理 ---------- */
 .workdir-panel {
   display: flex;

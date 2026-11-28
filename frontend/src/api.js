@@ -336,6 +336,9 @@ export const api = {
   workdirStats: () => req("GET", "/api/settings/workdir/stats"),
   workdirCleanup: (retentionDays) =>
     req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: false })}`),
+  // 容器内 /tmp 清理（占用统计随 workdirStats 一起返回，见 .tmp 字段）
+  tmpCleanup: (retentionDays) =>
+    req("POST", `/api/settings/workdir/tmp-cleanup${qs({ retention_days: retentionDays, dry_run: false })}`),
   backupStatus: () => req("GET", "/api/backup/status"),
   backupSnapshot: () => req("POST", "/api/backup/snapshot"),
   downloadBackupExport: (includeWork = false) =>
