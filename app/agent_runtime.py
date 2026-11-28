@@ -114,6 +114,13 @@ def _detect_mem_gib() -> float:
     return min(vals) if vals else 0.0
 
 
+# 每个 worker 槽位预留的常驻内存（GB）。实测常驻约 65MB，JS 分析瞬时 200~400MB，
+# 取 250MB 作为「常驻 + 一个浏览器实例波动」的折中值。
+WORKER_MEM_GB_PER_SLOT = 0.25
+# 小内存机器（<3GB）留更宽的余量，避免和系统进程抢内存。
+WORKER_MEM_GB_PER_SLOT_SMALL = 0.4
+
+
 def _auto_worker_base_from(cpus: float, mem_gib: float) -> int:
     """把机器规格映射成 worker 并发。纯函数，方便单测。
 
@@ -121,6 +128,13 @@ def _auto_worker_base_from(cpus: float, mem_gib: float) -> int:
     - 不按核数 1:1（28 核不代表 28 worker）；
     - 硬顶 32，避免把 LLM 上游和本机句柄打满；
     - 小机器按 CPU / 内存里更紧的那个降档，1C1G 也能起步。
+
+    内存口径（WORKER_MEM_GB_PER_SLOT）：单 worker 常驻 RSS 实测约 65MB
+    （等待 LLM 时几乎不占内存、不吃 CPU），只有在跑 JS 分析、临时拉起
+    Playwright/Camoufox 时才会瞬时涨到 200~400MB。所以按 250MB/槽位估算，
+    既留出「一个浏览器实例」的波动余量，又不会像早期按 500MB/槽位那样
+    把 4C4G 之类的常见机器压到 7 路（实测同规格跑 18~20 路时 load 仍低于 1）。
+    需要更大并发时用 AUTOHUNTER_WORKER_MAX_CONCURRENCY 显式覆盖。
     """
     if cpus <= 1:
         by_cpu = 4
@@ -139,9 +153,9 @@ def _auto_worker_base_from(cpus: float, mem_gib: float) -> int:
     elif mem_gib < 1.5:
         by_mem = 3
     elif mem_gib < 3:
-        by_mem = max(4, int(mem_gib / 0.6))
+        by_mem = max(4, int(mem_gib / WORKER_MEM_GB_PER_SLOT_SMALL))
     else:
-        by_mem = max(4, int(mem_gib / 0.5))
+        by_mem = max(4, int(mem_gib / WORKER_MEM_GB_PER_SLOT))
     return max(3, min(by_cpu, by_mem, 32))
 
 
