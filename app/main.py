@@ -44,6 +44,7 @@ from app.settings_service import init_settings_cache
 from app.proxy_service import init_proxy_cache
 from app.security import SECURITY_HEADERS, auth_enabled, protected_path, request_allowed, resolve_role, token_from_headers
 from app.waf import WAF_BLOCK_MODE, inspect_request, waf_headers
+from app.tmp_cleanup import run_periodic_tmp_cleanup
 from app.workdir_cleanup import run_periodic_cleanup
 from app.memory import run_periodic_memory_reclaim
 
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI):
     asyncio.get_running_loop().set_default_executor(default_executor)
     lag_monitor = asyncio.create_task(_loop_lag_monitor())
     cleanup_task = asyncio.create_task(run_periodic_cleanup())
+    tmp_cleanup_task = asyncio.create_task(run_periodic_tmp_cleanup())
     memory_task = asyncio.create_task(run_periodic_memory_reclaim())
     backup_task = asyncio.create_task(run_periodic_backup())
     wal_task = asyncio.create_task(run_periodic_wal_checkpoint())
@@ -157,10 +159,11 @@ async def lifespan(app: FastAPI):
     finally:
         lag_monitor.cancel()
         cleanup_task.cancel()
+        tmp_cleanup_task.cancel()
         memory_task.cancel()
         backup_task.cancel()
         wal_task.cancel()
-        for t in (lag_monitor, cleanup_task, memory_task, backup_task, wal_task):
+        for t in (lag_monitor, cleanup_task, tmp_cleanup_task, memory_task, backup_task, wal_task):
             try:
                 await t
             except asyncio.CancelledError:

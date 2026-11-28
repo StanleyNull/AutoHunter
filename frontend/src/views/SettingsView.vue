@@ -34,6 +34,10 @@ const workdirCleaning = ref(false);
 const workdirStats = ref(null);
 const workdirResult = ref(null);
 const cleanupRetentionDays = ref(7);
+// 容器内 /tmp 清理状态（占用统计随 workdirStats 一起返回，取 .tmp 字段）
+const tmpCleaning = ref(false);
+const tmpResult = ref(null);
+const tmpRetentionDays = ref(2);
 const backupLoading = ref(false);
 const backupBusy = ref("");
 const backupStats = ref(null);
@@ -947,6 +951,7 @@ async function loadWorkdirStats() {
     workdirStats.value = await api.workdirStats();
     if (workdirStats.value) {
       cleanupRetentionDays.value = workdirStats.value.retention_days || 7;
+      tmpRetentionDays.value = workdirStats.value.tmp?.retention_days ?? 2;
     }
   } catch (e) {
     toast(String(e.message || e).replace(/^\d+\s*/, ""));
@@ -973,6 +978,32 @@ async function runCleanup() {
     toast(String(e.message || e).replace(/^\d+\s*/, ""));
   } finally {
     workdirCleaning.value = false;
+  }
+}
+
+// 容器内 /tmp 清理：worker 的下载物（apk/exe/heapdump/JS dump）都落在这里，
+// 不属于工作目录，所以单独一条清理链路。
+async function runTmpCleanup() {
+  const days = Number(tmpRetentionDays.value);
+  if (!Number.isFinite(days) || days < 0) {
+    toast("保留天数不能为负数");
+    return;
+  }
+  const tip = days > 0
+    ? `将删除 /tmp 下超过 ${days} 天未写入的文件，并在总量超过上限时按最旧优先继续删。最近 30 分钟动过的不动。确定清理？`
+    : `保留天数为 0：只按总量上限清理（按最旧优先），最近 30 分钟动过的文件不动。确定清理？`;
+  if (!confirm(tip)) return;
+  tmpCleaning.value = true;
+  tmpResult.value = null;
+  try {
+    const res = await api.tmpCleanup(days);
+    tmpResult.value = res;
+    toast(`已清理 ${res.deleted_entries} 项，释放 ${res.freed_human}`);
+    await loadWorkdirStats();
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    tmpCleaning.value = false;
   }
 }
 </script>
@@ -1458,7 +1489,7 @@ async function runCleanup() {
 
         <fieldset v-show="settingsTab === 'data'" class="settings-block">
           <legend>
-            <span>工作目录管理</span>
+            <span>工作目录与临时目录</span>
             <small>Worker / Escalate 等 agent 产生的临时文件磁盘占用与清理</small>
           </legend>
           <div v-if="workdirLoading" class="field-hint">加载中…</div>
@@ -1529,6 +1560,69 @@ async function runCleanup() {
                     <span class="workdir-item-name">{{ d.name }}</span>
                     <span class="workdir-item-age">{{ d.error }}</span>
                   </div>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <!-- 容器内 /tmp：worker 的下载物落在这里，不计入工作目录，单独一条清理链路 -->
+          <div v-if="workdirStats?.tmp" class="workdir-panel workdir-subpanel">
+            <div class="workdir-subpanel-head">
+              <span class="workdir-subpanel-title">临时目录</span>
+              <code class="workdir-subpanel-path">{{ workdirStats.tmp.tmp_root }}</code>
+            </div>
+            <div class="workdir-stats-grid">
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">磁盘占用</span>
+                <b class="workdir-stat-value">{{ workdirStats.tmp.total_size_human }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">可清理</span>
+                <b class="workdir-stat-value small">{{ workdirStats.tmp.deletable_size_human }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">自动清理</span>
+                <b class="workdir-stat-value" :class="workdirStats.tmp.auto_cleanup_enabled ? 'on' : 'off'">
+                  {{ workdirStats.tmp.auto_cleanup_enabled ? `已开启（${workdirStats.tmp.retention_days}天）` : '已关闭' }}
+                </b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">总量上限</span>
+                <b class="workdir-stat-value small">{{ workdirStats.tmp.max_human || '不限' }}</b>
+              </div>
+            </div>
+            <p class="field-hint">
+              worker 挖洞时下载的 apk / exe / heapdump / JS 转储都落在这里，不计入工作目录。
+              超过 {{ workdirStats.tmp.retention_days }} 天未写入的会被清掉，总量超过上限时按最旧优先继续删，最近 30 分钟动过的不动。
+              共 {{ workdirStats.tmp.entries }} 项，其中 {{ workdirStats.tmp.deletable_entries }} 项可清理。
+            </p>
+            <div class="workdir-cleanup-controls">
+              <label class="workdir-retention-label">
+                清理保留天数
+                <input v-model.number="tmpRetentionDays" type="number" min="0" max="365" />
+              </label>
+              <button type="button" :disabled="tmpCleaning" @click="runTmpCleanup">
+                {{ tmpCleaning ? "清理中…" : "清理临时文件" }}
+              </button>
+            </div>
+            <div v-if="tmpResult" class="workdir-result">
+              <div class="workdir-result-summary">
+                <span>清理完成</span>
+                <span>扫描 {{ tmpResult.scanned_entries }} 项</span>
+                <span>删除 {{ tmpResult.deleted_entries }} 项</span>
+                <span v-if="tmpResult.failed_entries">失败 {{ tmpResult.failed_entries }} 项</span>
+                <span>释放 {{ tmpResult.freed_human }}</span>
+              </div>
+              <details v-if="tmpResult.deleted?.length" class="workdir-result-details">
+                <summary>已清理条目（{{ tmpResult.deleted.length }}）</summary>
+                <div class="workdir-result-list">
+                  <div v-for="d in tmpResult.deleted.slice(0, 100)" :key="d.name" class="workdir-result-item">
+                    <span class="workdir-item-name">{{ d.name }}</span>
+                    <span class="workdir-item-size">{{ d.size_human }}</span>
+                  </div>
+                  <p v-if="tmpResult.deleted.length > 100" class="field-hint">
+                    仅显示前 100 条，共 {{ tmpResult.deleted.length }} 条
+                  </p>
                 </div>
               </details>
             </div>

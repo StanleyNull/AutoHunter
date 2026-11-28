@@ -73,6 +73,18 @@ class WorkerConfig(BaseModel):
     # 自动清理检查间隔（小时）
     work_cleanup_interval_hours: int = int(os.environ.get("WORKER_WORK_CLEANUP_INTERVAL_HOURS", "6"))
 
+    # ---- 容器内临时目录（/tmp）自动清理 ----
+    # worker 的下载物（apk/exe/heapdump/JS dump/chromium profile）落在 /tmp，
+    # 不属于 work_root，workdir_cleanup 覆盖不到，长期运行会把容器可写层撑爆。
+    # 临时目录根（容器内路径；一般不用改）
+    tmp_root: str = os.environ.get("WORKER_TMP_ROOT", "/tmp")
+    # 超过此天数未活动的条目将被删除（0=不按天数清理，只看上限）
+    tmp_retention_days: int = int(os.environ.get("WORKER_TMP_RETENTION_DAYS", "2"))
+    # 总量上限（GB）。超过时按最旧优先删到阈值以下（0=不按上限清理）
+    tmp_max_gb: float = float(os.environ.get("WORKER_TMP_MAX_GB", "4"))
+    # 临时目录清理检查间隔（小时）
+    tmp_cleanup_interval_hours: int = int(os.environ.get("WORKER_TMP_CLEANUP_INTERVAL_HOURS", "6"))
+
     def rounds_for(self, src_type: str | None) -> tuple[int, int]:
         """按 src_type 返回 (max_rounds, soft_rounds)。企业模式给更大深挖预算。"""
         st = (src_type or "").strip().lower()

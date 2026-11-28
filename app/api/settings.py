@@ -1,6 +1,8 @@
 """全局系统配置 API。"""
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import functools
 import re
@@ -21,6 +23,7 @@ from app.llm.client import (
     llm_request_url,
 )
 from app.tools.netguard import SsrfBlocked, assert_safe_outbound_url
+from app.tmp_cleanup import cleanup_tmp, get_tmp_stats
 from app.workdir_cleanup import cleanup_workdir, get_workdir_stats
 from app.ui_prefs import (
     MAX_WALLPAPER_BYTES,
@@ -43,6 +46,8 @@ from app.settings_service import (
     resolve_llm_providers,
     update_settings,
 )
+
+logger = logging.getLogger("autohunter.api.settings")
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -406,9 +411,32 @@ async def put_settings(
 
 @router.get("/workdir/stats")
 async def workdir_stats():
-    """获取工作目录磁盘占用统计。"""
+    """获取磁盘占用统计：工作目录 + 容器内 /tmp 临时目录。
+
+    两者是两套独立清理策略（work_retention_days vs tmp_retention_days），
+    合并到同一个响应里，前端一次调用即可同时展示，不必新增接口。
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, get_workdir_stats)
+    payload = await loop.run_in_executor(None, get_workdir_stats)
+    # 临时目录统计失败不应让整块磁盘面板报错，降级成 None 由前端判空。
+    try:
+        payload["tmp"] = await loop.run_in_executor(None, get_tmp_stats)
+    except Exception:  # noqa: BLE001
+        logger.warning("获取 /tmp 占用统计失败", exc_info=True)
+        payload["tmp"] = None
+    return payload
+
+
+@router.post("/workdir/tmp-cleanup")
+async def tmp_cleanup(
+    retention_days: int | None = Query(default=None, ge=0, le=365, description="保留天数，留空用配置默认值，0=不按天数清"),
+    dry_run: bool = Query(default=True, description="默认只模拟；要真删必须 dry_run=false"),
+):
+    """手动触发容器内 /tmp 清理（按天数 + 总量上限，见 app/tmp_cleanup.py）。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, functools.partial(cleanup_tmp, retention_days=retention_days, dry_run=dry_run)
+    )
 
 
 @router.post("/workdir/cleanup")
